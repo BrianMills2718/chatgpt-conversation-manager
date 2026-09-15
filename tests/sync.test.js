@@ -5,14 +5,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { SyncScheduler } from '../server/sync.js';
 
-function setup({ connected = 1, completion, dispatchError = null, openCommand = null } = {}) {
+function setup({ connected = 1, completion, dispatchError = null, openCommand = null, oldExtension = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sync-test-'));
   const archive = { readCatalog: () => ({ threads: { a: { last_captured_at: '2026-09-14T20:00:00.000Z' }, b: {} } }) };
   const sent = [];
   let conn = connected;
   const sched = new SyncScheduler({
     archive,
-    dispatch: async (cmd) => { sent.push(cmd); if (dispatchError) throw dispatchError; return { ok: true, started: true }; },
+    dispatch: async (cmd) => {
+      sent.push(cmd);
+      if (cmd.action === 'get_capabilities') { if (oldExtension) throw new Error('Unknown action: get_capabilities'); return { ok: true, incremental_archive: true }; }
+      if (dispatchError) throw dispatchError;
+      return { ok: true, started: true };
+    },
     connectionCount: () => conn,
     waitForBulkComplete: () => completion,
     statusPath: path.join(dir, 'metadata', 'sync-status.json'),
@@ -26,7 +31,7 @@ function setup({ connected = 1, completion, dispatchError = null, openCommand = 
 test('a successful run sends known capture times and records the summary', async () => {
   const { sched, sent } = setup({ completion: Promise.resolve({ mode: 'incremental', listed: 800, total: 3, skipped: 797, archived: 3, failed: [], fatal_error: null }) });
   const status = await sched.runOnce();
-  assert.deepEqual(sent, [{ action: 'archive_all_chats', known: { a: '2026-09-14T20:00:00.000Z' } }]);
+  assert.deepEqual(sent, [{ action: 'get_capabilities' }, { action: 'archive_all_chats', known: { a: '2026-09-14T20:00:00.000Z' } }]);
   assert.equal(status.in_progress, false);
   assert.equal(status.last_error, null);
   assert.deepEqual(status.last_result, { mode: 'incremental', listed: 800, fetched: 3, skipped: 797, archived: 3, failed: 0 });
@@ -54,4 +59,18 @@ test('a prior success survives a later failure so staleness stays visible', asyn
   const second = await ok.sched.runOnce();
   assert.equal(second.last_success_at, first.last_success_at);
   assert.match(second.last_error, /boom/);
+});
+
+test('an extension without incremental support is refused before any archive command', async () => {
+  const { sched, sent } = setup({ oldExtension: true, completion: new Promise(() => {}) });
+  const status = await sched.runOnce();
+  assert.deepEqual(sent.map((c) => c.action), ['get_capabilities']);
+  assert.match(status.last_error, /running old code.*Unknown action/);
+});
+
+test('nextDelayMs retries a failed run sooner and keeps the interval after success', () => {
+  const H6 = 6 * 60 * 60 * 1000;
+  assert.equal(SyncScheduler.nextDelayMs({ last_success_at: '2026-09-15T01:00:00.000Z', last_error: null }, H6), H6);
+  assert.equal(SyncScheduler.nextDelayMs({ last_error: 'x', last_error_at: '2026-09-15T01:00:00.000Z' }, H6), 30 * 60 * 1000);
+  assert.equal(SyncScheduler.nextDelayMs({ last_error: 'old', last_error_at: '2026-09-15T00:00:00.000Z', last_success_at: '2026-09-15T01:00:00.000Z' }, H6), H6);
 });

@@ -602,6 +602,8 @@ async function moveToProjectViaVisibleUi(projectName, targetThreadId) {
 // that may cover hundreds of conversations).
 
 let bulkArchiving = false;
+const BULK_FETCH_SPACING_MS = 2500;
+const CAPABILITIES = { incremental_archive: true, rate_limit_recovery: true, bulk_fetch_spacing_ms: BULK_FETCH_SPACING_MS };
 
 // `known` (thread id -> last_captured_at) switches to incremental mode: only
 // conversations new or updated since their last capture are fetched.
@@ -647,7 +649,10 @@ async function archiveAllChats({ known = null } = {}) {
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "bulk_archive_progress", done: summary.archived + summary.failed.length, total: summary.total, archived: summary.archived, failed: summary.failed.length }));
       }
-      await sleep(200); // be gentle on ChatGPT's API
+      // ChatGPT rate-limits conversation fetches: at 200ms spacing a full run of
+      // ~800 hit HTTP 429 after ~170 (2026-09-14). Slower spacing plus
+      // captureWithRecovery's backoff keeps long runs inside the limit.
+      await sleep(BULK_FETCH_SPACING_MS);
     }
   } catch (err) {
     summary.fatal_error = err.message;
@@ -704,6 +709,7 @@ async function handleCommand(msg) {
     location.href = `https://chatgpt.com/c/${threadId}`;
     return { thread_id: threadId, navigated: true };
   }
+  if (msg.action === "get_capabilities") return CAPABILITIES;
   if (msg.action === "archive_all_chats") {
     if (bulkArchiving) throw new Error("A bulk archive is already running.");
     archiveAllChats({ known: msg.known || null }).catch((err) => log("error", "bulk archive failed", err));

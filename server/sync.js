@@ -62,6 +62,13 @@ export class SyncScheduler {
     this.writeStatus({ last_attempt_at: startedAt, in_progress: true });
     try {
       await this.ensureConnected();
+      // An extension still running pre-0.4 code ignores `known` and would
+      // re-fetch every conversation at full speed, so refuse to start with it.
+      let caps = null;
+      try { caps = await this.dispatch({ action: 'get_capabilities' }); } catch (err) { caps = { error: err.message }; }
+      if (!caps?.incremental_archive) {
+        throw new Error(`Chrome extension is running old code (${caps?.error || 'no incremental support'}); reload it at chrome://extensions and refresh the ChatGPT tab.`);
+      }
       const completion = this.waitForBulkComplete(this.runTimeoutMs);
       await this.dispatch({ action: 'archive_all_chats', known: this.knownThreads() });
       const result = await completion;
@@ -78,12 +85,25 @@ export class SyncScheduler {
     }
   }
 
-  start(intervalMs) {
+  // After a failed run, retry sooner than the normal interval (a closed tab or
+  // a stale extension is usually fixed within minutes, not hours).
+  static nextDelayMs(status, intervalMs, retryMs = 30 * 60 * 1000) {
+    return status?.last_error && (!status.last_success_at || status.last_error_at > status.last_success_at) ? Math.min(intervalMs, retryMs) : intervalMs;
+  }
+
+  start(intervalMs, { firstRunMs = 60 * 1000 } = {}) {
     // Clear a stale in_progress flag left by a server that died mid-run.
     this.writeStatus({ in_progress: false, interval_minutes: Math.round(intervalMs / 60000) });
-    const tick = () => { this.runOnce(); };
-    setTimeout(tick, 60 * 1000); // first run shortly after startup
-    this.timer = setInterval(tick, intervalMs);
+    const schedule = (delay) => {
+      this.timer = setTimeout(async () => {
+        const status = await this.runOnce();
+        const next = SyncScheduler.nextDelayMs(status, intervalMs);
+        this.writeStatus({ next_run_at: new Date(Date.now() + next).toISOString() });
+        schedule(next);
+      }, delay);
+    };
+    this.writeStatus({ next_run_at: new Date(Date.now() + firstRunMs).toISOString() });
+    schedule(firstRunMs);
     return this;
   }
 }
