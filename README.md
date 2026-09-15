@@ -117,6 +117,14 @@ runs `SYNC_OPEN_CHATGPT_CMD` first and waits up to 90s for one.
   hidden launcher to the Startup folder that runs `scripts/run-server.sh`
   (skips if the broker is already up; logs to `data/logs/server.log`).
 
+Speed is set by ChatGPT, not this tool. Measured 2026-09-14: after a burst,
+the conversation endpoint allowed roughly one fetch per 40-60 seconds, so a
+600-chat backlog takes on the order of 8-10 hours. The extension paces itself
+adaptively (shorter gap after each success, doubled gap on HTTP 429, learned gap
+reused next run; see `spacing_ms` / `rate_limited` in progress and
+`last_result.pacing`). For a large backlog, the official export plus
+`scripts/import-chatgpt-export.js` may be faster.
+
 Requirements that automation cannot remove: Chrome must be running and signed
 in to ChatGPT with this extension enabled, and the computer must be awake.
 Not yet checked: whether conversations you archived inside ChatGPT appear in
