@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations } from '../extension/lib/api-capture.js';
+import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations, captureWithRecovery } from '../extension/lib/api-capture.js';
 
 test('parseRemoteTime accepts epoch seconds, epoch ms, numeric strings and ISO strings', () => {
   assert.equal(parseRemoteTime(1757900000.5), 1757900000500);
@@ -207,4 +207,51 @@ test('getConversationProjectId throws on a non-OK response, distinguishable from
     return { ok: false, status: 404 };
   };
   await assert.rejects(() => getConversationProjectId('t1', { fetchImpl }), /HTTP 404/);
+});
+
+const httpErr = (status) => Object.assign(new Error(`HTTP ${status}`), { status });
+
+test('captureWithRecovery refreshes an expired token once and retries', async () => {
+  const tokenRef = { token: 'old' };
+  const seen = [];
+  const result = await captureWithRecovery('t1', {
+    tokenRef,
+    capture: async (_id, { accessToken }) => { seen.push(accessToken); if (accessToken === 'old') throw httpErr(401); return { title: 'ok', messages: [] }; },
+    refreshToken: async () => 'new',
+    sleep: async () => {},
+  });
+  assert.equal(result.title, 'ok');
+  assert.deepEqual(seen, ['old', 'new']);
+  assert.equal(tokenRef.token, 'new');
+});
+
+test('captureWithRecovery does not loop on a token that stays rejected', async () => {
+  await assert.rejects(
+    captureWithRecovery('t1', { tokenRef: { token: 'x' }, capture: async () => { throw httpErr(401); }, refreshToken: async () => 'y', sleep: async () => {} }),
+    (err) => err.status === 401 && !err.abortRun,
+  );
+});
+
+test('captureWithRecovery backs off on 429, then marks the run for abort', async () => {
+  const waits = [];
+  let calls = 0;
+  const ok = await captureWithRecovery('t1', {
+    tokenRef: { token: 'x' },
+    capture: async () => { calls++; if (calls < 3) throw httpErr(429); return { title: 'late', messages: [] }; },
+    sleep: async (ms) => { waits.push(ms); },
+    backoffMs: [5, 10, 20],
+  });
+  assert.equal(ok.title, 'late');
+  assert.deepEqual(waits, [5, 10]);
+  await assert.rejects(
+    captureWithRecovery('t1', { tokenRef: { token: 'x' }, capture: async () => { throw httpErr(429); }, sleep: async () => {}, backoffMs: [1, 2] }),
+    (err) => err.abortRun === true && err.status === 429,
+  );
+});
+
+test('captureWithRecovery passes other errors straight through', async () => {
+  await assert.rejects(
+    captureWithRecovery('t1', { tokenRef: { token: 'x' }, capture: async () => { throw httpErr(404); }, sleep: async () => { throw new Error('should not wait'); } }),
+    (err) => err.status === 404 && !err.abortRun,
+  );
 });

@@ -70,7 +70,7 @@ export async function fetchConversationTree(threadId, { fetchImpl = fetch, acces
     credentials: "same-origin",
     headers,
   });
-  if (!res.ok) throw new Error(`backend-api conversation fetch failed: HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(`backend-api conversation fetch failed: HTTP ${res.status}`), { status: res.status });
   const data = await res.json();
   if (!looksLikeConversationTree(data)) throw new Error("backend-api conversation response did not look like a conversation tree (schema may have changed)");
   return data;
@@ -155,6 +155,32 @@ export async function captureViaApi(threadId, { fetchImpl = fetch, accessToken }
   const data = await fetchConversationTree(threadId, { fetchImpl, accessToken });
   const messages = linearizeMapping(data);
   return { title: typeof data.title === "string" ? data.title : null, messages };
+}
+
+// Bulk-capture one conversation with the two recoveries a long run needs:
+// an expired access token (401/403) is refreshed once, and a rate limit (429)
+// waits with growing backoff. When the backoff is exhausted the error is
+// marked `abortRun` so the caller stops the whole run instead of turning every
+// remaining conversation into a failure while still throttled.
+export async function captureWithRecovery(threadId, { tokenRef, capture = captureViaApi, refreshToken = getAccessToken, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), backoffMs = [30000, 60000, 120000, 240000] } = {}) {
+  let refreshed = false;
+  let waits = 0;
+  for (;;) {
+    try {
+      return await capture(threadId, { accessToken: tokenRef.token });
+    } catch (err) {
+      if ((err.status === 401 || err.status === 403) && !refreshed) {
+        refreshed = true;
+        tokenRef.token = await refreshToken();
+        continue;
+      }
+      if (err.status === 429) {
+        if (waits < backoffMs.length) { await sleep(backoffMs[waits++]); continue; }
+        throw Object.assign(new Error(`rate limited (HTTP 429) after ${waits} backoff waits`), { status: 429, abortRun: true });
+      }
+      throw err;
+    }
+  }
 }
 
 // Same-origin conversation-list endpoint (the one the sidebar itself paginates

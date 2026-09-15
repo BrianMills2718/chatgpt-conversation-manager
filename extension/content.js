@@ -7,7 +7,7 @@
 (async () => {
 const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import(chrome.runtime.getURL("lib/title.js"));
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
-const { captureViaApi, listAllConversations, selectChangedConversations, getAccessToken, getConversationProjectId } = await import(chrome.runtime.getURL("lib/api-capture.js"));
+const { captureViaApi, captureWithRecovery, listAllConversations, selectChangedConversations, getAccessToken, getConversationProjectId } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
   brokerUrl: "ws://localhost:8787/extension",
@@ -616,9 +616,11 @@ async function archiveAllChats({ known = null } = {}) {
     summary.listed = listed.length;
     summary.skipped = listed.length - conversations.length;
     summary.total = conversations.length;
+    const tokenRef = { token: accessToken };
+    let consecutiveFailures = 0;
     for (const conv of conversations) {
       try {
-        const apiResult = await captureViaApi(conv.id, { accessToken });
+        const apiResult = await captureWithRecovery(conv.id, { tokenRef });
         const snapshot = buildSnapshot({
           threadId: conv.id,
           title: apiResult.title || conv.title || null,
@@ -630,8 +632,17 @@ async function archiveAllChats({ known = null } = {}) {
         });
         if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "thread_snapshot", snapshot }));
         summary.archived++;
+        consecutiveFailures = 0;
       } catch (err) {
         summary.failed.push({ thread_id: conv.id, title: conv.title || null, error: err.message });
+        consecutiveFailures++;
+        // Stop instead of failing every remaining conversation: a persistent
+        // rate limit or a systemic error will not clear by trying the next one.
+        // Unfetched conversations are simply picked up by the next incremental run.
+        if (err.abortRun || consecutiveFailures >= 10) {
+          summary.fatal_error = err.abortRun ? err.message : `stopped after ${consecutiveFailures} consecutive failures; last: ${err.message}`;
+          break;
+        }
       }
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "bulk_archive_progress", done: summary.archived + summary.failed.length, total: summary.total, archived: summary.archived, failed: summary.failed.length }));
