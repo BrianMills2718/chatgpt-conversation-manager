@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations, captureWithRecovery, AdaptivePacer, parseRetryAfter } from '../extension/lib/api-capture.js';
+import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations, captureWithRecovery, AdaptivePacer, parseRetryAfter, replyFromTree } from '../extension/lib/api-capture.js';
 
 test('parseRemoteTime accepts epoch seconds, epoch ms, numeric strings and ISO strings', () => {
   assert.equal(parseRemoteTime(1757900000.5), 1757900000500);
@@ -297,3 +297,38 @@ test('captureWithRecovery passes other errors straight through', async () => {
     (err) => err.status === 404 && !err.abortRun,
   );
 });
+
+function treeOf(nodes, current) {
+  const mapping = { root: { id: 'root', message: null, parent: null } };
+  let parent = 'root';
+  for (const n of nodes) { mapping[n.id] = { id: n.id, message: n.message, parent }; parent = n.id; }
+  return { mapping, current_node: current ?? parent };
+}
+
+test('replyFromTree waits while the assistant message is still streaming, then returns it', () => {
+  const u1 = userMsg('u1', 'earlier question', 1).message;
+  const a1 = assistantMsg('a1', 'earlier answer', 2).message;
+  const u2 = userMsg('u2', 'our new question', 3).message;
+  const streaming = { ...assistantMsg('a2', 'partial', 4).message, status: 'in_progress' };
+  let r = replyFromTree(treeOf([{ id: 'u1', message: u1 }, { id: 'a1', message: a1 }, { id: 'u2', message: u2 }, { id: 'a2', message: streaming }]), 2);
+  assert.equal(r.done, false);
+  assert.equal(r.status, 'in_progress');
+  const finished = { ...assistantMsg('a2', 'the full answer', 4).message, status: 'finished_successfully' };
+  r = replyFromTree(treeOf([{ id: 'u1', message: u1 }, { id: 'a1', message: a1 }, { id: 'u2', message: u2 }, { id: 'a2', message: finished }]), 2);
+  assert.equal(r.done, true);
+  assert.equal(r.reply, 'the full answer');
+});
+
+test('replyFromTree does not return the previous answer when our message has no reply yet', () => {
+  const u1 = userMsg('u1', 'earlier question', 1).message;
+  const a1 = { ...assistantMsg('a1', 'earlier answer', 2).message, status: 'finished_successfully' };
+  // before sending there were 2 messages; the tree has not yet grown past them
+  const r = replyFromTree(treeOf([{ id: 'u1', message: u1 }, { id: 'a1', message: a1 }]), 2);
+  assert.equal(r.done, false);
+  // our message landed but the current node is still our user message
+  const u2 = userMsg('u2', 'our new question', 3).message;
+  const r2 = replyFromTree(treeOf([{ id: 'u1', message: u1 }, { id: 'a1', message: a1 }, { id: 'u2', message: u2 }]), 2);
+  assert.equal(r2.done, false);
+  assert.equal(r2.role, 'user');
+});
+

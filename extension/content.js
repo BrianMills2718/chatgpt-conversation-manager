@@ -7,7 +7,7 @@
 (async () => {
 const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import(chrome.runtime.getURL("lib/title.js"));
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
-const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, selectChangedConversations, getAccessToken, getConversationProjectId } = await import(chrome.runtime.getURL("lib/api-capture.js"));
+const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
   brokerUrl: "ws://localhost:8787/extension",
@@ -602,7 +602,72 @@ async function moveToProjectViaVisibleUi(projectName, targetThreadId) {
 // that may cover hundreds of conversations).
 
 let bulkArchiving = false;
-const CAPABILITIES = { incremental_archive: true, rate_limit_recovery: true, adaptive_pacing: true };
+const CAPABILITIES = { incremental_archive: true, rate_limit_recovery: true, adaptive_pacing: true, ask: true };
+
+// A tab keeps one token across full-page navigations (sessionStorage is per tab
+// and per origin), so the broker can address THIS tab again after it navigates
+// and reconnects. Without it, a command meant for one tab reaches every tab.
+const TAB_TOKEN = (() => {
+  try {
+    let t = sessionStorage.getItem("ccm_tab_token");
+    if (!t) { t = crypto.randomUUID(); sessionStorage.setItem("ccm_tab_token", t); }
+    return t;
+  } catch { return crypto.randomUUID(); }
+})();
+
+// ask_chatgpt ------------------------------------------------------------------
+
+const COMPOSER_SELECTORS = ["#prompt-textarea", 'div[contenteditable="true"][id*="prompt"]', "form textarea"];
+const SEND_BUTTON_SELECTORS = ['[data-testid="send-button"]', 'button[aria-label*="Send"]'];
+
+function findFirst(selectors, accept = () => true) {
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el && accept(el)) return { el, selector: sel };
+  }
+  return null;
+}
+
+function refuseWhileArchiving(action) {
+  if (bulkArchiving) throw new Error(`busy: a bulk archive is running in this tab, so ${action} would stop it; use another ChatGPT tab.`);
+}
+
+async function sendPrompt(text) {
+  refuseWhileArchiving("sending a prompt");
+  const body = String(text || "");
+  if (!body.trim()) throw new Error("text is required.");
+  const composer = await waitFor(() => findFirst(COMPOSER_SELECTORS, visible), 15000)
+    .catch(() => { throw new Error(`no ChatGPT composer found (tried ${COMPOSER_SELECTORS.join(", ")}); the page layout may have changed.`); });
+  const threadBefore = currentThreadId();
+  const beforeCount = threadBefore ? linearizeMapping(await fetchConversationTree(threadBefore)).length : 0;
+  const el = composer.el;
+  el.focus();
+  if (el.tagName === "TEXTAREA") {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(el, body);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  } else {
+    document.execCommand("selectAll", false, null);
+    document.execCommand("insertText", false, body);
+  }
+  const typed = (el.value ?? el.innerText ?? "").trim();
+  if (!typed.includes(body.trim().slice(0, 40))) {
+    throw new Error("the prompt text did not appear in the composer; nothing was sent.");
+  }
+  const button = await waitFor(() => findFirst(SEND_BUTTON_SELECTORS, (b) => visible(b) && !b.disabled), 8000)
+    .catch(() => { throw new Error(`no enabled send button found (tried ${SEND_BUTTON_SELECTORS.join(", ")}); nothing was sent.`); });
+  button.el.click();
+  await waitFor(() => ((el.value ?? el.innerText ?? "").trim() === "" ? true : null), 10000)
+    .catch(() => { throw new Error("clicked send but the composer did not clear; the prompt may not have been sent."); });
+  const threadId = threadBefore || await waitFor(() => currentThreadId(), 30000)
+    .catch(() => { throw new Error("prompt sent but no conversation id appeared in the URL within 30s."); });
+  return { thread_id: threadId, before_count: beforeCount, composer_selector: composer.selector, send_selector: button.selector };
+}
+
+async function getReply(threadId, beforeCount) {
+  const data = await fetchConversationTree(String(threadId));
+  return replyFromTree(data, Number(beforeCount) || 0);
+}
+
 const PACER_STORAGE_KEY = "bulkFetchSpacingMs";
 
 // Start each run at the spacing the previous run ended on, so the learned rate
@@ -709,7 +774,16 @@ async function handleCommand(msg) {
     const result = await moveToProjectViaVisibleUi(project, targetThreadId);
     return { ...result, thread_id: targetThreadId || currentThreadId() };
   }
+  if (msg.action === "get_tab") return { tab: TAB_TOKEN, busy: bulkArchiving, thread_id: currentThreadId() };
+  if (msg.action === "navigate_home") {
+    refuseWhileArchiving("navigating");
+    location.href = "https://chatgpt.com/";
+    return { navigated: true };
+  }
+  if (msg.action === "send_prompt") return sendPrompt(msg.text);
+  if (msg.action === "get_reply") return getReply(msg.thread_id, msg.before_count);
   if (msg.action === "navigate_to_thread") {
+    refuseWhileArchiving("navigating");
     const threadId = String(msg.thread_id || "").trim();
     if (!threadId) throw new Error("thread_id is required.");
     if (currentThreadId() === threadId) return { thread_id: threadId, navigated: false };
@@ -750,6 +824,7 @@ async function connect() {
     return;
   }
   url.searchParams.set("token", cfg.token || DEFAULTS.token);
+  url.searchParams.set("tab", TAB_TOKEN);
   socket = new WebSocket(url.toString());
   socket.onopen = () => {
     setStatus({ connected: true });
@@ -777,7 +852,7 @@ async function connect() {
     try {
       const result = await handleCommand(msg);
       socket.send(JSON.stringify({ type: "command_result", id: msg.id, ok: true, ...result }));
-      if (msg.action === "navigate_to_thread" && result.navigated) {
+      if ((msg.action === "navigate_to_thread" || msg.action === "navigate_home") && result.navigated) {
         // location.href is about to tear this content-script instance down
         // anyway. Closing proactively (instead of waiting for the browser to
         // notice) keeps the broker from briefly counting both this dying

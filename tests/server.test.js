@@ -9,6 +9,7 @@ const TOKEN = 'test-token-123';
 let baseUrl;
 let wsUrl;
 let server;
+let askChatgpt;
 
 before(async () => {
   process.env.PORT = '0';
@@ -16,6 +17,7 @@ before(async () => {
   process.env.ARCHIVE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-server-test-'));
   const mod = await import('../server/index.js');
   server = mod.server;
+  askChatgpt = mod.askChatgpt;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
     server.listen(0, resolve);
@@ -141,3 +143,77 @@ test('dispatchToExtension fails only once every connected tab has failed', async
     b.close();
   }
 });
+
+function fakeTab(tab, { busy = false, thread = null, onCommand }) {
+  const state = { busy, thread, received: [], ws: null };
+  const open = () => new Promise((resolve) => {
+    const ws = new WebSocket(`${wsUrl}&tab=${tab}`);
+    state.ws = ws;
+    ws.on('open', resolve);
+    ws.on('message', async (buf) => {
+      const msg = JSON.parse(buf.toString());
+      if (msg.type !== 'command') return;
+      state.received.push(msg.action);
+      const reply = (extra) => ws.send(JSON.stringify({ type: 'command_result', id: msg.id, ...extra }));
+      if (msg.action === 'get_tab') return reply({ ok: true, tab, busy: state.busy, thread_id: state.thread });
+      if (state.busy && ['navigate_home', 'navigate_to_thread', 'send_prompt'].includes(msg.action)) {
+        return reply({ ok: false, error: 'busy: a bulk archive is running in this tab' });
+      }
+      await onCommand(msg, state, reply, open);
+    });
+  });
+  state.open = open;
+  return state;
+}
+
+test('ask_chatgpt uses the idle tab, starts a new chat, and waits for the finished reply', async () => {
+  const busy = fakeTab('busy-tab-0001', { busy: true, thread: 'archive-thread', onCommand: async () => {} });
+  let polls = 0;
+  const idle = fakeTab('idle-tab-0002', {
+    thread: 'old-thread',
+    onCommand: async (msg, state, reply, reopen) => {
+      if (msg.action === 'navigate_home') {
+        reply({ ok: true, navigated: true });
+        state.ws.close();
+        state.thread = null;
+        setTimeout(() => reopen(), 200);          // the page reloads and reconnects with the same tab token
+        return;
+      }
+      if (msg.action === 'send_prompt') {
+        assert.equal(msg.text, 'hello from an agent');
+        state.thread = 'new-thread-123';
+        return reply({ ok: true, thread_id: 'new-thread-123', before_count: 0 });
+      }
+      if (msg.action === 'get_reply') {
+        polls++;
+        return reply(polls < 2 ? { ok: true, done: false, status: 'in_progress' } : { ok: true, done: true, reply: 'hello back', model: 'm' });
+      }
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await busy.open();
+  await idle.open();
+  try {
+    const r = await askChatgpt({ text: 'hello from an agent', timeout_seconds: 20, pollMs: 50 });
+    assert.equal(r.reply, 'hello back');
+    assert.equal(r.thread_id, 'new-thread-123');
+    assert.ok(polls >= 2, 'it returned before the reply finished');
+    assert.deepEqual(busy.received.filter((a) => a !== 'get_tab'), [], 'the busy tab received a navigation or send');
+    assert.ok(idle.received.includes('navigate_home') && idle.received.includes('send_prompt'));
+  } finally {
+    busy.ws.close();
+    idle.ws.close();
+  }
+});
+
+test('ask_chatgpt refuses clearly when every tab is busy archiving', async () => {
+  const busy = fakeTab('busy-tab-0003', { busy: true, onCommand: async () => {} });
+  await busy.open();
+  try {
+    await assert.rejects(askChatgpt({ text: 'hi', timeout_seconds: 10, pollMs: 50 }), /No idle ChatGPT tab/);
+    assert.deepEqual(busy.received, ['get_tab']);
+  } finally {
+    busy.ws.close();
+  }
+});
+

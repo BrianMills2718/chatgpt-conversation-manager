@@ -162,6 +162,28 @@ export async function captureViaApi(threadId, { fetchImpl = fetch, accessToken }
   return { title: typeof data.title === "string" ? data.title : null, messages };
 }
 
+// ask_chatgpt: decide from ChatGPT's own conversation tree whether the reply to
+// a message we sent has finished, and extract it. `beforeCount` is how many
+// linearized messages the thread had before sending (0 for a new chat). Done
+// only when the current node is an assistant message the backend marks finished
+// (status finished_successfully, or end_turn true) AND new messages exist beyond
+// our own; anything else is "not yet", with the observed status for diagnosis.
+export function replyFromTree(data, beforeCount) {
+  const node = data?.mapping?.[data?.current_node];
+  const message = node?.message;
+  const role = message?.author?.role || null;
+  const status = message?.status || null;
+  const finished = role === "assistant" && (status === "finished_successfully" || message?.end_turn === true);
+  const messages = linearizeMapping(data);
+  const added = messages.slice(beforeCount);
+  const replies = added.filter((m) => m.role === "assistant");
+  if (!finished || replies.length === 0) {
+    return { done: false, role, status, message_count: messages.length };
+  }
+  return { done: true, reply: replies.map((m) => m.text).join("\n\n"), message_count: messages.length,
+           model: replies[replies.length - 1].model || null };
+}
+
 // Retry-After is either delay-seconds or an HTTP date. Returns ms or null.
 export function parseRetryAfter(value, now = Date.now()) {
   if (value == null || value === "") return null;

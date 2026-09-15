@@ -42,7 +42,8 @@ server.on("upgrade", (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
 });
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
+  try { ws.tabToken = new URL(req.url, "http://localhost").searchParams.get("tab") || null; } catch { ws.tabToken = null; }
   extensionSockets.add(ws);
   console.log(`[broker] extension connected (${extensionSockets.size} total)`);
   ws.send(JSON.stringify({ type: "hello", message: "connected" }));
@@ -72,9 +73,15 @@ wss.on("connection", (ws) => {
 // regardless of how many other tabs are also open.
 // `single` sends to one tab only, for jobs (bulk archive) that must not run in
 // every open chatgpt.com tab at once.
-function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, { single = false } = {}) {
+// `tab` sends to the one tab carrying that token (it survives the tab's own
+// navigations), for actions that must happen in exactly one chosen tab.
+function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, { single = false, tab = null } = {}) {
   let sockets = [...extensionSockets].filter((ws) => ws.readyState === ws.OPEN);
   if (!sockets.length) throw new Error("No browser extension is connected to the broker.");
+  if (tab) {
+    sockets = sockets.filter((ws) => ws.tabToken === tab);
+    if (!sockets.length) throw new Error(`ChatGPT tab ${tab.slice(0, 8)} is not connected (closed, or still reloading).`);
+  }
   if (single) sockets = sockets.slice(-1);
   const id = crypto.randomUUID();
   sockets.forEach((ws) => ws.send(JSON.stringify({ type: "command", id, ...command })));
@@ -139,6 +146,70 @@ async function navigateToThread(threadId) {
   }
   throw new Error(`Navigated toward thread ${threadId} but it never became the active tab within the timeout.`);
 }
+
+// ask_chatgpt ------------------------------------------------------------------
+// Send a message into a ChatGPT conversation through one idle tab and wait for
+// the reply. One ask at a time: two concurrent asks would type into the same tab.
+let askQueue = Promise.resolve();
+
+async function pickIdleTab() {
+  const tokens = [...new Set([...extensionSockets].filter((ws) => ws.readyState === ws.OPEN && ws.tabToken).map((ws) => ws.tabToken))];
+  const seen = [];
+  for (const tab of tokens) {
+    try {
+      const info = await dispatchToExtension({ action: "get_tab" }, 3000, { tab });
+      seen.push({ tab: tab.slice(0, 8), busy: info.busy });
+      if (!info.busy) return { tab, thread_id: info.thread_id || null };
+    } catch (err) { seen.push({ tab: tab.slice(0, 8), error: err.message }); }
+  }
+  throw new Error(`No idle ChatGPT tab (${JSON.stringify(seen)}). Open another chatgpt.com tab in Chrome; a tab running a bulk archive is never used.`);
+}
+
+async function waitForTab(tab, predicate, timeoutMs, what) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(700);
+    try { const info = await dispatchToExtension({ action: "get_tab" }, 3000, { tab }); if (predicate(info)) return info; }
+    catch { /* reconnecting after navigation */ }
+  }
+  throw new Error(`ChatGPT tab never ${what} within ${Math.round(timeoutMs / 1000)}s.`);
+}
+
+async function askChatgpt({ text, thread_id = null, timeout_seconds = 180, pollMs = 3000 }) {
+  const run = async () => {
+    const body = String(text || "").trim();
+    if (!body) throw new Error("text is required.");
+    const { tab, thread_id: current } = await pickIdleTab();
+    if (thread_id && current !== thread_id) {
+      await dispatchToExtension({ action: "navigate_to_thread", thread_id }, COMMAND_TIMEOUT_MS, { tab });
+      await waitForTab(tab, (i) => i.thread_id === thread_id, 20000, `opened conversation ${thread_id}`);
+    } else if (!thread_id && current) {
+      await dispatchToExtension({ action: "navigate_home" }, COMMAND_TIMEOUT_MS, { tab });
+      await waitForTab(tab, (i) => !i.thread_id, 20000, "opened a new chat");
+    }
+    const sent = await dispatchToExtension({ action: "send_prompt", text: body }, 90000, { tab });
+    const deadline = Date.now() + timeout_seconds * 1000;
+    let last = null;
+    while (Date.now() < deadline) {
+      await sleep(pollMs);
+      try { last = await dispatchToExtension({ action: "get_reply", thread_id: sent.thread_id, before_count: sent.before_count }, 30000, { tab }); }
+      catch (err) { last = { done: false, error: err.message }; continue; }
+      if (last.done) {
+        return { thread_id: sent.thread_id, url: `https://chatgpt.com/c/${sent.thread_id}`, reply: last.reply, model: last.model || null };
+      }
+    }
+    throw new Error(`No finished reply in conversation ${sent.thread_id} within ${timeout_seconds}s (last seen: ${JSON.stringify(last)}). The message was sent; check the conversation.`);
+  };
+  const result = askQueue.then(run, run);
+  askQueue = result.catch(() => {});
+  return result;
+}
+
+app.post("/api/ask", async (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: "unauthorized" });
+  try { res.json(await askChatgpt(req.body || {})); }
+  catch (err) { res.status(503).json({ error: err.message }); }
+});
 
 app.get("/health", (_req, res) => res.json({ ok: true, extension_connections: extensionSockets.size, archive_dir: ARCHIVE_DIR }));
 app.post('/api/capture', async (req, res) => {
@@ -263,6 +334,17 @@ app.post('/api/undo', async (req, res) => {
 
 function createMcpServer() {
   const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.3.0" });
+
+  mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id to start a new chat; pass a conversation id to continue that conversation. Uses an idle chatgpt.com tab (never one running a bulk archive) and waits up to timeout_seconds for the reply to finish.', {
+    text: z.string().min(1),
+    thread_id: z.string().optional(),
+    timeout_seconds: z.number().int().min(10).max(900).optional(),
+  }, async ({ text, thread_id, timeout_seconds }) => {
+    try {
+      const r = await askChatgpt({ text, thread_id: thread_id || null, timeout_seconds: timeout_seconds || 180 });
+      return { content: [{ type: 'text', text: `${r.reply}\n\n[conversation ${r.thread_id} — ${r.url}]` }] };
+    } catch (err) { return { isError: true, content: [{ type: 'text', text: `ask_chatgpt failed: ${err.message}` }] }; }
+  });
 
   mcp.tool('capture_current_chat', 'Capture the currently open ChatGPT conversation into the durable local archive.', {}, async () => {
     try { const r = await dispatchToExtension({ action: 'capture_current_chat' }); return { content: [{ type: 'text', text: `Captured ${r.thread_id}: ${r.title || 'Untitled'}` }] }; }
@@ -423,4 +505,4 @@ if (isMain) {
   });
 }
 
-export { app, server, archive, sync };
+export { app, server, archive, sync, askChatgpt };
