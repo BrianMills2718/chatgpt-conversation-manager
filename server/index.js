@@ -190,6 +190,30 @@ async function navigateToThread(threadId) {
   throw new Error(`Navigated toward thread ${threadId} but it never became the active tab within the timeout.`);
 }
 
+// Live chat list --------------------------------------------------------------
+// One request to ChatGPT's own list of recent chats (newest first), read through a
+// connected tab. It shares the account's request limit, so it is never paged.
+async function listRecentChats(limit = 28) {
+  const r = await dispatchToExtension({ action: "list_recent_chats", limit }, COMMAND_TIMEOUT_MS, { single: true });
+  return r.chats || [];
+}
+
+// Case-insensitive title match: an exact title wins; otherwise every title that
+// contains the query. The caller decides what zero or several matches mean.
+function matchChatsByTitle(chats, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return [];
+  const exact = chats.filter((c) => (c.title || "").trim().toLowerCase() === q);
+  return exact.length ? exact : chats.filter((c) => (c.title || "").toLowerCase().includes(q));
+}
+
+async function resolveThreadTitle(title) {
+  const matches = matchChatsByTitle(await listRecentChats(100), title);
+  if (matches.length === 1) return matches[0].id;
+  if (!matches.length) throw new Error(`No chat among the 100 most recent has a title matching "${title}". Use list_chatgpt_chats or search_archived_chats to find its id.`);
+  throw new Error(`"${title}" matches ${matches.length} chats; pass thread_id instead: ${matches.slice(0, 10).map((c) => `${c.id} "${c.title}"`).join("; ")}`);
+}
+
 // ask_chatgpt ------------------------------------------------------------------
 // Send a message into a ChatGPT conversation through one idle tab and wait for
 // the reply. One ask at a time: two concurrent asks would type into the same tab.
@@ -245,10 +269,12 @@ async function waitForTab(tab, predicate, timeoutMs, what) {
   throw new Error(`ChatGPT tab never ${what} within ${Math.round(timeoutMs / 1000)}s.`);
 }
 
-async function askChatgpt({ text, thread_id = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000 }) {
+async function askChatgpt({ text, thread_id = null, thread_title = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000 }) {
   const run = async () => {
     const body = String(text || "").trim();
     if (!body) throw new Error("text is required.");
+    if (thread_id && thread_title) throw new Error("pass thread_id or thread_title, not both.");
+    if (thread_title) thread_id = await resolveThreadTitle(thread_title);
     const { tab, thread_id: current } = await pickIdleTab({ openWaitMs });
     if (thread_id && current !== thread_id) {
       await dispatchToExtension({ action: "navigate_to_thread", thread_id }, COMMAND_TIMEOUT_MS, { tab });
@@ -408,15 +434,28 @@ app.post('/api/undo', async (req, res) => {
 function createMcpServer() {
   const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.3.0" });
 
-  mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id to start a new chat; pass a conversation id to continue that conversation. Uses an idle chatgpt.com tab (never one running a bulk archive) and waits up to timeout_seconds for the reply to finish.', {
+  mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish.', {
     text: z.string().min(1),
     thread_id: z.string().optional(),
+    thread_title: z.string().min(1).optional(),
     timeout_seconds: z.number().int().min(10).max(900).optional(),
-  }, async ({ text, thread_id, timeout_seconds }) => {
+  }, async ({ text, thread_id, thread_title, timeout_seconds }) => {
     try {
-      const r = await askChatgpt({ text, thread_id: thread_id || null, timeout_seconds: timeout_seconds || 180 });
+      const r = await askChatgpt({ text, thread_id: thread_id || null, thread_title: thread_title || null, timeout_seconds: timeout_seconds || 180 });
       return { content: [{ type: 'text', text: `${r.reply}\n\n[conversation ${r.thread_id} — ${r.url}]` }] };
     } catch (err) { return { isError: true, content: [{ type: 'text', text: `ask_chatgpt failed: ${err.message}` }] }; }
+  });
+
+  mcp.tool('list_chatgpt_chats', 'List Brian\'s most recent ChatGPT chats live from ChatGPT (newest first): id, title, last updated. Optional query filters by title. Use the id with ask_chatgpt to continue a chat. For older chats or searching message text, use search_archived_chats.', {
+    query: z.string().optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+  }, async ({ query, limit }) => {
+    try {
+      let chats = await listRecentChats(query ? 100 : (limit || 28));
+      if (query) chats = matchChatsByTitle(chats, query).slice(0, limit || 28);
+      const text = chats.length ? chats.map((c) => `${c.id}  ${c.title || '(untitled)'}  [updated ${c.update_time ?? 'unknown'}]`).join('\n') : (query ? `No recent chat title matches "${query}".` : 'No chats returned.');
+      return { content: [{ type: 'text', text }] };
+    } catch (err) { return { isError: true, content: [{ type: 'text', text: `list_chatgpt_chats failed: ${err.message}` }] }; }
   });
 
   mcp.tool('capture_current_chat', 'Capture the currently open ChatGPT conversation into the durable local archive.', {}, async () => {
@@ -578,4 +617,4 @@ if (isMain) {
   });
 }
 
-export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener };
+export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle };

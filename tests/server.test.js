@@ -11,6 +11,7 @@ let wsUrl;
 let server;
 let askChatgpt;
 let setAgentTabOpener;
+let matchChatsByTitle;
 let waitForBulkComplete;
 
 before(async () => {
@@ -22,6 +23,7 @@ before(async () => {
   server = mod.server;
   askChatgpt = mod.askChatgpt;
   setAgentTabOpener = mod.setAgentTabOpener;
+  matchChatsByTitle = mod.matchChatsByTitle;
   waitForBulkComplete = mod.waitForBulkComplete;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
@@ -300,4 +302,50 @@ test('a bulk archive tab that reconnects and still reports busy is not declared 
   const result = await completion;
   assert.equal(result.fatal_error, undefined);
   tab.ws.close();
+});
+
+test('title matching prefers an exact title, otherwise every title containing the query', () => {
+  const chats = [{ id: 'a', title: 'Evidence to Action' }, { id: 'b', title: 'Evidence to Action — part 2' }, { id: 'c', title: 'Groceries' }];
+  assert.deepEqual(matchChatsByTitle(chats, 'evidence to action').map((c) => c.id), ['a']);
+  assert.deepEqual(matchChatsByTitle(chats, 'EVIDENCE').map((c) => c.id), ['a', 'b']);
+  assert.deepEqual(matchChatsByTitle(chats, 'nothing'), []);
+  assert.deepEqual(matchChatsByTitle(chats, '  '), []);
+});
+
+test('ask_chatgpt continues the one chat whose title matches, and refuses an ambiguous title', async () => {
+  const chats = [{ id: 'chat-1', title: 'Metamodel review' }, { id: 'chat-2', title: 'Budget 2026' }, { id: 'chat-3', title: 'Budget 2027' }];
+  const human = fakeTab('human-tab-0010', { onCommand: async (msg, state, reply) => {
+    if (msg.action === 'list_recent_chats') return reply({ ok: true, chats });
+    reply({ ok: false, error: 'should not be used' });
+  } });
+  const agentTab = fakeTab('agent-tab-0011', {
+    agent: true,
+    onCommand: async (msg, state, reply, reopen) => {
+      if (msg.action === 'list_recent_chats') return reply({ ok: true, chats });
+      if (msg.action === 'navigate_to_thread') {
+        reply({ ok: true, navigated: true });
+        state.ws.close();
+        state.thread = msg.thread_id;
+        setTimeout(() => reopen(), 100);
+        return;
+      }
+      if (msg.action === 'send_prompt') return reply({ ok: true, thread_id: state.thread, dom_before: 4 });
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'continued', thread_id: state.thread });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await human.open();
+  await agentTab.open();
+  try {
+    await assert.rejects(askChatgpt({ text: 'hi', thread_title: 'budget', timeout_seconds: 10, pollMs: 50 }), /matches 2 chats.*chat-2.*chat-3/);
+    await assert.rejects(askChatgpt({ text: 'hi', thread_title: 'no such chat', timeout_seconds: 10, pollMs: 50 }), /No chat among the 100 most recent/);
+    const r = await askChatgpt({ text: 'hi', thread_title: 'metamodel', timeout_seconds: 10, pollMs: 50 });
+    assert.equal(r.thread_id, 'chat-1');
+    assert.equal(r.reply, 'continued');
+    assert.ok(agentTab.received.includes('navigate_to_thread'));
+    assert.ok(!agentTab.received.includes('navigate_home'));
+  } finally {
+    human.ws.close();
+    agentTab.ws.close();
+  }
 });

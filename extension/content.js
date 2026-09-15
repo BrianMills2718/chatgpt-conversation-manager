@@ -7,7 +7,7 @@
 (async () => {
 const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import(chrome.runtime.getURL("lib/title.js"));
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
-const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree } = await import(chrome.runtime.getURL("lib/api-capture.js"));
+const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
   brokerUrl: "ws://localhost:8787/extension",
@@ -626,7 +626,7 @@ async function moveToProjectViaVisibleUi(projectName, targetThreadId) {
 // that may cover hundreds of conversations).
 
 let bulkArchiving = false;
-const CAPABILITIES = { incremental_archive: true, rate_limit_recovery: true, adaptive_pacing: true, ask: true, agent_tab: true };
+const CAPABILITIES = { incremental_archive: true, rate_limit_recovery: true, adaptive_pacing: true, ask: true, agent_tab: true, list_chats: true };
 
 // A tab keeps one token across full-page navigations (sessionStorage is per tab
 // and per origin), so the broker can address THIS tab again after it navigates
@@ -844,6 +844,11 @@ async function handleCommand(msg) {
     const targetThreadId = msg.thread_id || undefined;
     const result = await moveToProjectViaVisibleUi(project, targetThreadId);
     return { ...result, thread_id: targetThreadId || currentThreadId() };
+  }
+  if (msg.action === "list_recent_chats") {
+    const limit = Math.min(Math.max(Number(msg.limit) || 28, 1), 100);
+    const page = await listConversationsPage({ offset: 0, limit });
+    return { chats: page.items.map((c) => ({ id: c.id, title: c.title || "", update_time: c.update_time ?? null })), total: page.total ?? null };
   }
   if (msg.action === "get_tab") return { tab: TAB_TOKEN, agent: AGENT_TAB, busy: bulkArchiving, thread_id: currentThreadId() };
   if (msg.action === "navigate_home") {
