@@ -74,3 +74,22 @@ test('nextDelayMs retries a failed run sooner and keeps the interval after succe
   assert.equal(SyncScheduler.nextDelayMs({ last_error: 'x', last_error_at: '2026-09-15T01:00:00.000Z' }, H6), 30 * 60 * 1000);
   assert.equal(SyncScheduler.nextDelayMs({ last_error: 'old', last_error_at: '2026-09-15T00:00:00.000Z', last_success_at: '2026-09-15T01:00:00.000Z' }, H6), H6);
 });
+
+test('a refused dispatch leaves no unhandled rejection behind when the wait times out', async () => {
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    let rejectLater;
+    const completion = new Promise((_, reject) => { rejectLater = reject; });
+    const { sched } = setup({ completion, dispatchError: new Error('A bulk archive is already running.') });
+    const status = await sched.runOnce();
+    assert.match(status.last_error, /already running/);
+    rejectLater(new Error('bulk archive did not complete within 120 minutes'));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+

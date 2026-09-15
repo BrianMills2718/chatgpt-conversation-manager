@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 // conversations, wait for completion, and record the outcome in
 // sync-status.json. Failures are recorded and logged, never swallowed.
 export class SyncScheduler {
-  constructor({ archive, dispatch, connectionCount, waitForBulkComplete, statusPath, openCommand = null, connectWaitMs = 90000, runTimeoutMs = 2 * 60 * 60 * 1000, log = console }) {
+  constructor({ archive, dispatch, connectionCount, waitForBulkComplete, statusPath, openCommand = null, connectWaitMs = 90000, runTimeoutMs = 12 * 60 * 60 * 1000, log = console }) {
     Object.assign(this, { archive, dispatch, connectionCount, waitForBulkComplete, statusPath, openCommand, connectWaitMs, runTimeoutMs, log });
     this.running = null;
     this.timer = null;
@@ -70,6 +70,11 @@ export class SyncScheduler {
         throw new Error(`Chrome extension is running old code (${caps?.error || 'no incremental support'}); reload it at chrome://extensions and refresh the ChatGPT tab.`);
       }
       const completion = this.waitForBulkComplete(this.runTimeoutMs);
+      // If the dispatch below throws (e.g. a bulk archive is already running),
+      // nothing awaits this promise; its timeout rejection would then be an
+      // unhandled rejection, which exits Node. That killed the broker on
+      // 2026-09-14, two hours after a refused run, stopping the backlog.
+      completion.catch(() => {});
       await this.dispatch({ action: 'archive_all_chats', known: this.knownThreads() });
       const result = await completion;
       if (result.fatal_error) throw new Error(`extension reported: ${result.fatal_error}`);
