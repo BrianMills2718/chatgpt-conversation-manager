@@ -21,6 +21,7 @@ let socket;
 let reconnectTimer;
 let archiveTimer;
 let lastSnapshotFingerprint = null;
+let lastAutoDomKey = null;
 let isCapturing = false;
 let contextInvalidated = false;
 
@@ -345,9 +346,24 @@ async function sendSnapshot(force = false) {
     if (force) throw new Error("A capture is already in progress; try again in a moment.");
     return null;
   }
+  // Automatic captures fetch the conversation from ChatGPT's API, which shares
+  // one per-account request limit with ChatGPT's own page and with bulk
+  // archiving. Page activity alone was firing several fetches per new chat
+  // (observed: 8 for a two-message chat, 5 of them HTTP 429), so skip when the
+  // chat has no real id yet, is still generating, or looks unchanged.
+  let domKey = null;
+  if (!force) {
+    if (currentThreadId().startsWith("WEB:")) return null;
+    if (findFirst(STOP_BUTTON_SELECTORS, visible)) return null;
+    const messages = extractMessagesFromDom();
+    const last = messages[messages.length - 1];
+    domKey = `${currentThreadId()}|${messages.length}|${last?.role}|${(last?.text || "").length}`;
+    if (domKey === lastAutoDomKey) return null;
+  }
   isCapturing = true;
   try {
     const snapshot = await captureSnapshot();
+    if (domKey) lastAutoDomKey = domKey;
     const fp = snapshotFingerprint(snapshot);
     if (!force && fp === lastSnapshotFingerprint) return snapshot;
     lastSnapshotFingerprint = fp;
