@@ -373,8 +373,16 @@ async function sendSnapshot(force = false) {
 function scheduleArchive() {
   if (contextInvalidated) return;
   clearTimeout(archiveTimer);
-  chrome.storage.sync
-    .get(DEFAULTS)
+  let pending;
+  try {
+    // In a stale instance (extension reloaded under a live tab) this throws
+    // synchronously rather than rejecting, so .catch alone does not see it.
+    pending = chrome.storage.sync.get(DEFAULTS);
+  } catch (err) {
+    if (handlePossibleContextInvalidation(err)) return;
+    throw err;
+  }
+  pending
     .then((cfg) => {
       if (!cfg.autoArchive || !currentThreadId()) return;
       archiveTimer = setTimeout(() => {
@@ -642,18 +650,26 @@ async function sendPrompt(text) {
   // Counted on the page, not through the conversation API: that endpoint is
   // rate-limited for the whole account (HTTP 429) whenever archiving has run.
   const domBefore = extractMessagesFromDom().length;
-  const el = composer.el;
-  el.focus();
-  if (el.tagName === "TEXTAREA") {
-    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(el, body);
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-  } else {
-    document.execCommand("selectAll", false, null);
-    document.execCommand("insertText", false, body);
-  }
-  const typed = (el.value ?? el.innerText ?? "").trim();
-  if (!typed.includes(body.trim().slice(0, 40))) {
-    throw new Error("the prompt text did not appear in the composer; nothing was sent.");
+  // Right after a navigation the composer can be on the page before its editor
+  // accepts input, and the first insert is silently dropped. Retry for a few
+  // seconds, re-finding the element each time in case the editor replaced it.
+  const expected = body.trim().slice(0, 40);
+  let el = composer.el;
+  const typedOk = await waitFor(() => {
+    el = findFirst(COMPOSER_SELECTORS, visible)?.el || el;
+    if ((el.value ?? el.innerText ?? "").includes(expected)) return true;
+    el.focus();
+    if (el.tagName === "TEXTAREA") {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(el, body);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    } else {
+      document.execCommand("selectAll", false, null);
+      document.execCommand("insertText", false, body);
+    }
+    return (el.value ?? el.innerText ?? "").includes(expected) ? true : null;
+  }, 6000, 400).catch(() => false);
+  if (!typedOk) {
+    throw new Error("the prompt text did not appear in the composer after retrying for 6s; nothing was sent.");
   }
   const button = await waitFor(() => findFirst(SEND_BUTTON_SELECTORS, (b) => visible(b) && !b.disabled), 8000)
     .catch(() => { throw new Error(`no enabled send button found (tried ${SEND_BUTTON_SELECTORS.join(", ")}); nothing was sent.`); });

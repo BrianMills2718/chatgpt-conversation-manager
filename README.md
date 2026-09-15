@@ -65,6 +65,7 @@ This is the exact request the chatgpt.com web app itself issues, from the same p
 - `search_archived_chats(query, project?, limit?, thread_id?, status?, since?, until?)` — source-oriented retrieval from archived chats.
 - `save_current_chat_checkpoint(summary, status, decisions, open_questions, next_steps, source_message_ids)` — write a high-quality project-memory checkpoint.
 - `get_project_state(project)` — thread index + status for a project.
+- `ask_chatgpt(text, thread_id?, timeout_seconds?)` — type a message into ChatGPT and return the reply. Without `thread_id` it starts a new chat; with one it continues that chat. It uses an idle ChatGPT tab and refuses tabs that are running a bulk archive. Returns `{ thread_id, url, reply }`, so a follow-up can pass the same `thread_id`.
 
 ### Important distinction: archive projects vs ChatGPT Projects
 
@@ -257,6 +258,15 @@ http://localhost:8787/mcp
 ```
 
 For ChatGPT to call it, expose the server through the MCP connectivity mechanism supported by your ChatGPT workspace (for example, a secure HTTPS/tunnel setup). Use bearer auth with the same token. Do **not** expose an unauthenticated broker to the public internet.
+
+### Agents on this machine (Claude Code and Codex)
+
+Both clients are registered as the MCP server `chatgpt-bridge`, so an agent can call `ask_chatgpt` directly:
+
+- Claude Code: `claude mcp add --scope user --transport http chatgpt-bridge http://localhost:8787/mcp -H "Authorization: Bearer <token>"`.
+- Codex: `[mcp_servers.chatgpt-bridge]` in `~/.codex/config.toml` with `url = "http://localhost:8787/mcp"` and `bearer_token_env_var = "CHATGPT_BRIDGE_TOKEN"`. `~/.bashrc` exports that variable from `~/.local/state/chatgpt-bridge/token` (mode 600), which holds the same value as `RENAMER_TOKEN`. If you rotate the token, update both.
+
+It needs the broker running and at least one ChatGPT tab open with the extension connected. The other direction — ChatGPT reaching this machine — goes through the separate `remote-mcp` project, not this broker.
 
 ## Security model
 
