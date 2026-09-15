@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.4.0 (2026-09-14)
+
+### Added — scheduled incremental backup
+
+- `archive_all_chats` accepts `known` (thread id -> last capture time) and fetches only conversations new or updated since then (`selectChangedConversations`). A full ~800-chat run takes hours; an incremental one fetches what changed.
+- `server/sync.js` `SyncScheduler`: every `SYNC_INTERVAL_MINUTES`, opens ChatGPT if no tab is connected (`SYNC_OPEN_CHATGPT_CMD`), checks the extension supports incremental archive (`get_capabilities`), runs it, and records the outcome in `data/metadata/sync-status.json` (`GET /api/sync-status`). A failed run retries after 30 minutes. `POST /api/sync` runs one now.
+- `scripts/run-server.sh` and `scripts/install-windows-startup.sh`: start the broker hidden at Windows logon from WSL (loads nvm; logs to `data/logs/`).
+
+### Fixed — found in the first full live run (2026-09-14)
+
+- 200ms spacing between conversation fetches hit HTTP 429 after ~170 of 795 conversations; 626 of 628 failures were 429. Spacing is now 2.5s, 429 backs off (30s/60s/120s/240s) and then stops the run, 401/403 refreshes the access token once, and 10 consecutive failures stop the run. Unfetched conversations are picked up by the next incremental run.
+- Bulk archive is sent to one connected tab instead of every open chatgpt.com tab.
+
 ## v0.3.1 (unreleased)
 
 ### Added — native ChatGPT Projects mirroring
