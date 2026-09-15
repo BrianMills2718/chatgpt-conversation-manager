@@ -12,6 +12,7 @@ let server;
 let askChatgpt;
 let setAgentTabOpener;
 let matchChatsByTitle;
+let runOpenCommand;
 let waitForBulkComplete;
 
 before(async () => {
@@ -24,6 +25,7 @@ before(async () => {
   askChatgpt = mod.askChatgpt;
   setAgentTabOpener = mod.setAgentTabOpener;
   matchChatsByTitle = mod.matchChatsByTitle;
+  runOpenCommand = mod.runOpenCommand;
   waitForBulkComplete = mod.waitForBulkComplete;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
@@ -348,4 +350,12 @@ test('ask_chatgpt continues the one chat whose title matches, and refuses an amb
     human.ws.close();
     agentTab.ws.close();
   }
+});
+
+test('opening the agent tab retries a transient failure and reports every attempt when all fail', async () => {
+  let calls = 0;
+  const flaky = async () => { calls++; if (calls === 1) throw new Error('UtilAcceptVsock:273: accept4 failed 110'); };
+  assert.deepEqual(await runOpenCommand('open', { delayMs: 10, exec: flaky }), { attempts: 2 });
+  const broken = async () => { throw new Error('accept4 failed 110'); };
+  await assert.rejects(runOpenCommand('open', { attempts: 3, delayMs: 10, exec: broken }), /failed 3 times: attempt 1: accept4 failed 110 \| attempt 2: .* \| attempt 3: /);
 });

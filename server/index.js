@@ -225,12 +225,22 @@ const AGENT_TAB_URL = "https://chatgpt.com/?ccm_agent=1";
 const AGENT_TAB_OPEN_CMD = process.env.AGENT_TAB_OPEN_CMD
   || (process.env.SYNC_OPEN_CHATGPT_CMD || "").replace(/https:\/\/chatgpt\.com\/?(?=\s|'|"|$)/, AGENT_TAB_URL)
   || null;
-let openAgentTab = () => new Promise((resolve, reject) => {
-  if (!AGENT_TAB_OPEN_CMD || !AGENT_TAB_OPEN_CMD.includes("ccm_agent=1")) {
-    return reject(new Error(`No agent ChatGPT tab is open, and the broker cannot open one (set AGENT_TAB_OPEN_CMD or SYNC_OPEN_CHATGPT_CMD). Open ${AGENT_TAB_URL} in Chrome.`));
+// WSL's bridge to Windows sometimes times out ("UtilAcceptVsock: accept4 failed
+// 110") and works again seconds later (seen 2026-09-15), so a failed open is retried.
+async function runOpenCommand(cmd, { attempts = 3, delayMs = 3000, exec = (c) => new Promise((resolve, reject) => execFile("/bin/sh", ["-c", c], (err, _out, stderr) => (err ? reject(new Error(`${err.message.split("\n")[0]} ${String(stderr || "").trim()}`.trim())) : resolve()))) } = {}) {
+  const errors = [];
+  for (let i = 1; i <= attempts; i++) {
+    try { await exec(cmd); return { attempts: i }; }
+    catch (err) { errors.push(`attempt ${i}: ${err.message}`); if (i < attempts) await sleep(delayMs); }
   }
-  execFile("/bin/sh", ["-c", AGENT_TAB_OPEN_CMD], (err) => (err ? reject(new Error(`opening the agent tab failed: ${err.message}`)) : resolve()));
-});
+  throw new Error(`opening the agent tab failed ${attempts} times: ${errors.join(" | ")}`);
+}
+let openAgentTab = async () => {
+  if (!AGENT_TAB_OPEN_CMD || !AGENT_TAB_OPEN_CMD.includes("ccm_agent=1")) {
+    throw new Error(`No agent ChatGPT tab is open, and the broker cannot open one (set AGENT_TAB_OPEN_CMD or SYNC_OPEN_CHATGPT_CMD). Open ${AGENT_TAB_URL} in Chrome.`);
+  }
+  await runOpenCommand(AGENT_TAB_OPEN_CMD);
+};
 function setAgentTabOpener(fn) { openAgentTab = fn; }
 
 async function findIdleAgentTab(seen) {
@@ -617,4 +627,4 @@ if (isMain) {
   });
 }
 
-export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle };
+export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand };
