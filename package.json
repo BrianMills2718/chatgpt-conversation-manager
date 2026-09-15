@@ -1,0 +1,18 @@
+{
+  "name": "chatgpt-conversation-manager",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "check": "node --check server/index.js && node --check server/archive.js && node --check extension/content.js && node --check extension/lib/title.js && node --check extension/lib/normalize.js && node --check extension/lib/api-capture.js && node --check extension/popup.js && node --check extension/options.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.4",
+    "express": "^5.1.0",
+    "ws": "^8.18.3",
+    "zod": "^3.25.76"
+  }
+}

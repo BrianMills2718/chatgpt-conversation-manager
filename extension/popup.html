@@ -1,0 +1,82 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Conversation Manager</title>
+<style>
+  body { font: 13px system-ui, sans-serif; width: 340px; margin: 0; padding: 14px; color: #1b1b1f; }
+  h1 { font-size: 14px; margin: 0 0 10px; }
+  .row { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
+  .row .k { color: #666; }
+  .row .v { text-align: right; word-break: break-word; max-width: 210px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+  .ok { background: #2e9e4a; }
+  .bad { background: #cc3b3b; }
+  .warn { background: #d99a1a; }
+  .section { border-top: 1px solid #e3e3e6; margin-top: 10px; padding-top: 10px; }
+  .warn-text { color: #a06a00; font-size: 12px; margin-top: 6px; }
+  details { margin-top: 6px; }
+  summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+  .form { display: flex; flex-direction: column; gap: 6px; padding: 6px 0 2px; }
+  .form input[type=text], .form input[type=number] { padding: 5px 6px; font-size: 12px; box-sizing: border-box; width: 100%; }
+  .form label { font-size: 11px; color: #666; }
+  .form .checkline { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  button { padding: 6px 8px; font-size: 12px; cursor: pointer; }
+  button.primary { width: 100%; }
+  #captureBtn { width: 100%; margin-top: 8px; }
+  #msg { min-height: 34px; font-size: 12px; margin-top: 8px; white-space: pre-wrap; }
+  #msg.error { color: #b3261e; }
+  #msg.ok { color: #2e9e4a; }
+</style>
+</head>
+<body>
+  <h1>ChatGPT Conversation Manager</h1>
+
+  <div class="row"><span class="k">Broker</span><span class="v" id="broker"><span class="dot bad"></span>checking…</span></div>
+  <div class="row"><span class="k">Conversation</span><span class="v" id="detected">…</span></div>
+  <div class="row"><span class="k">Thread ID</span><span class="v" id="threadId">—</span></div>
+  <div class="row"><span class="k">Title</span><span class="v" id="title">—</span></div>
+  <div class="row"><span class="k">Last archive</span><span class="v" id="lastArchive">—</span></div>
+  <div class="row"><span class="k">Project</span><span class="v" id="project">—</span></div>
+  <div class="row"><span class="k">Sequence</span><span class="v" id="sequence">—</span></div>
+  <div id="completenessWarning" class="warn-text" style="display:none"></div>
+
+  <button id="captureBtn" class="primary">Capture Now</button>
+
+  <div class="section">
+    <details id="renameDetails">
+      <summary>Rename</summary>
+      <div class="form">
+        <input type="text" id="renameTitle" placeholder="New conversation title" maxlength="120">
+        <button id="renameBtn" class="primary">Rename</button>
+      </div>
+    </details>
+    <details id="assignDetails">
+      <summary>Assign Project</summary>
+      <div class="form">
+        <input type="text" id="assignProject" placeholder="Project name" maxlength="120">
+        <button id="assignBtn" class="primary">Assign</button>
+      </div>
+    </details>
+    <details id="numberDetails">
+      <summary>Number / Sequence</summary>
+      <div class="form">
+        <label>Project (optional if already assigned)</label>
+        <input type="text" id="numberProject" maxlength="120">
+        <label>Series</label>
+        <input type="text" id="numberSeries" value="default" maxlength="80">
+        <label>Stage (optional)</label>
+        <input type="text" id="numberStage" maxlength="80">
+        <label>Sequence (optional — auto-allocates next if blank)</label>
+        <input type="number" id="numberSequence" min="1" step="1">
+        <div class="checkline"><input type="checkbox" id="numberRenameVisible" checked><label for="numberRenameVisible">Also rename visible chat</label></div>
+        <button id="numberBtn" class="primary">Number</button>
+      </div>
+    </details>
+  </div>
+
+  <div id="msg"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

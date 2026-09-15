@@ -1,0 +1,4 @@
+const DEFAULTS = { brokerUrl: 'ws://localhost:8787/extension', token: 'change-me', autoArchive: true, autoArchiveDelayMs: 3000, debug: false };
+async function load(){ const c=await chrome.storage.sync.get(DEFAULTS); for(const [k,v] of Object.entries(c)){ const el=document.getElementById(k); if(!el)continue; if(el.type==='checkbox')el.checked=Boolean(v); else el.value=v; } }
+document.getElementById('save').addEventListener('click', async()=>{ const cfg={ brokerUrl:document.getElementById('brokerUrl').value.trim(), token:document.getElementById('token').value, autoArchive:document.getElementById('autoArchive').checked, autoArchiveDelayMs:Number(document.getElementById('autoArchiveDelayMs').value)||3000, debug:document.getElementById('debug').checked }; await chrome.storage.sync.set(cfg); document.getElementById('status').textContent='Saved'; setTimeout(()=>document.getElementById('status').textContent='',1500); });
+load();
