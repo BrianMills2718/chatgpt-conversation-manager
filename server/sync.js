@@ -73,7 +73,7 @@ export class SyncScheduler {
       await this.dispatch({ action: 'archive_all_chats', known: this.knownThreads() });
       const result = await completion;
       if (result.fatal_error) throw new Error(`extension reported: ${result.fatal_error}`);
-      const summary = { mode: result.mode, listed: result.listed, fetched: result.total, skipped: result.skipped, archived: result.archived, failed: result.failed?.length || 0 };
+      const summary = { mode: result.mode, listed: result.listed, fetched: result.total, skipped: result.skipped, archived: result.archived, failed: result.failed?.length || 0, pacing: result.pacing || null };
       if (summary.failed > 0) {
         this.log.error(`[sync] completed with ${summary.failed} failed conversations`);
       }

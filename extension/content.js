@@ -7,7 +7,7 @@
 (async () => {
 const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import(chrome.runtime.getURL("lib/title.js"));
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
-const { captureViaApi, captureWithRecovery, listAllConversations, selectChangedConversations, getAccessToken, getConversationProjectId } = await import(chrome.runtime.getURL("lib/api-capture.js"));
+const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, selectChangedConversations, getAccessToken, getConversationProjectId } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
   brokerUrl: "ws://localhost:8787/extension",
@@ -602,15 +602,26 @@ async function moveToProjectViaVisibleUi(projectName, targetThreadId) {
 // that may cover hundreds of conversations).
 
 let bulkArchiving = false;
-const BULK_FETCH_SPACING_MS = 2500;
-const CAPABILITIES = { incremental_archive: true, rate_limit_recovery: true, bulk_fetch_spacing_ms: BULK_FETCH_SPACING_MS };
+const CAPABILITIES = { incremental_archive: true, rate_limit_recovery: true, adaptive_pacing: true };
+const PACER_STORAGE_KEY = "bulkFetchSpacingMs";
+
+// Start each run at the spacing the previous run ended on, so the learned rate
+// carries over instead of being rediscovered from a guess every time.
+async function loadLearnedSpacing() {
+  try { const v = (await chrome.storage.local.get(PACER_STORAGE_KEY))[PACER_STORAGE_KEY]; return Number.isFinite(v) ? v : 2500; }
+  catch { return 2500; }
+}
+async function saveLearnedSpacing(ms) {
+  try { await chrome.storage.local.set({ [PACER_STORAGE_KEY]: ms }); } catch (err) { handlePossibleContextInvalidation(err); }
+}
 
 // `known` (thread id -> last_captured_at) switches to incremental mode: only
 // conversations new or updated since their last capture are fetched.
 async function archiveAllChats({ known = null } = {}) {
   if (bulkArchiving) throw new Error("A bulk archive is already running.");
   bulkArchiving = true;
-  const summary = { mode: known ? "incremental" : "full", listed: 0, total: 0, skipped: 0, archived: 0, failed: [], fatal_error: null };
+  const summary = { mode: known ? "incremental" : "full", listed: 0, total: 0, skipped: 0, archived: 0, failed: [], fatal_error: null, pacing: null };
+  const pacer = new AdaptivePacer({ initialMs: await loadLearnedSpacing() });
   try {
     const accessToken = await getAccessToken();
     const listed = await listAllConversations({ accessToken, onPage: (loaded, total) => (summary.total = total) });
@@ -622,7 +633,7 @@ async function archiveAllChats({ known = null } = {}) {
     let consecutiveFailures = 0;
     for (const conv of conversations) {
       try {
-        const apiResult = await captureWithRecovery(conv.id, { tokenRef });
+        const apiResult = await captureWithRecovery(conv.id, { tokenRef, pacer });
         const snapshot = buildSnapshot({
           threadId: conv.id,
           title: apiResult.title || conv.title || null,
@@ -647,17 +658,18 @@ async function archiveAllChats({ known = null } = {}) {
         }
       }
       if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "bulk_archive_progress", done: summary.archived + summary.failed.length, total: summary.total, archived: summary.archived, failed: summary.failed.length }));
+        socket.send(JSON.stringify({ type: "bulk_archive_progress", done: summary.archived + summary.failed.length, total: summary.total, archived: summary.archived, failed: summary.failed.length, ...pacer.stats() }));
       }
-      // ChatGPT rate-limits conversation fetches: at 200ms spacing a full run of
-      // ~800 hit HTTP 429 after ~170 (2026-09-14). Slower spacing plus
-      // captureWithRecovery's backoff keeps long runs inside the limit.
-      await sleep(BULK_FETCH_SPACING_MS);
+      // ChatGPT rate-limits conversation fetches (a fixed 200ms gap hit HTTP 429
+      // after ~170 of 795 on 2026-09-14); the adaptive pacer finds the gap.
+      await sleep(pacer.spacingMs);
     }
   } catch (err) {
     summary.fatal_error = err.message;
   } finally {
     bulkArchiving = false;
+    summary.pacing = pacer.stats();
+    await saveLearnedSpacing(pacer.spacingMs);
   }
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: "bulk_archive_complete", ...summary }));

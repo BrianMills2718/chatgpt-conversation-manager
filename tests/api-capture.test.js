@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations, captureWithRecovery } from '../extension/lib/api-capture.js';
+import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations, captureWithRecovery, AdaptivePacer, parseRetryAfter } from '../extension/lib/api-capture.js';
 
 test('parseRemoteTime accepts epoch seconds, epoch ms, numeric strings and ISO strings', () => {
   assert.equal(parseRemoteTime(1757900000.5), 1757900000500);
@@ -209,16 +209,54 @@ test('getConversationProjectId throws on a non-OK response, distinguishable from
   await assert.rejects(() => getConversationProjectId('t1', { fetchImpl }), /HTTP 404/);
 });
 
-const httpErr = (status) => Object.assign(new Error(`HTTP ${status}`), { status });
+const httpErr = (status, extra = {}) => Object.assign(new Error(`HTTP ${status}`), { status, ...extra });
+const noSleep = async () => {};
+
+test('parseRetryAfter reads delay-seconds and HTTP dates', () => {
+  assert.equal(parseRetryAfter('7'), 7000);
+  assert.equal(parseRetryAfter('Tue, 15 Sep 2026 03:00:10 GMT', Date.parse('Tue, 15 Sep 2026 03:00:00 GMT')), 10000);
+  assert.equal(parseRetryAfter(null), null);
+  assert.equal(parseRetryAfter('soon'), null);
+});
+
+test('fetchConversationTree attaches status and Retry-After to a 429', async () => {
+  const fetchImpl = async () => ({ ok: false, status: 429, headers: { get: (h) => (h === 'retry-after' ? '12' : null) }, json: async () => ({}) });
+  await assert.rejects(fetchConversationTree('t1', { fetchImpl, accessToken: 'x' }), (err) => err.status === 429 && err.retryAfterMs === 12000);
+});
+
+test('AdaptivePacer shortens on success, doubles on 429, and stays in bounds', () => {
+  const p = new AdaptivePacer({ initialMs: 1000, minMs: 500, maxMs: 5000 });
+  p.onSuccess();
+  assert.equal(p.spacingMs, 900);
+  for (let i = 0; i < 20; i++) p.onSuccess();
+  assert.equal(p.spacingMs, 500);
+  assert.equal(p.onRateLimit(), 1000);
+  assert.equal(p.onRateLimit(), 2000);
+  assert.equal(p.onRateLimit(30000), 5000, 'Retry-After is honoured but capped at maxMs');
+  assert.equal(p.onRateLimit(), 5000);
+  assert.deepEqual(p.stats(), { spacing_ms: 5000, rate_limited: 4, successes: 21 });
+});
+
+test('AdaptivePacer converges between the throttling threshold and half of it', () => {
+  // Simulated server: throttles any request sent sooner than 1500ms after the previous one.
+  const p = new AdaptivePacer({ initialMs: 10000, minMs: 100, maxMs: 60000 });
+  const tail = [];
+  for (let i = 0; i < 400; i++) {
+    if (p.spacingMs < 1500) p.onRateLimit(); else p.onSuccess();
+    if (i >= 300) tail.push(p.spacingMs);
+  }
+  assert.ok(Math.min(...tail) >= 750 && Math.max(...tail) <= 3000, `settled range ${Math.min(...tail)}-${Math.max(...tail)}`);
+});
 
 test('captureWithRecovery refreshes an expired token once and retries', async () => {
   const tokenRef = { token: 'old' };
   const seen = [];
+  const pacer = new AdaptivePacer();
   const result = await captureWithRecovery('t1', {
-    tokenRef,
+    tokenRef, pacer,
     capture: async (_id, { accessToken }) => { seen.push(accessToken); if (accessToken === 'old') throw httpErr(401); return { title: 'ok', messages: [] }; },
     refreshToken: async () => 'new',
-    sleep: async () => {},
+    sleep: noSleep,
   });
   assert.equal(result.title, 'ok');
   assert.deepEqual(seen, ['old', 'new']);
@@ -227,31 +265,35 @@ test('captureWithRecovery refreshes an expired token once and retries', async ()
 
 test('captureWithRecovery does not loop on a token that stays rejected', async () => {
   await assert.rejects(
-    captureWithRecovery('t1', { tokenRef: { token: 'x' }, capture: async () => { throw httpErr(401); }, refreshToken: async () => 'y', sleep: async () => {} }),
+    captureWithRecovery('t1', { tokenRef: { token: 'x' }, pacer: new AdaptivePacer(), capture: async () => { throw httpErr(401); }, refreshToken: async () => 'y', sleep: noSleep }),
     (err) => err.status === 401 && !err.abortRun,
   );
 });
 
-test('captureWithRecovery backs off on 429, then marks the run for abort', async () => {
+test('captureWithRecovery waits the pacer delay on 429, then succeeds and speeds back up', async () => {
   const waits = [];
   let calls = 0;
+  const pacer = new AdaptivePacer({ initialMs: 1000, minMs: 100 });
   const ok = await captureWithRecovery('t1', {
-    tokenRef: { token: 'x' },
-    capture: async () => { calls++; if (calls < 3) throw httpErr(429); return { title: 'late', messages: [] }; },
+    tokenRef: { token: 'x' }, pacer,
+    capture: async () => { calls++; if (calls < 3) throw httpErr(429, calls === 2 ? { retryAfterMs: 9000 } : {}); return { title: 'late', messages: [] }; },
     sleep: async (ms) => { waits.push(ms); },
-    backoffMs: [5, 10, 20],
   });
   assert.equal(ok.title, 'late');
-  assert.deepEqual(waits, [5, 10]);
+  assert.deepEqual(waits, [2000, 9000]);
+  assert.equal(pacer.spacingMs, 3600, 'doubled twice to 4000, then one success shortens it');
+});
+
+test('captureWithRecovery aborts the run when one conversation stays throttled', async () => {
   await assert.rejects(
-    captureWithRecovery('t1', { tokenRef: { token: 'x' }, capture: async () => { throw httpErr(429); }, sleep: async () => {}, backoffMs: [1, 2] }),
-    (err) => err.abortRun === true && err.status === 429,
+    captureWithRecovery('t1', { tokenRef: { token: 'x' }, pacer: new AdaptivePacer(), capture: async () => { throw httpErr(429); }, sleep: noSleep, maxRateLimitRetries: 3 }),
+    (err) => err.abortRun === true && err.status === 429 && /4 times in a row/.test(err.message),
   );
 });
 
 test('captureWithRecovery passes other errors straight through', async () => {
   await assert.rejects(
-    captureWithRecovery('t1', { tokenRef: { token: 'x' }, capture: async () => { throw httpErr(404); }, sleep: async () => { throw new Error('should not wait'); } }),
+    captureWithRecovery('t1', { tokenRef: { token: 'x' }, pacer: new AdaptivePacer(), capture: async () => { throw httpErr(404); }, sleep: async () => { throw new Error('should not wait'); } }),
     (err) => err.status === 404 && !err.abortRun,
   );
 });

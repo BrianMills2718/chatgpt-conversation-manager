@@ -34,7 +34,7 @@ test('a successful run sends known capture times and records the summary', async
   assert.deepEqual(sent, [{ action: 'get_capabilities' }, { action: 'archive_all_chats', known: { a: '2026-09-14T20:00:00.000Z' } }]);
   assert.equal(status.in_progress, false);
   assert.equal(status.last_error, null);
-  assert.deepEqual(status.last_result, { mode: 'incremental', listed: 800, fetched: 3, skipped: 797, archived: 3, failed: 0 });
+  assert.deepEqual(status.last_result, { mode: 'incremental', listed: 800, fetched: 3, skipped: 797, archived: 3, failed: 0, pacing: null });
   assert.ok(status.last_success_at);
 });
 

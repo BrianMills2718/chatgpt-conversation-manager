@@ -70,7 +70,12 @@ export async function fetchConversationTree(threadId, { fetchImpl = fetch, acces
     credentials: "same-origin",
     headers,
   });
-  if (!res.ok) throw Object.assign(new Error(`backend-api conversation fetch failed: HTTP ${res.status}`), { status: res.status });
+  if (!res.ok) {
+    throw Object.assign(new Error(`backend-api conversation fetch failed: HTTP ${res.status}`), {
+      status: res.status,
+      retryAfterMs: parseRetryAfter(res.headers?.get?.("retry-after")),
+    });
+  }
   const data = await res.json();
   if (!looksLikeConversationTree(data)) throw new Error("backend-api conversation response did not look like a conversation tree (schema may have changed)");
   return data;
@@ -157,17 +162,54 @@ export async function captureViaApi(threadId, { fetchImpl = fetch, accessToken }
   return { title: typeof data.title === "string" ? data.title : null, messages };
 }
 
-// Bulk-capture one conversation with the two recoveries a long run needs:
-// an expired access token (401/403) is refreshed once, and a rate limit (429)
-// waits with growing backoff. When the backoff is exhausted the error is
-// marked `abortRun` so the caller stops the whole run instead of turning every
-// remaining conversation into a failure while still throttled.
-export async function captureWithRecovery(threadId, { tokenRef, capture = captureViaApi, refreshToken = getAccessToken, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), backoffMs = [30000, 60000, 120000, 240000] } = {}) {
+// Retry-After is either delay-seconds or an HTTP date. Returns ms or null.
+export function parseRetryAfter(value, now = Date.now()) {
+  if (value == null || value === "") return null;
+  const secs = Number(value);
+  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? null : Math.max(0, at - now);
+}
+
+// AIMD pacing for bulk fetches, the way TCP finds a link's capacity: every
+// success shortens the gap a little, every 429 doubles it. The gap settles just
+// under the rate ChatGPT tolerates instead of a guessed constant. `stats` is
+// reported in progress messages so the learned rate is observable.
+export class AdaptivePacer {
+  constructor({ initialMs = 2500, minMs = 300, maxMs = 120000, decreaseFactor = 0.9, increaseFactor = 2 } = {}) {
+    Object.assign(this, { minMs, maxMs, decreaseFactor, increaseFactor });
+    this.spacingMs = Math.min(maxMs, Math.max(minMs, initialMs));
+    this.rateLimited = 0;
+    this.successes = 0;
+  }
+  onSuccess() {
+    this.successes++;
+    this.spacingMs = Math.max(this.minMs, Math.round(this.spacingMs * this.decreaseFactor));
+  }
+  // Returns how long to wait before retrying the throttled request.
+  onRateLimit(retryAfterMs = null) {
+    this.rateLimited++;
+    this.spacingMs = Math.min(this.maxMs, Math.max(1000, Math.round(this.spacingMs * this.increaseFactor)));
+    return retryAfterMs != null ? Math.min(this.maxMs, Math.max(retryAfterMs, this.spacingMs)) : this.spacingMs;
+  }
+  stats() {
+    return { spacing_ms: this.spacingMs, rate_limited: this.rateLimited, successes: this.successes };
+  }
+}
+
+// Bulk-capture one conversation: an expired access token (401/403) is refreshed
+// once; a 429 feeds the pacer and retries after its wait. If one conversation
+// is throttled `maxRateLimitRetries` times in a row even at growing spacing,
+// the error is marked `abortRun` so the caller stops rather than failing every
+// remaining conversation while still throttled.
+export async function captureWithRecovery(threadId, { tokenRef, pacer, capture = captureViaApi, refreshToken = getAccessToken, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), maxRateLimitRetries = 8 } = {}) {
   let refreshed = false;
-  let waits = 0;
+  let throttled = 0;
   for (;;) {
     try {
-      return await capture(threadId, { accessToken: tokenRef.token });
+      const result = await capture(threadId, { accessToken: tokenRef.token });
+      pacer.onSuccess();
+      return result;
     } catch (err) {
       if ((err.status === 401 || err.status === 403) && !refreshed) {
         refreshed = true;
@@ -175,8 +217,12 @@ export async function captureWithRecovery(threadId, { tokenRef, capture = captur
         continue;
       }
       if (err.status === 429) {
-        if (waits < backoffMs.length) { await sleep(backoffMs[waits++]); continue; }
-        throw Object.assign(new Error(`rate limited (HTTP 429) after ${waits} backoff waits`), { status: 429, abortRun: true });
+        const wait = pacer.onRateLimit(err.retryAfterMs ?? null);
+        if (++throttled > maxRateLimitRetries) {
+          throw Object.assign(new Error(`rate limited (HTTP 429) ${throttled} times in a row; spacing reached ${pacer.spacingMs}ms`), { status: 429, abortRun: true });
+        }
+        await sleep(wait);
+        continue;
       }
       throw err;
     }
