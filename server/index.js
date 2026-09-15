@@ -28,6 +28,32 @@ const extensionSockets = new Set();
 const pending = new Map();
 let bulkArchiveState = { running: false };
 const bulkCompleteWaiters = new Set();
+// The tab running a bulk archive, and how long to wait after it disconnects
+// before declaring the run dead. Without this, closing or refreshing that tab
+// left the scheduled sync "in progress" until its 12h timeout (2026-09-15).
+const BULK_ORPHAN_GRACE_MS = Number(process.env.BULK_ORPHAN_GRACE_MS || 90000);
+let bulkOwner = null;
+let bulkOrphanTimer = null;
+
+function finishBulk(msg) {
+  clearTimeout(bulkOrphanTimer);
+  bulkOrphanTimer = null;
+  bulkArchiveState = { running: false, ...msg };
+  for (const w of [...bulkCompleteWaiters]) w(msg);
+}
+
+async function checkBulkOrphan(owner) {
+  bulkOrphanTimer = null;
+  if (!bulkArchiveState.running || bulkOwner !== owner) return;
+  // A dropped socket reconnects from the same page, which is still archiving
+  // and says so; only a page that no longer reports busy has lost the run.
+  if (typeof owner === "string") {
+    try { if ((await dispatchToExtension({ action: "get_tab" }, 3000, { tab: owner })).busy) return; } catch { /* not connected */ }
+  }
+  const { running, type, ...counts } = bulkArchiveState;
+  console.error("[broker] bulk archive abandoned: its ChatGPT tab disconnected and is not archiving");
+  finishBulk({ type: "bulk_archive_complete", ...counts, failed: [], fatal_error: "the ChatGPT tab running the bulk archive disconnected (closed, refreshed, or extension reloaded) and is no longer archiving" });
+}
 
 function authOk(req) { return (req.headers.authorization || "") === `Bearer ${AUTH_TOKEN}`; }
 function cleanTitle(v) { const s = String(v || '').trim(); if (!s || s.length > 120) throw new Error('title must be 1-120 characters'); return s; }
@@ -54,13 +80,20 @@ wss.on("connection", (ws, req) => {
       catch (err) { console.error(`[broker] snapshot_error for ${msg.snapshot?.thread_id}: ${err.message}`); ws.send(JSON.stringify({ type: 'snapshot_error', error: err.message })); }
       return;
     }
-    if (msg?.type === 'bulk_archive_progress') { bulkArchiveState = { running: true, ...msg }; return; }
-    if (msg?.type === 'bulk_archive_complete') { bulkArchiveState = { running: false, ...msg }; for (const w of [...bulkCompleteWaiters]) w(msg); console.log(`[broker] bulk archive complete: ${msg.archived}/${msg.total} archived, ${msg.failed?.length || 0} failed`); return; }
+    if (msg?.type === 'bulk_archive_progress') { bulkArchiveState = { running: true, ...msg }; bulkOwner = ws.tabToken || ws; clearTimeout(bulkOrphanTimer); bulkOrphanTimer = null; return; }
+    if (msg?.type === 'bulk_archive_complete') { finishBulk(msg); console.log(`[broker] bulk archive complete: ${msg.archived}/${msg.total} archived, ${msg.failed?.length || 0} failed`); return; }
     if (msg?.type !== "command_result" || !msg?.id) return;
     const waiter = pending.get(msg.id); if (!waiter) return;
     waiter.onReply(msg);
   });
-  ws.on("close", () => { extensionSockets.delete(ws); console.log(`[broker] extension disconnected (${extensionSockets.size} total)`); });
+  ws.on("close", () => {
+    extensionSockets.delete(ws);
+    console.log(`[broker] extension disconnected (${extensionSockets.size} total)`);
+    const owner = ws.tabToken || ws;
+    if (bulkArchiveState.running && bulkOwner === owner && !bulkOrphanTimer) {
+      bulkOrphanTimer = setTimeout(() => checkBulkOrphan(owner), BULK_ORPHAN_GRACE_MS);
+    }
+  });
   ws.on("error", (err) => { console.error(`[broker] extension socket error: ${err.message}`); extensionSockets.delete(ws); });
 });
 
@@ -508,4 +541,4 @@ if (isMain) {
   });
 }
 
-export { app, server, archive, sync, askChatgpt };
+export { app, server, archive, sync, askChatgpt, waitForBulkComplete };

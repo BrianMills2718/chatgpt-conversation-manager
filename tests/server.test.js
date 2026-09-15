@@ -10,14 +10,17 @@ let baseUrl;
 let wsUrl;
 let server;
 let askChatgpt;
+let waitForBulkComplete;
 
 before(async () => {
   process.env.PORT = '0';
   process.env.RENAMER_TOKEN = TOKEN;
+  process.env.BULK_ORPHAN_GRACE_MS = '200';
   process.env.ARCHIVE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-server-test-'));
   const mod = await import('../server/index.js');
   server = mod.server;
   askChatgpt = mod.askChatgpt;
+  waitForBulkComplete = mod.waitForBulkComplete;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
     server.listen(0, resolve);
@@ -220,3 +223,37 @@ test('ask_chatgpt refuses clearly when every tab is busy archiving', async () =>
   }
 });
 
+
+const progress = (tab, done) => tab.ws.send(JSON.stringify({ type: 'bulk_archive_progress', done, total: 137, archived: done }));
+
+test('a bulk archive whose tab disconnects for good ends the run instead of waiting 12 hours', async () => {
+  const tab = fakeTab('bulk-tab-0004', { onCommand: async () => {} });
+  await tab.open();
+  const completion = waitForBulkComplete(10000);
+  progress(tab, 2);
+  await new Promise((r) => setTimeout(r, 100));
+  tab.ws.close();
+  const result = await completion;
+  assert.match(result.fatal_error, /disconnected/);
+  assert.equal(result.done, 2);
+  const status = await (await authed('/api/archive-all/status')).json();
+  assert.equal(status.running, false);
+});
+
+test('a bulk archive tab that reconnects and still reports busy is not declared dead', async () => {
+  const tab = fakeTab('bulk-tab-0005', { busy: true, onCommand: async () => {} });
+  await tab.open();
+  const completion = waitForBulkComplete(10000);
+  let settled = false;
+  completion.then(() => { settled = true; });
+  progress(tab, 5);
+  await new Promise((r) => setTimeout(r, 100));
+  tab.ws.close();
+  await tab.open();                                  // same page, new socket
+  await new Promise((r) => setTimeout(r, 600));      // well past the 200ms grace
+  assert.equal(settled, false, 'a live archive was declared dead');
+  tab.ws.send(JSON.stringify({ type: 'bulk_archive_complete', total: 137, archived: 137, failed: [] }));
+  const result = await completion;
+  assert.equal(result.fatal_error, undefined);
+  tab.ws.close();
+});
