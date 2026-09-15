@@ -190,15 +190,18 @@ async function askChatgpt({ text, thread_id = null, timeout_seconds = 180, pollM
     const sent = await dispatchToExtension({ action: "send_prompt", text: body }, 90000, { tab });
     const deadline = Date.now() + timeout_seconds * 1000;
     let last = null;
+    let previousDoneText = null;
     while (Date.now() < deadline) {
       await sleep(pollMs);
-      try { last = await dispatchToExtension({ action: "get_reply", thread_id: sent.thread_id, before_count: sent.before_count }, 30000, { tab }); }
-      catch (err) { last = { done: false, error: err.message }; continue; }
-      if (last.done) {
-        return { thread_id: sent.thread_id, url: `https://chatgpt.com/c/${sent.thread_id}`, reply: last.reply, model: last.model || null };
-      }
+      try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before }, 30000, { tab }); }
+      catch (err) { last = { done: false, error: err.message }; previousDoneText = null; continue; }
+      if (!last.done) { previousDoneText = null; continue; }
+      // The same finished text twice in a row: a pause mid-stream is not a reply.
+      if (last.reply !== previousDoneText) { previousDoneText = last.reply; continue; }
+      const threadId = last.thread_id || sent.thread_id;
+      return { thread_id: threadId, url: threadId ? `https://chatgpt.com/c/${threadId}` : null, reply: last.reply };
     }
-    throw new Error(`No finished reply in conversation ${sent.thread_id} within ${timeout_seconds}s (last seen: ${JSON.stringify(last)}). The message was sent; check the conversation.`);
+    throw new Error(`No finished reply within ${timeout_seconds}s (last seen: ${JSON.stringify(last)}). The message was sent; check ChatGPT (conversation ${sent.thread_id || "id not yet assigned"}).`);
   };
   const result = askQueue.then(run, run);
   askQueue = result.catch(() => {});

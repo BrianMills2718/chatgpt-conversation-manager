@@ -638,8 +638,10 @@ async function sendPrompt(text) {
   if (!body.trim()) throw new Error("text is required.");
   const composer = await waitFor(() => findFirst(COMPOSER_SELECTORS, visible), 15000)
     .catch(() => { throw new Error(`no ChatGPT composer found (tried ${COMPOSER_SELECTORS.join(", ")}); the page layout may have changed.`); });
-  const threadBefore = currentThreadId();
-  const beforeCount = threadBefore ? linearizeMapping(await fetchConversationTree(threadBefore)).length : 0;
+  const threadBefore = realThreadId();
+  // Counted on the page, not through the conversation API: that endpoint is
+  // rate-limited for the whole account (HTTP 429) whenever archiving has run.
+  const domBefore = extractMessagesFromDom().length;
   const el = composer.el;
   el.focus();
   if (el.tagName === "TEXTAREA") {
@@ -658,14 +660,31 @@ async function sendPrompt(text) {
   button.el.click();
   await waitFor(() => ((el.value ?? el.innerText ?? "").trim() === "" ? true : null), 10000)
     .catch(() => { throw new Error("clicked send but the composer did not clear; the prompt may not have been sent."); });
-  const threadId = threadBefore || await waitFor(() => currentThreadId(), 30000)
-    .catch(() => { throw new Error("prompt sent but no conversation id appeared in the URL within 30s."); });
-  return { thread_id: threadId, before_count: beforeCount, composer_selector: composer.selector, send_selector: button.selector };
+  // A new chat first shows a temporary id ("WEB:<uuid>") in the URL and swaps in
+  // the real conversation id once the server has created it.
+  const threadId = threadBefore || await waitFor(() => realThreadId(), 60000, 250).catch(() => null);
+  return { thread_id: threadId, dom_before: domBefore, composer_selector: composer.selector, send_selector: button.selector };
 }
 
-async function getReply(threadId, beforeCount) {
-  const data = await fetchConversationTree(String(threadId));
-  return replyFromTree(data, Number(beforeCount) || 0);
+function realThreadId() {
+  const t = currentThreadId();
+  return t && !t.startsWith("WEB:") ? t : null;
+}
+
+const STOP_BUTTON_SELECTORS = ['[data-testid="stop-button"]', 'button[aria-label*="Stop"]'];
+
+// Read the reply from the page. Done when ChatGPT is no longer generating, and a
+// new assistant message follows our own. The caller requires the same text on
+// two consecutive polls before trusting it, so a pause mid-stream is not "done".
+async function getReply(domBefore) {
+  const generating = Boolean(findFirst(STOP_BUTTON_SELECTORS, visible));
+  const messages = extractMessagesFromDom();
+  const added = messages.slice(Number(domBefore) || 0);
+  const last = messages[messages.length - 1];
+  const replies = added.filter((m) => m.role === "assistant");
+  const done = !generating && replies.length > 0 && last?.role === "assistant";
+  return { done, generating, thread_id: realThreadId(), message_count: messages.length,
+           reply: done ? replies.map((m) => m.text).join("\n\n") : null, source: "dom" };
 }
 
 const PACER_STORAGE_KEY = "bulkFetchSpacingMs";
@@ -781,7 +800,7 @@ async function handleCommand(msg) {
     return { navigated: true };
   }
   if (msg.action === "send_prompt") return sendPrompt(msg.text);
-  if (msg.action === "get_reply") return getReply(msg.thread_id, msg.before_count);
+  if (msg.action === "get_reply") return getReply(msg.dom_before);
   if (msg.action === "navigate_to_thread") {
     refuseWhileArchiving("navigating");
     const threadId = String(msg.thread_id || "").trim();

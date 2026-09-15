@@ -182,11 +182,14 @@ test('ask_chatgpt uses the idle tab, starts a new chat, and waits for the finish
       if (msg.action === 'send_prompt') {
         assert.equal(msg.text, 'hello from an agent');
         state.thread = 'new-thread-123';
-        return reply({ ok: true, thread_id: 'new-thread-123', before_count: 0 });
+        return reply({ ok: true, thread_id: 'new-thread-123', dom_before: 0 });
       }
       if (msg.action === 'get_reply') {
         polls++;
-        return reply(polls < 2 ? { ok: true, done: false, status: 'in_progress' } : { ok: true, done: true, reply: 'hello back', model: 'm' });
+        assert.equal(msg.dom_before, 0);
+        if (polls === 1) return reply({ ok: true, done: false, generating: true });
+        if (polls === 2) return reply({ ok: true, done: true, reply: 'hello ba', thread_id: 'new-thread-123' });   // paused mid-stream
+        return reply({ ok: true, done: true, reply: 'hello back', thread_id: 'new-thread-123' });
       }
       reply({ ok: false, error: `unexpected ${msg.action}` });
     },
@@ -197,7 +200,7 @@ test('ask_chatgpt uses the idle tab, starts a new chat, and waits for the finish
     const r = await askChatgpt({ text: 'hello from an agent', timeout_seconds: 20, pollMs: 50 });
     assert.equal(r.reply, 'hello back');
     assert.equal(r.thread_id, 'new-thread-123');
-    assert.ok(polls >= 2, 'it returned before the reply finished');
+    assert.ok(polls >= 4, 'it returned before the same finished text was seen twice');
     assert.deepEqual(busy.received.filter((a) => a !== 'get_tab'), [], 'the busy tab received a navigation or send');
     assert.ok(idle.received.includes('navigate_home') && idle.received.includes('send_prompt'));
   } finally {
