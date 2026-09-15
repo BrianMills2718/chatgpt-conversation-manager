@@ -100,6 +100,28 @@ The metadata catalog stores organization independently:
 
 This separation means renaming or reorganizing a thread does not destroy the raw conversation archive.
 
+## Automatic backup
+
+The broker can back up on a schedule. Every `SYNC_INTERVAL_MINUTES` it asks a
+connected chatgpt.com tab to list all conversations and fetch only those new or
+updated since their last capture (a full re-download of ~800 chats takes hours;
+an incremental run fetches the handful that changed). If no tab is connected it
+runs `SYNC_OPEN_CHATGPT_CMD` first and waits up to 90s for one.
+
+- Status of the last run: `GET /api/sync-status` (also written to
+  `data/metadata/sync-status.json`): `last_success_at`, `last_result`,
+  `last_error`, `failed_threads`.
+- Run one now: `POST /api/sync`. Incremental manual run: `POST /api/archive-all`
+  with body `{"mode":"incremental"}`.
+- Start at Windows logon (WSL): `scripts/install-windows-startup.sh` writes a
+  hidden launcher to the Startup folder that runs `scripts/run-server.sh`
+  (skips if the broker is already up; logs to `data/logs/server.log`).
+
+Requirements that automation cannot remove: Chrome must be running and signed
+in to ChatGPT with this extension enabled, and the computer must be awake.
+Archived (hidden) ChatGPT conversations are not listed by the endpoint used and
+are not backed up.
+
 ## Install
 
 Requirements: Node.js 20+, Chrome/Chromium.

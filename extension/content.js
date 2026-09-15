@@ -7,7 +7,7 @@
 (async () => {
 const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import(chrome.runtime.getURL("lib/title.js"));
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
-const { captureViaApi, listAllConversations, getAccessToken, getConversationProjectId } = await import(chrome.runtime.getURL("lib/api-capture.js"));
+const { captureViaApi, listAllConversations, selectChangedConversations, getAccessToken, getConversationProjectId } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
   brokerUrl: "ws://localhost:8787/extension",
@@ -603,13 +603,18 @@ async function moveToProjectViaVisibleUi(projectName, targetThreadId) {
 
 let bulkArchiving = false;
 
-async function archiveAllChats() {
+// `known` (thread id -> last_captured_at) switches to incremental mode: only
+// conversations new or updated since their last capture are fetched.
+async function archiveAllChats({ known = null } = {}) {
   if (bulkArchiving) throw new Error("A bulk archive is already running.");
   bulkArchiving = true;
-  const summary = { total: 0, archived: 0, failed: [], fatal_error: null };
+  const summary = { mode: known ? "incremental" : "full", listed: 0, total: 0, skipped: 0, archived: 0, failed: [], fatal_error: null };
   try {
     const accessToken = await getAccessToken();
-    const conversations = await listAllConversations({ accessToken, onPage: (loaded, total) => (summary.total = total) });
+    const listed = await listAllConversations({ accessToken, onPage: (loaded, total) => (summary.total = total) });
+    const conversations = known ? selectChangedConversations(listed, known) : listed;
+    summary.listed = listed.length;
+    summary.skipped = listed.length - conversations.length;
     summary.total = conversations.length;
     for (const conv of conversations) {
       try {
@@ -690,7 +695,7 @@ async function handleCommand(msg) {
   }
   if (msg.action === "archive_all_chats") {
     if (bulkArchiving) throw new Error("A bulk archive is already running.");
-    archiveAllChats().catch((err) => log("error", "bulk archive failed", err));
+    archiveAllChats({ known: msg.known || null }).catch((err) => log("error", "bulk archive failed", err));
     return { started: true };
   }
   throw new Error(`Unknown action: ${msg.action}`);

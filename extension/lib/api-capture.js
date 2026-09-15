@@ -179,6 +179,32 @@ export async function listConversationsPage({ offset = 0, limit = 28, fetchImpl 
   return data; // { items: [{id, title, create_time, update_time, ...}], total, limit, offset }
 }
 
+// ChatGPT's list endpoint has returned update_time both as epoch seconds and as
+// an ISO string; accept either. Returns epoch ms, or null when unparseable.
+export function parseRemoteTime(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value < 1e12 ? value * 1000 : value;
+  if (typeof value === "string" && value) {
+    const n = Number(value);
+    if (Number.isFinite(n)) return parseRemoteTime(n);
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? null : ms;
+  }
+  return null;
+}
+
+// Incremental sync: keep only conversations that are new, or whose remote
+// update_time is later than when the archive last captured them. `known` maps
+// thread id -> last_captured_at (ISO). An unparseable update_time is treated as
+// changed, so a schema drift re-fetches rather than silently skipping.
+export function selectChangedConversations(items, known = {}) {
+  return items.filter((c) => {
+    const capturedMs = known[c.id] ? Date.parse(known[c.id]) : NaN;
+    if (Number.isNaN(capturedMs)) return true;
+    const updatedMs = parseRemoteTime(c.update_time);
+    return updatedMs === null || updatedMs > capturedMs;
+  });
+}
+
 // Pages through the full conversation list once, sharing one access token
 // across all page requests. onPage(loadedSoFar, total) is called after each
 // page for progress reporting.

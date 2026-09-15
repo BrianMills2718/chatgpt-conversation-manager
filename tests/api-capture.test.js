@@ -1,6 +1,31 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId } from '../extension/lib/api-capture.js';
+import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations } from '../extension/lib/api-capture.js';
+
+test('parseRemoteTime accepts epoch seconds, epoch ms, numeric strings and ISO strings', () => {
+  assert.equal(parseRemoteTime(1757900000.5), 1757900000500);
+  assert.equal(parseRemoteTime(1757900000500), 1757900000500);
+  assert.equal(parseRemoteTime('1757900000'), 1757900000000);
+  assert.equal(parseRemoteTime('2026-09-15T01:00:00.000Z'), Date.parse('2026-09-15T01:00:00.000Z'));
+  assert.equal(parseRemoteTime('garbage'), null);
+  assert.equal(parseRemoteTime(undefined), null);
+});
+
+test('selectChangedConversations keeps new and updated threads and skips unchanged ones', () => {
+  const known = {
+    unchanged: '2026-09-14T20:00:00.000Z',
+    updated: '2026-09-14T20:00:00.000Z',
+    'bad-time': '2026-09-14T20:00:00.000Z',
+  };
+  const items = [
+    { id: 'unchanged', update_time: '2026-09-14T19:59:00.000Z' },
+    { id: 'updated', update_time: Date.parse('2026-09-14T20:05:00.000Z') / 1000 },
+    { id: 'brand-new', update_time: '2026-09-01T00:00:00.000Z' },
+    { id: 'bad-time', update_time: 'not a time' },
+  ];
+  assert.deepEqual(selectChangedConversations(items, known).map((c) => c.id), ['updated', 'brand-new', 'bad-time']);
+  assert.deepEqual(selectChangedConversations(items).map((c) => c.id), ['unchanged', 'updated', 'brand-new', 'bad-time']);
+});
 
 function userMsg(id, text, createTime) {
   return { id, message: { id, author: { role: 'user' }, content: { content_type: 'text', parts: [text] }, create_time: createTime }, parent: null, children: [] };

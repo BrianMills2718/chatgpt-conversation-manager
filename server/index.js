@@ -7,6 +7,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { ArchiveStore, THREAD_STATUSES } from './archive.js';
+import { SyncScheduler } from './sync.js';
 
 const PORT = Number(process.env.PORT || 8787);
 const AUTH_TOKEN = process.env.RENAMER_TOKEN || "change-me";
@@ -26,6 +27,7 @@ const wss = new WebSocketServer({ noServer: true });
 const extensionSockets = new Set();
 const pending = new Map();
 let bulkArchiveState = { running: false };
+const bulkCompleteWaiters = new Set();
 
 function authOk(req) { return (req.headers.authorization || "") === `Bearer ${AUTH_TOKEN}`; }
 function cleanTitle(v) { const s = String(v || '').trim(); if (!s || s.length > 120) throw new Error('title must be 1-120 characters'); return s; }
@@ -52,7 +54,7 @@ wss.on("connection", (ws) => {
       return;
     }
     if (msg?.type === 'bulk_archive_progress') { bulkArchiveState = { running: true, ...msg }; return; }
-    if (msg?.type === 'bulk_archive_complete') { bulkArchiveState = { running: false, ...msg }; console.log(`[broker] bulk archive complete: ${msg.archived}/${msg.total} archived, ${msg.failed?.length || 0} failed`); return; }
+    if (msg?.type === 'bulk_archive_complete') { bulkArchiveState = { running: false, ...msg }; for (const w of [...bulkCompleteWaiters]) w(msg); console.log(`[broker] bulk archive complete: ${msg.archived}/${msg.total} archived, ${msg.failed?.length || 0} failed`); return; }
     if (msg?.type !== "command_result" || !msg?.id) return;
     const waiter = pending.get(msg.id); if (!waiter) return;
     waiter.onReply(msg);
@@ -68,9 +70,12 @@ wss.on("connection", (ws) => {
 // (like scrolling the sidebar to find a background thread) — only failing
 // once every connected tab has failed means one capable tab is enough,
 // regardless of how many other tabs are also open.
-function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS) {
-  const sockets = [...extensionSockets].filter((ws) => ws.readyState === ws.OPEN);
+// `single` sends to one tab only, for jobs (bulk archive) that must not run in
+// every open chatgpt.com tab at once.
+function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, { single = false } = {}) {
+  let sockets = [...extensionSockets].filter((ws) => ws.readyState === ws.OPEN);
   if (!sockets.length) throw new Error("No browser extension is connected to the broker.");
+  if (single) sockets = sockets.slice(-1);
   const id = crypto.randomUUID();
   sockets.forEach((ws) => ws.send(JSON.stringify({ type: "command", id, ...command })));
   return new Promise((resolve, reject) => {
@@ -233,12 +238,22 @@ app.post('/api/status', async (req, res) => {
 });
 app.post('/api/archive-all', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
-  try { const result = await dispatchToExtension({ action: 'archive_all_chats' }); res.json(result); }
+  const incremental = req.body?.mode === 'incremental';
+  try { const result = await dispatchToExtension({ action: 'archive_all_chats', known: incremental ? sync.knownThreads() : null }, COMMAND_TIMEOUT_MS, { single: true }); res.json(result); }
   catch (err) { res.status(503).json({ error: err.message }); }
 });
 app.get('/api/archive-all/status', (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   res.json(bulkArchiveState);
+});
+app.post('/api/sync', (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  sync.runOnce();
+  res.status(202).json({ started: true });
+});
+app.get('/api/sync-status', (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  res.json(sync.readStatus());
 });
 app.post('/api/undo', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
@@ -377,13 +392,35 @@ app.all("/mcp", async (req, res) => {
   catch (err) { if (!res.headersSent) res.status(500).json({ error: err.message }); }
 });
 
+function waitForBulkComplete(timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { bulkCompleteWaiters.delete(done); reject(new Error(`bulk archive did not complete within ${Math.round(timeoutMs / 60000)} minutes`)); }, timeoutMs);
+    const done = (msg) => { clearTimeout(timer); bulkCompleteWaiters.delete(done); resolve(msg); };
+    bulkCompleteWaiters.add(done);
+  });
+}
+
+const sync = new SyncScheduler({
+  archive,
+  dispatch: (command) => dispatchToExtension(command, COMMAND_TIMEOUT_MS, { single: true }),
+  connectionCount: () => [...extensionSockets].filter((ws) => ws.readyState === ws.OPEN).length,
+  waitForBulkComplete,
+  statusPath: path.join(ARCHIVE_DIR, 'metadata', 'sync-status.json'),
+  openCommand: process.env.SYNC_OPEN_CHATGPT_CMD || null,
+});
+const SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_INTERVAL_MINUTES || 0);
+
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   server.listen(PORT, () => {
     console.log(`Conversation manager listening on http://localhost:${PORT}`);
     console.log(`Archive: ${ARCHIVE_DIR}`);
     console.log(`MCP:     http://localhost:${PORT}/mcp`);
+    if (SYNC_INTERVAL_MINUTES > 0) {
+      sync.start(SYNC_INTERVAL_MINUTES * 60 * 1000);
+      console.log(`Sync:    incremental backup every ${SYNC_INTERVAL_MINUTES} min (status: GET /api/sync-status)`);
+    }
   });
 }
 
-export { app, server, archive };
+export { app, server, archive, sync };
