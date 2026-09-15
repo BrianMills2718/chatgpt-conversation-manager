@@ -119,8 +119,8 @@ runs `SYNC_OPEN_CHATGPT_CMD` first and waits up to 90s for one.
 
 Requirements that automation cannot remove: Chrome must be running and signed
 in to ChatGPT with this extension enabled, and the computer must be awake.
-Archived (hidden) ChatGPT conversations are not listed by the endpoint used and
-are not backed up.
+Not yet checked: whether conversations you archived inside ChatGPT appear in
+the list endpoint this uses; if they do not, they are not backed up.
 
 ## Install
 
