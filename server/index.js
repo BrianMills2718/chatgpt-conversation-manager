@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { execFile } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
 import express from "express";
@@ -69,7 +70,11 @@ server.on("upgrade", (req, socket, head) => {
 });
 
 wss.on("connection", (ws, req) => {
-  try { ws.tabToken = new URL(req.url, "http://localhost").searchParams.get("tab") || null; } catch { ws.tabToken = null; }
+  try {
+    const params = new URL(req.url, "http://localhost").searchParams;
+    ws.tabToken = params.get("tab") || null;
+    ws.agentTab = params.get("agent") === "1";
+  } catch { ws.tabToken = null; ws.agentTab = false; }
   extensionSockets.add(ws);
   console.log(`[broker] extension connected (${extensionSockets.size} total)`);
   ws.send(JSON.stringify({ type: "hello", message: "connected" }));
@@ -114,6 +119,11 @@ function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, { single =
   if (tab) {
     sockets = sockets.filter((ws) => ws.tabToken === tab);
     if (!sockets.length) throw new Error(`ChatGPT tab ${tab.slice(0, 8)} is not connected (closed, or still reloading).`);
+  } else {
+    // Untargeted commands ("current chat", bulk archive) belong to Brian's own
+    // tabs; the agent tab gets them only when it is the only tab open.
+    const human = sockets.filter((ws) => !ws.agentTab);
+    if (human.length) sockets = human;
   }
   if (single) sockets = sockets.slice(-1);
   const id = crypto.randomUUID();
@@ -185,9 +195,22 @@ async function navigateToThread(threadId) {
 // the reply. One ask at a time: two concurrent asks would type into the same tab.
 let askQueue = Promise.resolve();
 
-async function pickIdleTab() {
-  const tokens = [...new Set([...extensionSockets].filter((ws) => ws.readyState === ws.OPEN && ws.tabToken).map((ws) => ws.tabToken))];
-  const seen = [];
+// Agents only ever type into a tab opened for them (https://chatgpt.com/?ccm_agent=1),
+// never into a tab Brian is using. With none open, the broker opens one.
+const AGENT_TAB_URL = "https://chatgpt.com/?ccm_agent=1";
+const AGENT_TAB_OPEN_CMD = process.env.AGENT_TAB_OPEN_CMD
+  || (process.env.SYNC_OPEN_CHATGPT_CMD || "").replace(/https:\/\/chatgpt\.com\/?(?=\s|'|"|$)/, AGENT_TAB_URL)
+  || null;
+let openAgentTab = () => new Promise((resolve, reject) => {
+  if (!AGENT_TAB_OPEN_CMD || !AGENT_TAB_OPEN_CMD.includes("ccm_agent=1")) {
+    return reject(new Error(`No agent ChatGPT tab is open, and the broker cannot open one (set AGENT_TAB_OPEN_CMD or SYNC_OPEN_CHATGPT_CMD). Open ${AGENT_TAB_URL} in Chrome.`));
+  }
+  execFile("/bin/sh", ["-c", AGENT_TAB_OPEN_CMD], (err) => (err ? reject(new Error(`opening the agent tab failed: ${err.message}`)) : resolve()));
+});
+function setAgentTabOpener(fn) { openAgentTab = fn; }
+
+async function findIdleAgentTab(seen) {
+  const tokens = [...new Set([...extensionSockets].filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab).map((ws) => ws.tabToken))];
   for (const tab of tokens) {
     try {
       const info = await dispatchToExtension({ action: "get_tab" }, 3000, { tab });
@@ -195,7 +218,21 @@ async function pickIdleTab() {
       if (!info.busy) return { tab, thread_id: info.thread_id || null };
     } catch (err) { seen.push({ tab: tab.slice(0, 8), error: err.message }); }
   }
-  throw new Error(`No idle ChatGPT tab (${JSON.stringify(seen)}). Open another chatgpt.com tab in Chrome; a tab running a bulk archive is never used.`);
+  return null;
+}
+
+async function pickIdleTab({ openWaitMs = 90000 } = {}) {
+  const seen = [];
+  const found = await findIdleAgentTab(seen);
+  if (found) return found;
+  await openAgentTab();
+  const deadline = Date.now() + openWaitMs;
+  while (Date.now() < deadline) {
+    await sleep(1000);
+    const next = await findIdleAgentTab([]);
+    if (next) return next;
+  }
+  throw new Error(`No idle agent ChatGPT tab (${JSON.stringify(seen)}); opened ${AGENT_TAB_URL} but it did not connect within ${Math.round(openWaitMs / 1000)}s (is Chrome signed in and the extension enabled?).`);
 }
 
 async function waitForTab(tab, predicate, timeoutMs, what) {
@@ -208,11 +245,11 @@ async function waitForTab(tab, predicate, timeoutMs, what) {
   throw new Error(`ChatGPT tab never ${what} within ${Math.round(timeoutMs / 1000)}s.`);
 }
 
-async function askChatgpt({ text, thread_id = null, timeout_seconds = 180, pollMs = 3000 }) {
+async function askChatgpt({ text, thread_id = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000 }) {
   const run = async () => {
     const body = String(text || "").trim();
     if (!body) throw new Error("text is required.");
-    const { tab, thread_id: current } = await pickIdleTab();
+    const { tab, thread_id: current } = await pickIdleTab({ openWaitMs });
     if (thread_id && current !== thread_id) {
       await dispatchToExtension({ action: "navigate_to_thread", thread_id }, COMMAND_TIMEOUT_MS, { tab });
       await waitForTab(tab, (i) => i.thread_id === thread_id, 20000, `opened conversation ${thread_id}`);
@@ -541,4 +578,4 @@ if (isMain) {
   });
 }
 
-export { app, server, archive, sync, askChatgpt, waitForBulkComplete };
+export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener };

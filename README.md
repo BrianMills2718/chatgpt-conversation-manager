@@ -65,7 +65,7 @@ This is the exact request the chatgpt.com web app itself issues, from the same p
 - `search_archived_chats(query, project?, limit?, thread_id?, status?, since?, until?)` — source-oriented retrieval from archived chats.
 - `save_current_chat_checkpoint(summary, status, decisions, open_questions, next_steps, source_message_ids)` — write a high-quality project-memory checkpoint.
 - `get_project_state(project)` — thread index + status for a project.
-- `ask_chatgpt(text, thread_id?, timeout_seconds?)` — type a message into ChatGPT and return the reply. Without `thread_id` it starts a new chat; with one it continues that chat. It uses an idle ChatGPT tab and refuses tabs that are running a bulk archive. Returns `{ thread_id, url, reply }`, so a follow-up can pass the same `thread_id`.
+- `ask_chatgpt(text, thread_id?, timeout_seconds?)` — type a message into ChatGPT and return the reply. Without `thread_id` it starts a new chat; with one it continues that chat. It only types into the agent tab — a tab opened at `https://chatgpt.com/?ccm_agent=1`, marked with an orange "Agent tab" badge — and never into a tab you are using. If no idle agent tab is open, the broker opens one with `AGENT_TAB_OPEN_CMD` (default: `SYNC_OPEN_CHATGPT_CMD` pointed at that URL). Returns `{ thread_id, url, reply }`, so a follow-up can pass the same `thread_id`.
 
 ### Important distinction: archive projects vs ChatGPT Projects
 
@@ -304,7 +304,7 @@ Not yet live-verified: Assign Project / Number-Sequence buttons end-to-end again
 5. **No vector DB.** Deliberate, not missing infrastructure.
 6. **No automated wiki synthesis.** Checkpoints are tool-driven.
 7. **Visible-UI rename undo is not automated.** Prior titles are preserved in `*.history.jsonl` for manual/future restoration; archive-side metadata changes (project/sequence/status) do have `undo_last_organization_change`.
-8. **Multi-tab ambiguity.** The broker dispatches "current thread" commands to *all* connected extension tabs and uses the first response; with more than one ChatGPT tab open simultaneously, "current" may not mean the tab you're looking at. Fine for the typical single-tab workflow this was built for.
+8. **Multi-tab ambiguity.** The broker dispatches "current thread" commands to all of your connected ChatGPT tabs (never the agent tab, unless it is the only one) and uses the first response; with more than one of your own tabs open, "current" may not mean the tab you're looking at.
 
 ## Recommended next increments
 

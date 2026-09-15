@@ -10,6 +10,7 @@ let baseUrl;
 let wsUrl;
 let server;
 let askChatgpt;
+let setAgentTabOpener;
 let waitForBulkComplete;
 
 before(async () => {
@@ -20,6 +21,7 @@ before(async () => {
   const mod = await import('../server/index.js');
   server = mod.server;
   askChatgpt = mod.askChatgpt;
+  setAgentTabOpener = mod.setAgentTabOpener;
   waitForBulkComplete = mod.waitForBulkComplete;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
@@ -147,10 +149,10 @@ test('dispatchToExtension fails only once every connected tab has failed', async
   }
 });
 
-function fakeTab(tab, { busy = false, thread = null, onCommand }) {
+function fakeTab(tab, { busy = false, thread = null, agent = false, onCommand }) {
   const state = { busy, thread, received: [], ws: null };
   const open = () => new Promise((resolve) => {
-    const ws = new WebSocket(`${wsUrl}&tab=${tab}`);
+    const ws = new WebSocket(`${wsUrl}&tab=${tab}${agent ? '&agent=1' : ''}`);
     state.ws = ws;
     ws.on('open', resolve);
     ws.on('message', async (buf) => {
@@ -158,7 +160,7 @@ function fakeTab(tab, { busy = false, thread = null, onCommand }) {
       if (msg.type !== 'command') return;
       state.received.push(msg.action);
       const reply = (extra) => ws.send(JSON.stringify({ type: 'command_result', id: msg.id, ...extra }));
-      if (msg.action === 'get_tab') return reply({ ok: true, tab, busy: state.busy, thread_id: state.thread });
+      if (msg.action === 'get_tab') return reply({ ok: true, tab, agent, busy: state.busy, thread_id: state.thread });
       if (state.busy && ['navigate_home', 'navigate_to_thread', 'send_prompt'].includes(msg.action)) {
         return reply({ ok: false, error: 'busy: a bulk archive is running in this tab' });
       }
@@ -169,10 +171,12 @@ function fakeTab(tab, { busy = false, thread = null, onCommand }) {
   return state;
 }
 
-test('ask_chatgpt uses the idle tab, starts a new chat, and waits for the finished reply', async () => {
-  const busy = fakeTab('busy-tab-0001', { busy: true, thread: 'archive-thread', onCommand: async () => {} });
+test('ask_chatgpt uses the idle agent tab, never Brian\'s tab, starts a new chat, and waits for the finished reply', async () => {
+  const human = fakeTab('human-tab-0000', { thread: 'brians-chat', onCommand: async (msg, state, reply) => reply({ ok: false, error: 'should not be used' }) });
+  const busy = fakeTab('busy-tab-0001', { busy: true, agent: true, thread: 'archive-thread', onCommand: async () => {} });
   let polls = 0;
   const idle = fakeTab('idle-tab-0002', {
+    agent: true,
     thread: 'old-thread',
     onCommand: async (msg, state, reply, reopen) => {
       if (msg.action === 'navigate_home') {
@@ -197,6 +201,7 @@ test('ask_chatgpt uses the idle tab, starts a new chat, and waits for the finish
       reply({ ok: false, error: `unexpected ${msg.action}` });
     },
   });
+  await human.open();
   await busy.open();
   await idle.open();
   try {
@@ -206,20 +211,59 @@ test('ask_chatgpt uses the idle tab, starts a new chat, and waits for the finish
     assert.ok(polls >= 4, 'it returned before the same finished text was seen twice');
     assert.deepEqual(busy.received.filter((a) => a !== 'get_tab'), [], 'the busy tab received a navigation or send');
     assert.ok(idle.received.includes('navigate_home') && idle.received.includes('send_prompt'));
+    assert.deepEqual(human.received, [], 'Brian\'s own tab received a command');
   } finally {
+    human.ws.close();
     busy.ws.close();
     idle.ws.close();
   }
 });
 
-test('ask_chatgpt refuses clearly when every tab is busy archiving', async () => {
-  const busy = fakeTab('busy-tab-0003', { busy: true, onCommand: async () => {} });
-  await busy.open();
+test('ask_chatgpt opens an agent tab when only Brian\'s tabs are connected, and fails clearly if it never connects', async () => {
+  const human = fakeTab('human-tab-0006', { onCommand: async (msg, state, reply) => reply({ ok: false, error: 'should not be used' }) });
+  await human.open();
+  let opened = 0;
+  setAgentTabOpener(async () => { opened++; });
   try {
-    await assert.rejects(askChatgpt({ text: 'hi', timeout_seconds: 10, pollMs: 50 }), /No idle ChatGPT tab/);
-    assert.deepEqual(busy.received, ['get_tab']);
+    await assert.rejects(askChatgpt({ text: 'hi', timeout_seconds: 10, pollMs: 50, openWaitMs: 1500 }), /No idle agent ChatGPT tab/);
+    assert.equal(opened, 1);
+    assert.deepEqual(human.received, []);
   } finally {
-    busy.ws.close();
+    human.ws.close();
+  }
+});
+
+test('ask_chatgpt uses the agent tab the broker opened for it', async () => {
+  const agentTab = fakeTab('agent-tab-0007', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'send_prompt') return reply({ ok: true, thread_id: 't-7', dom_before: 0 });
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'from the new tab', thread_id: 't-7' });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  setAgentTabOpener(async () => { setTimeout(() => agentTab.open(), 300); });
+  try {
+    const r = await askChatgpt({ text: 'hi', timeout_seconds: 10, pollMs: 50, openWaitMs: 5000 });
+    assert.equal(r.reply, 'from the new tab');
+  } finally {
+    agentTab.ws?.close();
+  }
+});
+
+test('untargeted "current chat" commands skip the agent tab when Brian has a tab open', async () => {
+  const human = fakeTab('human-tab-0008', { onCommand: async (msg, state, reply) => reply({ ok: true, thread_id: 'brians-chat' }) });
+  const agentTab = fakeTab('agent-tab-0009', { agent: true, onCommand: async (msg, state, reply) => reply({ ok: true, thread_id: 'agent-chat' }) });
+  await human.open();
+  await agentTab.open();
+  try {
+    const res = await authed('/api/current');
+    const body = await res.json();
+    assert.equal(body.thread_id, 'brians-chat');
+    assert.deepEqual(agentTab.received, []);
+  } finally {
+    human.ws.close();
+    agentTab.ws.close();
   }
 });
 

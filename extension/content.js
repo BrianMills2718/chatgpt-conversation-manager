@@ -626,7 +626,7 @@ async function moveToProjectViaVisibleUi(projectName, targetThreadId) {
 // that may cover hundreds of conversations).
 
 let bulkArchiving = false;
-const CAPABILITIES = { incremental_archive: true, rate_limit_recovery: true, adaptive_pacing: true, ask: true };
+const CAPABILITIES = { incremental_archive: true, rate_limit_recovery: true, adaptive_pacing: true, ask: true, agent_tab: true };
 
 // A tab keeps one token across full-page navigations (sessionStorage is per tab
 // and per origin), so the broker can address THIS tab again after it navigates
@@ -638,6 +638,26 @@ const TAB_TOKEN = (() => {
     return t;
   } catch { return crypto.randomUUID(); }
 })();
+
+// A tab opened at https://chatgpt.com/?ccm_agent=1 is the agents' tab for the rest
+// of its life (sessionStorage survives its navigations). ask_chatgpt only types
+// there, so agents never touch a tab Brian is using.
+const AGENT_TAB = (() => {
+  try {
+    if (new URL(location.href).searchParams.get("ccm_agent") === "1") sessionStorage.setItem("ccm_agent_tab", "1");
+    return sessionStorage.getItem("ccm_agent_tab") === "1";
+  } catch { return false; }
+})();
+
+function showAgentTabBadge() {
+  if (!AGENT_TAB || document.getElementById("ccm-agent-badge")) return;
+  const badge = document.createElement("div");
+  badge.id = "ccm-agent-badge";
+  badge.textContent = "Agent tab — Claude Code / Codex type here";
+  badge.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:2147483647;padding:4px 8px;border-radius:6px;background:#b45309;color:#fff;font:12px system-ui;pointer-events:none;opacity:.9";
+  (document.body || document.documentElement).appendChild(badge);
+}
+showAgentTabBadge();
 
 // ask_chatgpt ------------------------------------------------------------------
 
@@ -825,7 +845,7 @@ async function handleCommand(msg) {
     const result = await moveToProjectViaVisibleUi(project, targetThreadId);
     return { ...result, thread_id: targetThreadId || currentThreadId() };
   }
-  if (msg.action === "get_tab") return { tab: TAB_TOKEN, busy: bulkArchiving, thread_id: currentThreadId() };
+  if (msg.action === "get_tab") return { tab: TAB_TOKEN, agent: AGENT_TAB, busy: bulkArchiving, thread_id: currentThreadId() };
   if (msg.action === "navigate_home") {
     refuseWhileArchiving("navigating");
     location.href = "https://chatgpt.com/";
@@ -876,6 +896,7 @@ async function connect() {
   }
   url.searchParams.set("token", cfg.token || DEFAULTS.token);
   url.searchParams.set("tab", TAB_TOKEN);
+  if (AGENT_TAB) url.searchParams.set("agent", "1");
   socket = new WebSocket(url.toString());
   socket.onopen = () => {
     setStatus({ connected: true });
