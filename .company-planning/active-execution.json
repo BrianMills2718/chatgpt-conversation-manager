@@ -1,17 +1,17 @@
 {
   "active_slice": {
     "description": "Record content-free bridge outcomes locally and summarize the captured operational evidence.",
-    "next_action": "Commit the verified prototype, then restart the local server and reload the extension before the first authentic bridge observation.",
+    "next_action": "Integrate the verified local code, then have Brian reload the unpacked Chrome extension and send one natural bridge request for an authentic observation.",
     "requires_external_action": false,
     "requires_spend": false,
     "slice_id": "instrument-and-report",
-    "status": "verifying",
-    "target_revision": "3d414990387638a075e5b1089a3fefd527101e8a"
+    "status": "blocked",
+    "target_revision": "a91afd0"
   },
   "authority": {
     "external_action_authorized": false,
-    "human_decision": null,
-    "human_decision_required": false,
+    "human_decision": "Reload the unpacked Chrome extension after the local broker revision is integrated; this physical browser action is required before authentic visible-error observations can be collected.",
+    "human_decision_required": true,
     "implementation_authorized": true,
     "spend_cap_usd": 0,
     "spend_used_usd": 0
@@ -29,14 +29,14 @@
     "verifier_outcome": "inconclusive"
   },
   "cursor_id": "bridge-observations-20260916",
-  "cursor_revision": 2,
+  "cursor_revision": 3,
   "failure_state": {
     "boundary": null,
     "last_failure_ref": null,
     "same_boundary_failures": 0
   },
   "goal_ref": "Approved local bridge observation prototype",
-  "lifecycle_state": "active",
+  "lifecycle_state": "human_required",
   "observations": [
     {
       "boundary": "existing browser bridge",
