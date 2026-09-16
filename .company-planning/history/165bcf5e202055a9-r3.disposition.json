@@ -1,0 +1,15 @@
+{
+  "archived_cursor_path": ".company-planning/history/165bcf5e202055a9-r3.json",
+  "archived_cursor_sha256": "a6b8b3d8fb532ebcfdb8d2f5f780e034c4ec3fa5143c20c4628913e33a215a22",
+  "cursor_id": "bridge-observations-20260916",
+  "cursor_revision": 3,
+  "cursor_sha256": "a6b8b3d8fb532ebcfdb8d2f5f780e034c4ec3fa5143c20c4628913e33a215a22",
+  "disposition": "retired",
+  "management_worktree": "/home/brian/code/chatgpt-conversation-manager-v0.2/worktrees/bridge-observations",
+  "operation": "retire",
+  "operator_session_id": "codex:01a0a7e8-2eda-7202-86a1-9c2af8c36d5d",
+  "reason": "The remaining authentic browser observation requires Brian to reload the unpacked Chrome extension after integration.",
+  "record_type": "plan_execution_disposition_receipt",
+  "schema_version": "1.0",
+  "successor_ref": null
+}
