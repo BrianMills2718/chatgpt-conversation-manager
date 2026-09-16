@@ -196,11 +196,12 @@ test('ask_chatgpt uses the idle agent tab, never Brian\'s tab, starts a new chat
       if (msg.action === 'send_prompt') {
         assert.equal(msg.text, 'hello from an agent');
         state.thread = 'new-thread-123';
-        return reply({ ok: true, thread_id: 'new-thread-123', dom_before: 0 });
+        return reply({ ok: true, thread_id: 'new-thread-123', dom_before: 0, messages_before: 0 });
       }
       if (msg.action === 'get_reply') {
         polls++;
         assert.equal(msg.dom_before, 0);
+        assert.equal(msg.messages_before, 0);
         if (polls === 1) return reply({ ok: true, done: false, generating: true });
         if (polls === 2) return reply({ ok: true, done: true, reply: 'hello ba', thread_id: 'new-thread-123' });   // paused mid-stream
         return reply({ ok: true, done: true, reply: 'hello back', thread_id: 'new-thread-123' });

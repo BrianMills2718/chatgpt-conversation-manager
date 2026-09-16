@@ -318,7 +318,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       let previousDoneText = null;
       while (Date.now() < deadline) {
         await sleep(pollMs);
-        try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before }, 30000, { tab }); }
+        try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before }, 30000, { tab }); }
         catch (err) { last = { done: false, error: err.message }; previousDoneText = null; continue; }
         if (!last.done) { previousDoneText = null; continue; }
         // The same finished text twice in a row: a pause mid-stream is not a reply.

@@ -686,6 +686,19 @@ async function sendPrompt(text) {
   // Counted on the page, not through the conversation API: that endpoint is
   // rate-limited for the whole account (HTTP 429) whenever archiving has run.
   const domBefore = extractMessagesFromDom().length;
+  // For a continued conversation the DOM may be virtualized, so its mounted
+  // message count is not a safe boundary for extracting only the new reply.
+  // One authoritative pre-send read gives getReply the exact full-tree count.
+  // Fall back to the DOM count if the private endpoint is unavailable or
+  // temporarily rate-limited; sending the prompt must not depend on capture.
+  let messagesBefore = domBefore;
+  if (threadBefore) {
+    try {
+      messagesBefore = linearizeMapping(await fetchConversationTree(threadBefore)).length;
+    } catch (err) {
+      await log("warn", "Could not read the pre-send conversation count; using DOM fallback", err);
+    }
+  }
   // Right after a navigation the composer can be on the page before its editor
   // accepts input, and the first insert is silently dropped. Retry for a few
   // seconds, re-finding the element each time in case the editor replaced it.
@@ -715,7 +728,8 @@ async function sendPrompt(text) {
   // A new chat first shows a temporary id ("WEB:<uuid>") in the URL and swaps in
   // the real conversation id once the server has created it.
   const threadId = threadBefore || await waitFor(() => realThreadId(), 60000, 250).catch(() => null);
-  return { thread_id: threadId, dom_before: domBefore, composer_selector: composer.selector, send_selector: button.selector };
+  return { thread_id: threadId, dom_before: domBefore, messages_before: messagesBefore,
+           composer_selector: composer.selector, send_selector: button.selector };
 }
 
 function realThreadId() {
@@ -738,13 +752,25 @@ function visibleRateLimitError() {
 // Read the reply from the page. Done when ChatGPT is no longer generating, and a
 // new assistant message follows our own. The caller requires the same text on
 // two consecutive polls before trusting it, so a pause mid-stream is not "done".
-async function getReply(domBefore) {
+async function getReply(domBefore, messagesBefore = domBefore) {
   const generating = Boolean(findFirst(STOP_BUTTON_SELECTORS, visible));
   const messages = extractMessagesFromDom();
   const added = messages.slice(Number(domBefore) || 0);
   const last = messages[messages.length - 1];
   const replies = added.filter((m) => m.role === "assistant");
   const done = !generating && replies.length > 0 && last?.role === "assistant";
+  const threadId = realThreadId();
+  if (done && threadId) {
+    try {
+      const apiReply = replyFromTree(await fetchConversationTree(threadId), Number(messagesBefore) || 0);
+      if (apiReply.done) {
+        return { ...apiReply, generating: false, thread_id: threadId,
+                 visible_error: visibleRateLimitError(), source: "api" };
+      }
+    } catch (err) {
+      await log("warn", "Could not read the completed reply from the conversation API; using DOM fallback", err);
+    }
+  }
   return { done, generating, thread_id: realThreadId(), message_count: messages.length,
            reply: done ? replies.map((m) => m.text).join("\n\n") : null, visible_error: visibleRateLimitError(), source: "dom" };
 }
@@ -867,7 +893,7 @@ async function handleCommand(msg) {
     return { navigated: true };
   }
   if (msg.action === "send_prompt") return sendPrompt(msg.text);
-  if (msg.action === "get_reply") return getReply(msg.dom_before);
+  if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before);
   if (msg.action === "navigate_to_thread") {
     refuseWhileArchiving("navigating");
     const threadId = String(msg.thread_id || "").trim();
