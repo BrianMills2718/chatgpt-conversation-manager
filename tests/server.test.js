@@ -15,7 +15,9 @@ let setAgentTabOpener;
 let matchChatsByTitle;
 let runOpenCommand;
 let waitForBulkComplete;
+let promptDispatchTimeoutMs;
 let bridgeObservationsPath;
+let archive;
 
 before(async () => {
   process.env.PORT = '0';
@@ -29,7 +31,9 @@ before(async () => {
   matchChatsByTitle = mod.matchChatsByTitle;
   runOpenCommand = mod.runOpenCommand;
   waitForBulkComplete = mod.waitForBulkComplete;
+  promptDispatchTimeoutMs = mod.promptDispatchTimeoutMs;
   bridgeObservationsPath = mod.BRIDGE_OBSERVATIONS_PATH;
+  archive = mod.archive;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
     server.listen(0, resolve);
@@ -54,6 +58,12 @@ test('GET /health reports ok without requiring auth', async () => {
   assert.equal(body.extension_connections, 0);
 });
 
+test('prompt dispatch timeout outlives the extension new-thread recovery ceiling', () => {
+  assert.equal(promptDispatchTimeoutMs(20), 120000);
+  assert.equal(promptDispatchTimeoutMs(180), 210000);
+  assert.equal(promptDispatchTimeoutMs(900), 300000);
+});
+
 test('protected endpoints reject requests without a valid bearer token', async () => {
   const res = await fetch(`${baseUrl}/api/search?q=test`);
   assert.equal(res.status, 401);
@@ -73,6 +83,21 @@ test('GET /api/thread/:id returns 404 for an unknown thread with a clear error m
   assert.equal(res.status, 404);
   const body = await res.json();
   assert.match(body.error, /Unknown archived thread/);
+});
+
+test('GET /api/thread/:id?full=1 returns the authoritative archived messages', async () => {
+  archive.archiveSnapshot({
+    thread_id: 'full-thread',
+    title: 'Full thread',
+    messages: [
+      { role: 'user', text: 'question' },
+      { role: 'assistant', text: 'complete answer' },
+    ],
+  });
+  const res = await authed('/api/thread/full-thread?full=1');
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.messages.at(-1).text, 'complete answer');
 });
 
 test('POST /api/capture surfaces a clear 503 when no extension is connected (broker-unavailable observability)', async () => {
@@ -224,6 +249,35 @@ test('ask_chatgpt uses the idle agent tab, never Brian\'s tab, starts a new chat
     human.ws.close();
     busy.ws.close();
     idle.ws.close();
+  }
+});
+
+test('ask_chatgpt recovers a new thread when navigation drops the send acknowledgement', async () => {
+  const agent = fakeTab('nav-drop-agent', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') {
+        state.thread = null;
+        return reply({ ok: true, navigated: true });
+      }
+      if (msg.action === 'send_prompt') {
+        state.thread = 'recovered-new-thread';
+        return; // simulate the old page disappearing before its command result
+      }
+      if (msg.action === 'get_reply') {
+        return reply({ ok: true, done: true, reply: 'Recovered complete answer', thread_id: state.thread, message_count: 2 });
+      }
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await agent.open();
+  await new Promise((r) => setTimeout(r, 50));
+  try {
+    const result = await askChatgpt({ text: 'survive navigation', timeout_seconds: 10, pollMs: 20, sendTimeoutMs: 50 });
+    assert.equal(result.thread_id, 'recovered-new-thread');
+    assert.equal(result.reply, 'Recovered complete answer');
+  } finally {
+    agent.ws.close();
   }
 });
 

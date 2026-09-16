@@ -760,7 +760,14 @@ async function getReply(domBefore, messagesBefore = domBefore) {
   const replies = added.filter((m) => m.role === "assistant");
   const done = !generating && replies.length > 0 && last?.role === "assistant";
   const threadId = realThreadId();
-  if (done && threadId) {
+  // Tool-heavy/reasoning chats can leave the mounted DOM with only the user
+  // messages even after the authoritative conversation tree contains the
+  // completed assistant answer. When generation is not visibly active, check
+  // that tree regardless of the DOM-derived `done` flag. Throttle the private
+  // API read so long tool runs do not poll it every three seconds.
+  const shouldCheckApi = !generating && threadId && Date.now() - getReply.lastApiCheckAt >= 10000;
+  if (shouldCheckApi) {
+    getReply.lastApiCheckAt = Date.now();
     try {
       const apiReply = replyFromTree(await fetchConversationTree(threadId), Number(messagesBefore) || 0);
       if (apiReply.done) {
@@ -774,6 +781,7 @@ async function getReply(domBefore, messagesBefore = domBefore) {
   return { done, generating, thread_id: realThreadId(), message_count: messages.length,
            reply: done ? replies.map((m) => m.text).join("\n\n") : null, visible_error: visibleRateLimitError(), source: "dom" };
 }
+getReply.lastApiCheckAt = 0;
 
 const PACER_STORAGE_KEY = "bulkFetchSpacingMs";
 

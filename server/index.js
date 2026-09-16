@@ -293,7 +293,17 @@ async function waitForTab(tab, predicate, timeoutMs, what) {
   throw new Error(`ChatGPT tab never ${what} within ${Math.round(timeoutMs / 1000)}s.`);
 }
 
-async function askChatgpt({ text, thread_id = null, thread_title = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000 }) {
+// sendPrompt can legitimately spend up to ~99s waiting for a newly navigated
+// page, the editor, the send acknowledgement, and ChatGPT's permanent thread
+// id. The broker previously killed that command at 90s, before the extension's
+// own bounded recovery sequence could finish. Keep this command timeout above
+// that internal ceiling while still bounding it independently of model reply
+// generation, which is handled by timeout_seconds below.
+function promptDispatchTimeoutMs(timeoutSeconds) {
+  return Math.max(120000, Math.min((Number(timeoutSeconds) + 30) * 1000, 300000));
+}
+
+async function askChatgpt({ text, thread_id = null, thread_title = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000, sendTimeoutMs = null }) {
   const run = async () => {
     const body = String(text || "").trim();
     if (!body) throw new Error("text is required.");
@@ -313,7 +323,25 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         await dispatchToExtension({ action: "navigate_home" }, COMMAND_TIMEOUT_MS, { tab });
         await waitForTab(tab, (i) => !i.thread_id, 20000, "opened a new chat");
       }
-      const sent = await dispatchToExtension({ action: "send_prompt", text: body }, 90000, { tab });
+      let sent;
+      try {
+        sent = await dispatchToExtension(
+          { action: "send_prompt", text: body },
+          sendTimeoutMs ?? promptDispatchTimeoutMs(timeout_seconds),
+          { tab },
+        );
+      } catch (err) {
+        // Submitting the first message can navigate the new-chat page and tear
+        // down its content script before the command result crosses the socket.
+        // The tab token survives that navigation. If the same tab now has a
+        // real thread id, the send happened; recover that identity and poll the
+        // answer instead of falsely failing (and tempting callers to duplicate
+        // the prompt). This recovery is intentionally new-thread-only.
+        if (conversationMode !== 'new' || !/Timed out waiting for the browser extension/i.test(err.message)) throw err;
+        const currentTab = await dispatchToExtension({ action: "get_tab" }, 5000, { tab });
+        if (!currentTab.thread_id) throw err;
+        sent = { thread_id: currentTab.thread_id, dom_before: 0, messages_before: 0, recovered_after_navigation: true };
+      }
       const deadline = Date.now() + timeout_seconds * 1000;
       let previousDoneText = null;
       while (Date.now() < deadline) {
@@ -398,6 +426,11 @@ app.get('/api/current', async (req, res) => {
 });
 app.get('/api/thread/:id', (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  if (req.query.full === '1') {
+    const snapshot = archive.getThread(req.params.id);
+    if (!snapshot) return res.status(404).json({ error: `Unknown archived thread: ${req.params.id}` });
+    return res.json(snapshot);
+  }
   const catalog = archive.readCatalog();
   const t = catalog.threads[req.params.id];
   if (!t) return res.status(404).json({ error: `Unknown archived thread: ${req.params.id}` });
@@ -651,4 +684,4 @@ if (isMain) {
   });
 }
 
-export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, BRIDGE_OBSERVATIONS_PATH };
+export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, promptDispatchTimeoutMs, BRIDGE_OBSERVATIONS_PATH };
