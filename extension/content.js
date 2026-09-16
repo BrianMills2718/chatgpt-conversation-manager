@@ -775,8 +775,19 @@ async function getReply(domBefore, messagesBefore = domBefore) {
                  visible_error: visibleRateLimitError(), source: "api" };
       }
     } catch (err) {
-      await log("warn", "Could not read the completed reply from the conversation API; using DOM fallback", err);
+      await log("warn", "Could not read the completed reply from the conversation API; waiting instead of trusting virtualized DOM text", err);
     }
+  }
+  // Once ChatGPT has assigned a real conversation id, its conversation tree is
+  // the only trustworthy completion boundary. Long/tool-heavy threads can
+  // virtualize or remount the DOM, so slicing mounted messages by the pre-send
+  // count can return a previous answer, a partial heading, or follow-up
+  // suggestion chips as a false success. Keep polling the tree when it is
+  // temporarily unavailable (for example during a 429) rather than accepting
+  // an ambiguous DOM reply.
+  if (threadId) {
+    return { done: false, generating, thread_id: threadId, message_count: messages.length,
+             reply: null, visible_error: visibleRateLimitError(), source: "api_waiting" };
   }
   return { done, generating, thread_id: realThreadId(), message_count: messages.length,
            reply: done ? replies.map((m) => m.text).join("\n\n") : null, visible_error: visibleRateLimitError(), source: "dom" };
