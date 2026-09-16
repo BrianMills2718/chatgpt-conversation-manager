@@ -305,6 +305,26 @@ test('ask_chatgpt classifies a visible ChatGPT too-many-requests error', async (
   }
 });
 
+test('ask_chatgpt leaves an unobserved failure source unknown', async () => {
+  const agentTab = fakeTab('agent-tab-unknown-failure', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'send_prompt') return reply({ ok: true, thread_id: 'unknown-thread', dom_before: 0 });
+      if (msg.action === 'get_reply') return reply({ ok: true, done: false, thread_id: 'unknown-thread', message_count: 2 });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await agentTab.open();
+  try {
+    await assert.rejects(askChatgpt({ text: 'try once', timeout_seconds: 0.1, pollMs: 20 }), /No finished reply within/);
+    const event = fs.readFileSync(bridgeObservationsPath, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+    assert.equal(event.failure_kind, 'unknown');
+    assert.equal(event.visible_error, null);
+  } finally {
+    agentTab.ws.close();
+  }
+});
+
 test('bridge observation report summarizes local outcomes and preserves raw thread IDs', () => {
   const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-observation-report-'));
   const observationDir = path.join(archiveDir, 'observations');

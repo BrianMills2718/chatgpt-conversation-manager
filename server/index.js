@@ -32,7 +32,7 @@ function bridgeFailureKind(error, last) {
   if (last?.visible_error === 'too_many_requests' || /too many requests/i.test(String(error?.message || ''))) return 'rate_limited';
   if (/No finished reply within|Timed out waiting/i.test(String(error?.message || ''))) return 'timeout';
   if (/No browser extension|not connected|No idle agent ChatGPT tab/i.test(String(error?.message || ''))) return 'broker';
-  return 'browser_ui';
+  return 'unknown';
 }
 
 const app = express();
