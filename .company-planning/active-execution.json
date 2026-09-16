@@ -1,0 +1,58 @@
+{
+  "active_slice": {
+    "description": "Record content-free bridge outcomes locally and summarize the captured operational evidence.",
+    "next_action": "Add the observation writer, extension-visible failure classification, report script, and focused tests.",
+    "requires_external_action": false,
+    "requires_spend": false,
+    "slice_id": "instrument-and-report",
+    "status": "executing",
+    "target_revision": "3d414990387638a075e5b1089a3fefd527101e8a"
+  },
+  "authority": {
+    "external_action_authorized": false,
+    "human_decision": null,
+    "human_decision_required": false,
+    "implementation_authorized": true,
+    "spend_cap_usd": 0,
+    "spend_used_usd": 0
+  },
+  "circuit_breakers": {
+    "context_integrity_valid": true,
+    "max_same_boundary_failures": 3,
+    "runtime_integrity_valid": true
+  },
+  "completion": {
+    "evidence_revision": null,
+    "receipt_ref": null,
+    "remaining_ready_work": 1,
+    "requested": false,
+    "verifier_outcome": null
+  },
+  "cursor_id": "bridge-observations-20260916",
+  "cursor_revision": 1,
+  "failure_state": {
+    "boundary": null,
+    "last_failure_ref": null,
+    "same_boundary_failures": 0
+  },
+  "goal_ref": "Approved local bridge observation prototype",
+  "lifecycle_state": "active",
+  "observations": [
+    {
+      "boundary": "existing browser bridge",
+      "evidence_ref": "Conversation approval: retain raw thread IDs and local operational fields; do not change routing.",
+      "kind": "supporting_work",
+      "observation_id": "design-approved",
+      "outcome": "pass"
+    }
+  ],
+  "plan_revision": "conversation-approved-20260915",
+  "ready_alternatives": [],
+  "record_type": "plan_execution_cursor",
+  "schema_version": "1.0",
+  "target": {
+    "branch": "codex/bridge-observations",
+    "repository": "chatgpt-conversation-manager-v0.2",
+    "worktree": "/home/brian/code/chatgpt-conversation-manager-v0.2/worktrees/bridge-observations"
+  }
+}
