@@ -1,11 +1,11 @@
 {
   "active_slice": {
     "description": "Record content-free bridge outcomes locally and summarize the captured operational evidence.",
-    "next_action": "Add the observation writer, extension-visible failure classification, report script, and focused tests.",
+    "next_action": "Commit the verified prototype, then restart the local server and reload the extension before the first authentic bridge observation.",
     "requires_external_action": false,
     "requires_spend": false,
     "slice_id": "instrument-and-report",
-    "status": "executing",
+    "status": "verifying",
     "target_revision": "3d414990387638a075e5b1089a3fefd527101e8a"
   },
   "authority": {
@@ -26,10 +26,10 @@
     "receipt_ref": null,
     "remaining_ready_work": 1,
     "requested": false,
-    "verifier_outcome": null
+    "verifier_outcome": "inconclusive"
   },
   "cursor_id": "bridge-observations-20260916",
-  "cursor_revision": 1,
+  "cursor_revision": 2,
   "failure_state": {
     "boundary": null,
     "last_failure_ref": null,
@@ -43,6 +43,13 @@
       "evidence_ref": "Conversation approval: retain raw thread IDs and local operational fields; do not change routing.",
       "kind": "supporting_work",
       "observation_id": "design-approved",
+      "outcome": "pass"
+    },
+    {
+      "boundary": "bridge request lifecycle and local report",
+      "evidence_ref": "npm run check and npm test passed with 88 tests at the implementation worktree.",
+      "kind": "authentic_result",
+      "observation_id": "focused-verification",
       "outcome": "pass"
     }
   ],
