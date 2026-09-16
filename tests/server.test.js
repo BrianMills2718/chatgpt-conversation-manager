@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { WebSocket } from 'ws';
 
 const TOKEN = 'test-token-123';
@@ -14,6 +15,7 @@ let setAgentTabOpener;
 let matchChatsByTitle;
 let runOpenCommand;
 let waitForBulkComplete;
+let bridgeObservationsPath;
 
 before(async () => {
   process.env.PORT = '0';
@@ -27,6 +29,7 @@ before(async () => {
   matchChatsByTitle = mod.matchChatsByTitle;
   runOpenCommand = mod.runOpenCommand;
   waitForBulkComplete = mod.waitForBulkComplete;
+  bridgeObservationsPath = mod.BRIDGE_OBSERVATIONS_PATH;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
     server.listen(0, resolve);
@@ -253,6 +256,73 @@ test('ask_chatgpt uses the agent tab the broker opened for it', async () => {
   } finally {
     agentTab.ws?.close();
   }
+});
+
+test('ask_chatgpt records operational evidence without prompt or reply content', async () => {
+  const agentTab = fakeTab('agent-tab-observe', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'send_prompt') return reply({ ok: true, thread_id: 'observation-thread', dom_before: 1 });
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'this must not be recorded', thread_id: 'observation-thread', message_count: 3 });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await agentTab.open();
+  try {
+    await askChatgpt({ text: 'private prompt text', timeout_seconds: 10, pollMs: 20 });
+    const events = fs.readFileSync(bridgeObservationsPath, 'utf8').trim().split('\n').map(JSON.parse);
+    const event = events.at(-1);
+    assert.equal(event.outcome, 'success');
+    assert.equal(event.thread_id, 'observation-thread');
+    assert.equal(event.prompt_chars, 'private prompt text'.length);
+    assert.equal(event.history_message_count, 3);
+    assert.equal(JSON.stringify(event).includes('private prompt text'), false);
+    assert.equal(JSON.stringify(event).includes('this must not be recorded'), false);
+  } finally {
+    agentTab.ws.close();
+  }
+});
+
+test('ask_chatgpt classifies a visible ChatGPT too-many-requests error', async () => {
+  const agentTab = fakeTab('agent-tab-rate-limit', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'send_prompt') return reply({ ok: true, thread_id: 'rate-thread', dom_before: 0 });
+      if (msg.action === 'get_reply') return reply({ ok: true, done: false, thread_id: 'rate-thread', message_count: 2, visible_error: 'too_many_requests' });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await agentTab.open();
+  try {
+    await assert.rejects(askChatgpt({ text: 'try once', timeout_seconds: 0.1, pollMs: 20 }), /No finished reply within/);
+    const event = fs.readFileSync(bridgeObservationsPath, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+    assert.equal(event.outcome, 'failed');
+    assert.equal(event.failure_kind, 'rate_limited');
+    assert.equal(event.visible_error, 'too_many_requests');
+    assert.equal(event.thread_id, 'rate-thread');
+  } finally {
+    agentTab.ws.close();
+  }
+});
+
+test('bridge observation report summarizes local outcomes and preserves raw thread IDs', () => {
+  const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-observation-report-'));
+  const observationDir = path.join(archiveDir, 'observations');
+  fs.mkdirSync(observationDir, { recursive: true });
+  fs.writeFileSync(path.join(observationDir, 'bridge-events.jsonl'), [
+    { schema_version: 1, event_id: 'one', outcome: 'success', failure_kind: null, conversation_mode: 'new', thinking_level: 'unknown', duration_ms: 100, thread_id: 'raw-thread-one' },
+    { schema_version: 1, event_id: 'two', outcome: 'failed', failure_kind: 'rate_limited', conversation_mode: 'continuing', thinking_level: 'unknown', duration_ms: 300, thread_id: 'raw-thread-two', started_at: '2026-09-16T00:00:00.000Z', ended_at: '2026-09-16T00:00:00.300Z', history_message_count: 18 },
+  ].map(JSON.stringify).join('\n') + '\n');
+  const output = execFileSync(process.execPath, ['scripts/bridge-observation-report.js'], {
+    cwd: path.resolve('.'),
+    env: { ...process.env, ARCHIVE_DIR: archiveDir },
+    encoding: 'utf8',
+  });
+  const report = JSON.parse(output);
+  assert.equal(report.events, 2);
+  assert.deepEqual(report.by_outcome, { failed: 1, success: 1 });
+  assert.equal(report.by_failure_kind.rate_limited, 1);
+  assert.equal(report.rate_limited_events[0].thread_id, 'raw-thread-two');
 });
 
 test('untargeted "current chat" commands skip the agent tab when Brian has a tab open', async () => {
