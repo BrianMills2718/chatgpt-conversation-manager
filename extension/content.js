@@ -724,6 +724,16 @@ function realThreadId() {
 }
 
 const STOP_BUTTON_SELECTORS = ['[data-testid="stop-button"]', 'button[aria-label*="Stop"]'];
+const RATE_LIMIT_SELECTORS = ['[role="alert"]', '[data-testid*="error"]', '[class*="error"]'];
+
+function visibleRateLimitError() {
+  for (const selector of RATE_LIMIT_SELECTORS) {
+    for (const el of document.querySelectorAll(selector)) {
+      if (visible(el) && /too many requests/i.test(el.innerText || el.textContent || '')) return 'too_many_requests';
+    }
+  }
+  return null;
+}
 
 // Read the reply from the page. Done when ChatGPT is no longer generating, and a
 // new assistant message follows our own. The caller requires the same text on
@@ -736,7 +746,7 @@ async function getReply(domBefore) {
   const replies = added.filter((m) => m.role === "assistant");
   const done = !generating && replies.length > 0 && last?.role === "assistant";
   return { done, generating, thread_id: realThreadId(), message_count: messages.length,
-           reply: done ? replies.map((m) => m.text).join("\n\n") : null, source: "dom" };
+           reply: done ? replies.map((m) => m.text).join("\n\n") : null, visible_error: visibleRateLimitError(), source: "dom" };
 }
 
 const PACER_STORAGE_KEY = "bulkFetchSpacingMs";

@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
+import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import express from "express";
@@ -20,6 +21,19 @@ const AUTH_TOKEN = process.env.RENAMER_TOKEN || "change-me";
 const COMMAND_TIMEOUT_MS = Number(process.env.COMMAND_TIMEOUT_MS || 40000);
 const ARCHIVE_DIR = process.env.ARCHIVE_DIR || path.resolve('data');
 const archive = new ArchiveStore(ARCHIVE_DIR);
+const BRIDGE_OBSERVATIONS_PATH = path.join(ARCHIVE_DIR, 'observations', 'bridge-events.jsonl');
+
+function appendBridgeObservation(event) {
+  fs.mkdirSync(path.dirname(BRIDGE_OBSERVATIONS_PATH), { recursive: true });
+  fs.appendFileSync(BRIDGE_OBSERVATIONS_PATH, `${JSON.stringify({ schema_version: 1, event_id: crypto.randomUUID(), ...event })}\n`);
+}
+
+function bridgeFailureKind(error, last) {
+  if (last?.visible_error === 'too_many_requests' || /too many requests/i.test(String(error?.message || ''))) return 'rate_limited';
+  if (/No finished reply within|Timed out waiting/i.test(String(error?.message || ''))) return 'timeout';
+  if (/No browser extension|not connected|No idle agent ChatGPT tab/i.test(String(error?.message || ''))) return 'broker';
+  return 'browser_ui';
+}
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -284,30 +298,40 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
     const body = String(text || "").trim();
     if (!body) throw new Error("text is required.");
     if (thread_id && thread_title) throw new Error("pass thread_id or thread_title, not both.");
-    if (thread_title) thread_id = await resolveThreadTitle(thread_title);
-    const { tab, thread_id: current } = await pickIdleTab({ openWaitMs });
-    if (thread_id && current !== thread_id) {
-      await dispatchToExtension({ action: "navigate_to_thread", thread_id }, COMMAND_TIMEOUT_MS, { tab });
-      await waitForTab(tab, (i) => i.thread_id === thread_id, 20000, `opened conversation ${thread_id}`);
-    } else if (!thread_id && current) {
-      await dispatchToExtension({ action: "navigate_home" }, COMMAND_TIMEOUT_MS, { tab });
-      await waitForTab(tab, (i) => !i.thread_id, 20000, "opened a new chat");
-    }
-    const sent = await dispatchToExtension({ action: "send_prompt", text: body }, 90000, { tab });
-    const deadline = Date.now() + timeout_seconds * 1000;
+    const startedAt = new Date().toISOString();
+    const startedMs = Date.now();
     let last = null;
-    let previousDoneText = null;
-    while (Date.now() < deadline) {
-      await sleep(pollMs);
-      try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before }, 30000, { tab }); }
-      catch (err) { last = { done: false, error: err.message }; previousDoneText = null; continue; }
-      if (!last.done) { previousDoneText = null; continue; }
-      // The same finished text twice in a row: a pause mid-stream is not a reply.
-      if (last.reply !== previousDoneText) { previousDoneText = last.reply; continue; }
-      const threadId = last.thread_id || sent.thread_id;
-      return { thread_id: threadId, url: threadId ? `https://chatgpt.com/c/${threadId}` : null, reply: last.reply };
+    let resolvedThreadId = thread_id;
+    let conversationMode = thread_id || thread_title ? 'continuing' : 'new';
+    try {
+      if (thread_title) resolvedThreadId = await resolveThreadTitle(thread_title);
+      const { tab, thread_id: current } = await pickIdleTab({ openWaitMs });
+      if (resolvedThreadId && current !== resolvedThreadId) {
+        await dispatchToExtension({ action: "navigate_to_thread", thread_id: resolvedThreadId }, COMMAND_TIMEOUT_MS, { tab });
+        await waitForTab(tab, (i) => i.thread_id === resolvedThreadId, 20000, `opened conversation ${resolvedThreadId}`);
+      } else if (!resolvedThreadId && current) {
+        await dispatchToExtension({ action: "navigate_home" }, COMMAND_TIMEOUT_MS, { tab });
+        await waitForTab(tab, (i) => !i.thread_id, 20000, "opened a new chat");
+      }
+      const sent = await dispatchToExtension({ action: "send_prompt", text: body }, 90000, { tab });
+      const deadline = Date.now() + timeout_seconds * 1000;
+      let previousDoneText = null;
+      while (Date.now() < deadline) {
+        await sleep(pollMs);
+        try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before }, 30000, { tab }); }
+        catch (err) { last = { done: false, error: err.message }; previousDoneText = null; continue; }
+        if (!last.done) { previousDoneText = null; continue; }
+        // The same finished text twice in a row: a pause mid-stream is not a reply.
+        if (last.reply !== previousDoneText) { previousDoneText = last.reply; continue; }
+        const threadId = last.thread_id || sent.thread_id || resolvedThreadId || null;
+        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'success', failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+        return { thread_id: threadId, url: threadId ? `https://chatgpt.com/c/${threadId}` : null, reply: last.reply };
+      }
+      throw new Error(`No finished reply within ${timeout_seconds}s (last seen: ${JSON.stringify(last)}). The message was sent; check ChatGPT (conversation ${sent.thread_id || "id not yet assigned"}).`);
+    } catch (err) {
+      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'failed', failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+      throw err;
     }
-    throw new Error(`No finished reply within ${timeout_seconds}s (last seen: ${JSON.stringify(last)}). The message was sent; check ChatGPT (conversation ${sent.thread_id || "id not yet assigned"}).`);
   };
   const result = askQueue.then(run, run);
   askQueue = result.catch(() => {});
@@ -627,4 +651,4 @@ if (isMain) {
   });
 }
 
-export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand };
+export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, BRIDGE_OBSERVATIONS_PATH };
