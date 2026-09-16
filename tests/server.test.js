@@ -295,6 +295,36 @@ test('ask_chatgpt opens an agent tab when only Brian\'s tabs are connected, and 
   }
 });
 
+test('ask_chatgpt can require a fresh dedicated tab even when an idle agent tab exists', async () => {
+  const oldAgent = fakeTab('old-agent-tab', {
+    agent: true,
+    onCommand: async (msg, _state, reply) => reply({ ok: false, error: `old tab should not receive ${msg.action}` }),
+  });
+  await oldAgent.open();
+  let newAgent;
+  setAgentTabOpener(async () => {
+    newAgent = fakeTab('fresh-agent-tab', {
+      agent: true,
+      onCommand: async (msg, state, reply) => {
+        if (msg.action === 'navigate_home') { state.thread = null; return reply({ ok: true }); }
+        if (msg.action === 'send_prompt') { state.thread = 'fresh-thread'; return reply({ ok: true, thread_id: state.thread, dom_before: 0, messages_before: 0 }); }
+        if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'fresh answer', thread_id: state.thread, message_count: 2 });
+        reply({ ok: false, error: `unexpected ${msg.action}` });
+      },
+    });
+    await newAgent.open();
+  });
+  try {
+    const result = await askChatgpt({ text: 'fresh task', fresh_tab: true, timeout_seconds: 10, pollMs: 20, openWaitMs: 2000 });
+    assert.equal(result.thread_id, 'fresh-thread');
+    assert.equal(result.reply, 'fresh answer');
+    assert.ok(!oldAgent.received.includes('send_prompt'));
+  } finally {
+    oldAgent.ws.close();
+    newAgent?.ws.close();
+  }
+});
+
 test('ask_chatgpt uses the agent tab the broker opened for it', async () => {
   const agentTab = fakeTab('agent-tab-0007', {
     agent: true,

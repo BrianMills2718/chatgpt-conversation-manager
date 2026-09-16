@@ -257,8 +257,10 @@ let openAgentTab = async () => {
 };
 function setAgentTabOpener(fn) { openAgentTab = fn; }
 
-async function findIdleAgentTab(seen) {
-  const tokens = [...new Set([...extensionSockets].filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab).map((ws) => ws.tabToken))];
+async function findIdleAgentTab(seen, excludeTokens = new Set()) {
+  const tokens = [...new Set([...extensionSockets]
+    .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab && !excludeTokens.has(ws.tabToken))
+    .map((ws) => ws.tabToken))];
   for (const tab of tokens) {
     try {
       const info = await dispatchToExtension({ action: "get_tab" }, 3000, { tab });
@@ -269,15 +271,20 @@ async function findIdleAgentTab(seen) {
   return null;
 }
 
-async function pickIdleTab({ openWaitMs = 90000 } = {}) {
+async function pickIdleTab({ openWaitMs = 90000, forceNew = false } = {}) {
   const seen = [];
-  const found = await findIdleAgentTab(seen);
-  if (found) return found;
+  const existing = new Set([...extensionSockets]
+    .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab)
+    .map((ws) => ws.tabToken));
+  if (!forceNew) {
+    const found = await findIdleAgentTab(seen);
+    if (found) return found;
+  }
   await openAgentTab();
   const deadline = Date.now() + openWaitMs;
   while (Date.now() < deadline) {
     await sleep(1000);
-    const next = await findIdleAgentTab([]);
+    const next = await findIdleAgentTab([], forceNew ? existing : new Set());
     if (next) return next;
   }
   throw new Error(`No idle agent ChatGPT tab (${JSON.stringify(seen)}); opened ${AGENT_TAB_URL} but it did not connect within ${Math.round(openWaitMs / 1000)}s (is Chrome signed in and the extension enabled?).`);
@@ -303,7 +310,7 @@ function promptDispatchTimeoutMs(timeoutSeconds) {
   return Math.max(120000, Math.min((Number(timeoutSeconds) + 30) * 1000, 300000));
 }
 
-async function askChatgpt({ text, thread_id = null, thread_title = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000, sendTimeoutMs = null }) {
+async function askChatgpt({ text, thread_id = null, thread_title = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000, sendTimeoutMs = null, fresh_tab = false }) {
   const run = async () => {
     const body = String(text || "").trim();
     if (!body) throw new Error("text is required.");
@@ -315,7 +322,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
     let conversationMode = thread_id || thread_title ? 'continuing' : 'new';
     try {
       if (thread_title) resolvedThreadId = await resolveThreadTitle(thread_title);
-      const { tab, thread_id: current } = await pickIdleTab({ openWaitMs });
+      const { tab, thread_id: current } = await pickIdleTab({ openWaitMs, forceNew: fresh_tab });
       if (resolvedThreadId && current !== resolvedThreadId) {
         await dispatchToExtension({ action: "navigate_to_thread", thread_id: resolvedThreadId }, COMMAND_TIMEOUT_MS, { tab });
         await waitForTab(tab, (i) => i.thread_id === resolvedThreadId, 20000, `opened conversation ${resolvedThreadId}`);
@@ -506,9 +513,10 @@ function createMcpServer() {
     thread_id: z.string().optional(),
     thread_title: z.string().min(1).optional(),
     timeout_seconds: z.number().int().min(10).max(900).optional(),
-  }, async ({ text, thread_id, thread_title, timeout_seconds }) => {
+    fresh_tab: z.boolean().optional(),
+  }, async ({ text, thread_id, thread_title, timeout_seconds, fresh_tab }) => {
     try {
-      const r = await askChatgpt({ text, thread_id: thread_id || null, thread_title: thread_title || null, timeout_seconds: timeout_seconds || 180 });
+      const r = await askChatgpt({ text, thread_id: thread_id || null, thread_title: thread_title || null, timeout_seconds: timeout_seconds || 180, fresh_tab: Boolean(fresh_tab) });
       return { content: [{ type: 'text', text: `${r.reply}\n\n[conversation ${r.thread_id} — ${r.url}]` }] };
     } catch (err) { return { isError: true, content: [{ type: 'text', text: `ask_chatgpt failed: ${err.message}` }] }; }
   });
