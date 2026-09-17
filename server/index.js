@@ -361,13 +361,20 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       }
       const deadline = Date.now() + timeout_seconds * 1000;
       let previousDoneText = null;
-      while (Date.now() < deadline) {
+      // A finished reply needs two consecutive identical polls to rule out a
+      // mid-stream pause. If the FIRST of those two lands right at the
+      // deadline, the confirming poll must still run instead of the whole
+      // call being reported as a timeout despite already having the answer
+      // (observed live 2026-09-17) -- so once a done candidate is seen, one
+      // more bounded confirmation poll is allowed even past the deadline.
+      let awaitingConfirmation = false;
+      while (Date.now() < deadline || awaitingConfirmation) {
         await sleep(pollMs);
         try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before }, 30000, { tab }); }
-        catch (err) { last = { done: false, error: err.message }; previousDoneText = null; continue; }
-        if (!last.done) { previousDoneText = null; continue; }
+        catch (err) { last = { done: false, error: err.message }; previousDoneText = null; awaitingConfirmation = false; continue; }
+        if (!last.done) { previousDoneText = null; awaitingConfirmation = false; continue; }
         // The same finished text twice in a row: a pause mid-stream is not a reply.
-        if (last.reply !== previousDoneText) { previousDoneText = last.reply; continue; }
+        if (last.reply !== previousDoneText) { previousDoneText = last.reply; awaitingConfirmation = true; continue; }
         const threadId = last.thread_id || sent.thread_id || resolvedThreadId || null;
         appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'success', failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
         return { thread_id: threadId, url: threadId ? `https://chatgpt.com/c/${threadId}` : null, reply: last.reply };
