@@ -724,7 +724,15 @@ async function sendPrompt(text) {
     .catch(() => { throw new Error(`no enabled send button found (tried ${SEND_BUTTON_SELECTORS.join(", ")}); nothing was sent.`); });
   button.el.click();
   await waitFor(() => ((el.value ?? el.innerText ?? "").trim() === "" ? true : null), 10000)
-    .catch(() => { throw new Error("clicked send but the composer did not clear; the prompt may not have been sent."); });
+    .catch(() => {
+      // Diagnostic only (2026-09-17): this fired for a fresh tab opened
+      // concurrently with another fresh tab, while the message had actually
+      // been sent (confirmed via list_chatgpt_chats afterward). Suspected
+      // cause is Chrome throttling the backgrounded tab's timers/rendering,
+      // not a real failed send -- surface the tab's own visibility state so
+      // the next occurrence confirms or rules that out, instead of guessing.
+      throw new Error(`clicked send but the composer did not clear; the prompt may not have been sent. (tab visibilityState=${document.visibilityState}, hasFocus=${document.hasFocus()})`);
+    });
   // A new chat first shows a temporary id ("WEB:<uuid>") in the URL and swaps in
   // the real conversation id once the server has created it.
   const threadId = threadBefore || await waitFor(() => realThreadId(), 60000, 250).catch(() => null);
