@@ -229,9 +229,12 @@ async function resolveThreadTitle(title) {
 }
 
 // ask_chatgpt ------------------------------------------------------------------
-// Send a message into a ChatGPT conversation through one idle tab and wait for
-// the reply. One ask at a time: two concurrent asks would type into the same tab.
-let askQueue = Promise.resolve();
+// Send a message into a ChatGPT conversation through one idle tab and wait
+// for the reply. Concurrent asks are allowed as long as each lands on its own
+// tab: this set holds the tokens of tabs currently claimed by an in-flight
+// ask, checked and set synchronously (no await in between) so two concurrent
+// pickIdleTab() calls can never both claim the same tab.
+const claimedTabs = new Set();
 
 // Agents only ever type into a tab opened for them (https://chatgpt.com/?ccm_agent=1),
 // never into a tab Brian is using. With none open, the broker opens one.
@@ -262,10 +265,15 @@ async function findIdleAgentTab(seen, excludeTokens = new Set()) {
     .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab && !excludeTokens.has(ws.tabToken))
     .map((ws) => ws.tabToken))];
   for (const tab of tokens) {
+    if (claimedTabs.has(tab)) { seen.push({ tab: tab.slice(0, 8), busy: "claimed" }); continue; }
     try {
       const info = await dispatchToExtension({ action: "get_tab" }, 3000, { tab });
+      // Re-check after the await: another concurrent call may have claimed
+      // this same tab while this dispatch was in flight. The check-and-claim
+      // itself is synchronous (no await), so exactly one caller wins it.
+      if (claimedTabs.has(tab)) { seen.push({ tab: tab.slice(0, 8), busy: "claimed" }); continue; }
       seen.push({ tab: tab.slice(0, 8), busy: info.busy });
-      if (!info.busy) return { tab, thread_id: info.thread_id || null };
+      if (!info.busy) { claimedTabs.add(tab); return { tab, thread_id: info.thread_id || null }; }
     } catch (err) { seen.push({ tab: tab.slice(0, 8), error: err.message }); }
   }
   return null;
@@ -320,9 +328,11 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
     let last = null;
     let resolvedThreadId = thread_id;
     let conversationMode = thread_id || thread_title ? 'continuing' : 'new';
+    let claimedTab = null;
     try {
       if (thread_title) resolvedThreadId = await resolveThreadTitle(thread_title);
       const { tab, thread_id: current } = await pickIdleTab({ openWaitMs, forceNew: fresh_tab });
+      claimedTab = tab;
       if (resolvedThreadId && current !== resolvedThreadId) {
         await dispatchToExtension({ action: "navigate_to_thread", thread_id: resolvedThreadId }, COMMAND_TIMEOUT_MS, { tab });
         await waitForTab(tab, (i) => i.thread_id === resolvedThreadId, 20000, `opened conversation ${resolvedThreadId}`);
@@ -366,11 +376,11 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
     } catch (err) {
       appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'failed', failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
       throw err;
+    } finally {
+      if (claimedTab) claimedTabs.delete(claimedTab);
     }
   };
-  const result = askQueue.then(run, run);
-  askQueue = result.catch(() => {});
-  return result;
+  return run();
 }
 
 app.post("/api/ask", async (req, res) => {
