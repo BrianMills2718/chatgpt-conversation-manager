@@ -209,7 +209,10 @@ function fakeTab(tab, { busy = false, thread = null, agent = false, onCommand })
       const msg = JSON.parse(buf.toString());
       if (msg.type !== 'command') return;
       state.received.push(msg.action);
-      const reply = (extra) => ws.send(JSON.stringify({ type: 'command_result', id: msg.id, ...extra }));
+      // Mirrors extension/content.js's requestContext: every real reply
+      // carries tab/agent/incognito, so the fake tab does too by default
+      // (a test can still override any of them via extra).
+      const reply = (extra) => ws.send(JSON.stringify({ type: 'command_result', id: msg.id, tab, agent, incognito: false, ...extra }));
       if (msg.action === 'get_tab') return reply({ ok: true, tab, agent, busy: state.busy, thread_id: state.thread });
       if (state.busy && ['navigate_home', 'navigate_to_thread', 'send_prompt'].includes(msg.action)) {
         return reply({ ok: false, error: 'busy: a bulk archive is running in this tab' });
@@ -378,7 +381,10 @@ test('the agent request pacer widens its gap on a detected rate-limit signal and
     onCommand: async (msg, state, reply) => {
       if (msg.action === 'navigate_home') return reply({ ok: true, navigated: true });
       if (msg.action === 'send_prompt') { state.thread = 'rl-thread'; return reply({ ok: true, thread_id: 'rl-thread', dom_before: 0, messages_before: 0 }); }
-      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'ok', thread_id: 'rl-thread', visible_error: 'too_many_requests' });
+      // api_checked:true simulates the real case: this get_reply actually
+      // hit ChatGPT's backend (not a free DOM poll) and that's where the
+      // rate-limit signal showed up.
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'ok', thread_id: 'rl-thread', visible_error: 'too_many_requests', api_checked: true, api_status: 429 });
       reply({ ok: false, error: `unexpected ${msg.action}` });
     },
   });
@@ -395,6 +401,83 @@ test('the agent request pacer widens its gap on a detected rate-limit signal and
   } finally {
     agentPacer.spacingMs = savedSpacing;
     agentPacer.rateLimited = savedRateLimited;
+    tab.ws.close();
+  }
+});
+
+test('a get_reply poll that never actually hits the API is not paced, counted, or logged as a real request', async () => {
+  const tab = fakeTab('free-poll-tab', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') return reply({ ok: true, navigated: true });
+      if (msg.action === 'send_prompt') { state.thread = 'free-poll-thread'; return reply({ ok: true, thread_id: 'free-poll-thread', dom_before: 0, messages_before: 0 }); }
+      // No api_checked field at all -- a pure DOM read, exactly like the
+      // vast majority of get_reply polls in real usage (the client only
+      // actually hits the API roughly once per 10s per tab).
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'free', thread_id: 'free-poll-thread' });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await tab.open();
+  fs.rmSync(requestTimingPath, { force: true });
+  try {
+    await askChatgpt({ text: 'free polls only', timeout_seconds: 10, pollMs: 20 });
+    const lines = fs.existsSync(requestTimingPath) ? fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+    assert.ok(lines.some((l) => l.action === 'send_prompt'), 'expected send_prompt itself to still be logged (always real)');
+    assert.ok(!lines.some((l) => l.action === 'get_reply'), 'expected no free/unchecked get_reply to be logged as a real request');
+  } finally {
+    tab.ws.close();
+  }
+});
+
+test('a real (api_checked) get_reply is logged with tab/agent/incognito context and the api status', async () => {
+  const tab = fakeTab('context-tab', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') return reply({ ok: true, navigated: true });
+      if (msg.action === 'send_prompt') { state.thread = 'context-thread'; return reply({ ok: true, thread_id: 'context-thread', dom_before: 0, messages_before: 0 }); }
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'checked', thread_id: 'context-thread', api_checked: true, api_status: 200, incognito: false });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await tab.open();
+  fs.rmSync(requestTimingPath, { force: true });
+  try {
+    await askChatgpt({ text: 'real check', timeout_seconds: 10, pollMs: 20 });
+    const lines = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const entry = lines.find((l) => l.action === 'get_reply');
+    assert.ok(entry, 'expected the api_checked get_reply to be logged');
+    assert.equal(entry.tab, 'context-'.slice(0, 8));
+    assert.equal(entry.agent_tab, true);
+    assert.equal(entry.incognito, false);
+    assert.equal(entry.api_checked, true);
+    assert.equal(entry.api_status, 200);
+    assert.equal(typeof entry.requests_last_60s, 'number');
+    assert.equal(typeof entry.requests_last_300s, 'number');
+    assert.equal(typeof entry.in_flight, 'number');
+  } finally {
+    tab.ws.close();
+  }
+});
+
+test('an authoritative Retry-After from a real 429 sets the pacer gap directly instead of only doubling blind', async () => {
+  const tab = fakeTab('retry-after-tab', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') return reply({ ok: true, navigated: true });
+      if (msg.action === 'send_prompt') { state.thread = 'ra-thread'; return reply({ ok: true, thread_id: 'ra-thread', dom_before: 0, messages_before: 0 }); }
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'ok', thread_id: 'ra-thread', api_checked: true, api_status: 429, api_retry_after_ms: 9000 });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await tab.open();
+  const savedSpacing = agentPacer.spacingMs;
+  agentPacer.spacingMs = 50;
+  try {
+    await askChatgpt({ text: 'honor retry-after', timeout_seconds: 10, pollMs: 20 });
+    assert.ok(agentPacer.spacingMs >= 9000, `expected the pacer to adopt the server's own Retry-After (9000ms), got ${agentPacer.spacingMs}`);
+  } finally {
+    agentPacer.spacingMs = savedSpacing;
     tab.ws.close();
   }
 });

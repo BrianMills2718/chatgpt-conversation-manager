@@ -649,6 +649,11 @@ const AGENT_TAB = (() => {
   } catch { return false; }
 })();
 
+// Whether this tab's browser context is a private/incognito window. Requires
+// the user to have flipped "Allow in Incognito" for this extension; without
+// that toggle, the content script never runs there at all and this is moot.
+const INCOGNITO = Boolean(chrome.extension && chrome.extension.inIncognitoContext);
+
 function showAgentTabBadge() {
   if (!AGENT_TAB || document.getElementById("ccm-agent-badge")) return;
   const badge = document.createElement("div");
@@ -780,15 +785,25 @@ async function getReply(domBefore, messagesBefore = domBefore) {
   // that tree regardless of the DOM-derived `done` flag. Throttle the private
   // API read so long tool runs do not poll it every three seconds.
   const shouldCheckApi = !generating && threadId && Date.now() - getReply.lastApiCheckAt >= 10000;
+  // Whether this call actually hit ChatGPT's backend, and with what result --
+  // an HTTP status/Retry-After from a real failed fetch is a far more
+  // reliable rate-limit signal than scraping a DOM banner for wording that
+  // can change, and lets the broker's pacer react to the account's own
+  // stated Retry-After instead of a guessed backoff.
+  let apiStatus = null;
+  let apiRetryAfterMs = null;
   if (shouldCheckApi) {
     getReply.lastApiCheckAt = Date.now();
     try {
       const apiReply = replyFromTree(await fetchConversationTree(threadId), Number(messagesBefore) || 0);
       if (apiReply.done) {
         return { ...apiReply, generating: false, thread_id: threadId,
-                 visible_error: visibleRateLimitError(), source: "api" };
+                 visible_error: visibleRateLimitError(), source: "api",
+                 api_checked: true, api_status: 200, api_retry_after_ms: null };
       }
     } catch (err) {
+      apiStatus = err.status ?? null;
+      apiRetryAfterMs = err.retryAfterMs ?? null;
       await log("warn", "Could not read the completed reply from the conversation API; waiting instead of trusting virtualized DOM text", err);
     }
   }
@@ -801,10 +816,12 @@ async function getReply(domBefore, messagesBefore = domBefore) {
   // an ambiguous DOM reply.
   if (threadId) {
     return { done: false, generating, thread_id: threadId, message_count: messages.length,
-             reply: null, visible_error: visibleRateLimitError(), source: "api_waiting" };
+             reply: null, visible_error: visibleRateLimitError(), source: "api_waiting",
+             api_checked: shouldCheckApi, api_status: apiStatus, api_retry_after_ms: apiRetryAfterMs };
   }
   return { done, generating, thread_id: realThreadId(), message_count: messages.length,
-           reply: done ? replies.map((m) => m.text).join("\n\n") : null, visible_error: visibleRateLimitError(), source: "dom" };
+           reply: done ? replies.map((m) => m.text).join("\n\n") : null, visible_error: visibleRateLimitError(), source: "dom",
+           api_checked: false, api_status: null, api_retry_after_ms: null };
 }
 getReply.lastApiCheckAt = 0;
 
@@ -1016,9 +1033,13 @@ async function connect() {
       return;
     }
     if (msg.type !== "command") return;
+    // Attached to every reply, success or failure, so the broker's request
+    // log can see which physical tab/context actually made each request
+    // without threading this through every individual action handler.
+    const requestContext = { tab: TAB_TOKEN, agent: AGENT_TAB, incognito: INCOGNITO };
     try {
       const result = await handleCommand(msg);
-      socket.send(JSON.stringify({ type: "command_result", id: msg.id, ok: true, ...result }));
+      socket.send(JSON.stringify({ type: "command_result", id: msg.id, ok: true, ...requestContext, ...result }));
       if ((msg.action === "navigate_to_thread" || msg.action === "navigate_home") && result.navigated) {
         // location.href is about to tear this content-script instance down
         // anyway. Closing proactively (instead of waiting for the browser to
@@ -1029,7 +1050,7 @@ async function connect() {
         socket.close();
       }
     } catch (err) {
-      socket.send(JSON.stringify({ type: "command_result", id: msg.id, ok: false, error: err.message }));
+      socket.send(JSON.stringify({ type: "command_result", id: msg.id, ok: false, ...requestContext, error: err.message }));
       await log("error", `command ${msg.action} failed`, err);
     }
   };

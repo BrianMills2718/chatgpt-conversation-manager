@@ -76,6 +76,26 @@ if (_savedAgentPacerState) {
   agentPacer.successes = _savedAgentPacerState.successes || 0;
 }
 let lastAgentRequestAt = 0;
+// How many paced dispatches are currently waiting on or executing a real
+// request at once -- a direct measure of concurrency pressure, independent
+// of the minimum-gap the pacer enforces, for correlating a future rate-limit
+// event against "was this a burst of parallel calls" specifically.
+let agentRequestsInFlight = 0;
+// A minimum gap between requests prevents zero-gap spamming by construction,
+// but says nothing about a longer rolling-window rate (e.g. "no more than N
+// in 60s") that a low, well-decayed gap could still exceed. Recording how
+// many backend-touching requests fell within the last 60s/300s at the time
+// of each dispatch is what actually lets a future incident be diagnosed as
+// "raw rate" vs "burst" vs neither, instead of guessing.
+const REQUEST_WINDOW_MS = 5 * 60 * 1000;
+const recentAgentRequestTimestamps = [];
+function recordAndCountWindow(nowMs) {
+  recentAgentRequestTimestamps.push(nowMs);
+  const cutoff = nowMs - REQUEST_WINDOW_MS;
+  while (recentAgentRequestTimestamps.length && recentAgentRequestTimestamps[0] < cutoff) recentAgentRequestTimestamps.shift();
+  const last60s = recentAgentRequestTimestamps.filter((t) => t >= nowMs - 60000).length;
+  return { requests_last_60s: last60s, requests_last_300s: recentAgentRequestTimestamps.length };
+}
 
 function appendRequestTiming(event) {
   fs.mkdirSync(path.dirname(REQUEST_TIMING_PATH), { recursive: true });
@@ -83,8 +103,26 @@ function appendRequestTiming(event) {
 }
 
 function isRateLimitSignal(err, result) {
-  if (result?.visible_error === 'too_many_requests') return true;
+  if (result?.visible_error === 'too_many_requests' || result?.api_status === 429) return true;
+  if (err?.api_status === 429) return true;
   return RATE_LIMIT_TEXT.test(String(err?.message || result?.error || ''));
+}
+function retryAfterMsOf(err, result) {
+  return result?.api_retry_after_ms ?? err?.api_retry_after_ms ?? null;
+}
+
+// AdaptivePacer.onRateLimit(retryAfterMs) only DOUBLES its own persisted
+// spacingMs internally; the retry-after-aware wait lives solely in its
+// return value, designed for a caller that awaits it once immediately
+// (extension/lib/api-capture.js's captureWithRecovery does exactly that).
+// This pacer instead persists spacingMs as an ongoing minimum gap across
+// unrelated future calls, so when ChatGPT tells us an authoritative
+// Retry-After, that has to become the new floor directly -- otherwise the
+// real value the account just told us is silently discarded and only the
+// blind doubling survives.
+function applyRateLimit(retryAfterMs) {
+  const suggested = agentPacer.onRateLimit(retryAfterMs);
+  if (retryAfterMs != null) agentPacer.spacingMs = Math.max(agentPacer.spacingMs, suggested);
 }
 
 const app = express();
@@ -212,7 +250,14 @@ function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { singl
           resolve(msg);
           return;
         }
-        lastError = new Error(msg.error || "browser action failed");
+        // Carry the tab/context fields the extension attaches to every
+        // reply (see content.js's requestContext) onto the rejection too,
+        // so a paced dispatch that fails still logs which tab/context it
+        // came from instead of losing everything but the error text.
+        lastError = Object.assign(new Error(msg.error || "browser action failed"), {
+          tab: msg.tab, agent: msg.agent, incognito: msg.incognito,
+          api_status: msg.api_status, api_retry_after_ms: msg.api_retry_after_ms,
+        });
         remaining--;
         if (remaining <= 0) {
           clearTimeout(timer);
@@ -224,31 +269,58 @@ function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { singl
   });
 }
 
+// get_reply is dispatched every poll cycle but only actually reaches
+// ChatGPT's backend roughly once per 10s per tab (its own internal
+// api-check cooldown, extension/content.js) -- the rest are free, local DOM
+// reads. Gating every get_reply behind the pacer's gap would throttle calls
+// that never touch the account's quota at all, which works against "as much
+// usage as possible" for no safety benefit. So get_reply is only pre-gated,
+// counted, and reacted to as a real request when its OWN result says it
+// actually checked the API (api_checked) or actually failed trying to
+// (err.api_status set) -- everything else in this set always makes a real
+// request and is paced unconditionally.
+const ALWAYS_REAL_ACTIONS = new Set(['send_prompt', 'list_recent_chats', 'capture_current_chat']);
+
 async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts = {}) {
-  const paced = BACKEND_TOUCHING_ACTIONS.has(command.action);
-  if (paced) {
+  const tracked = BACKEND_TOUCHING_ACTIONS.has(command.action);
+  const alwaysReal = ALWAYS_REAL_ACTIONS.has(command.action);
+  if (alwaysReal) {
     const waitMs = agentPacer.spacingMs - (Date.now() - lastAgentRequestAt);
     if (waitMs > 0) await sleep(waitMs);
   }
+  if (tracked) agentRequestsInFlight++;
   const startedMs = Date.now();
   try {
     const result = await dispatchToExtensionRaw(command, timeoutMs, opts);
-    if (paced) {
+    const real = alwaysReal || (command.action === 'get_reply' && result?.api_checked);
+    if (real) {
       lastAgentRequestAt = Date.now();
       const rateLimited = isRateLimitSignal(null, result);
-      if (rateLimited) agentPacer.onRateLimit(); else agentPacer.onSuccess();
+      if (rateLimited) applyRateLimit(retryAfterMsOf(null, result)); else agentPacer.onSuccess();
       saveAgentPacerState();
-      appendRequestTiming({ action: command.action, ok: true, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, spacing_ms: agentPacer.spacingMs });
+      appendRequestTiming({
+        action: command.action, ok: true, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, spacing_ms: agentPacer.spacingMs,
+        tab: result?.tab?.slice(0, 8) ?? null, agent_tab: result?.agent ?? null, incognito: result?.incognito ?? null,
+        api_checked: result?.api_checked ?? null, api_status: result?.api_status ?? null,
+        in_flight: agentRequestsInFlight, ...recordAndCountWindow(Date.now()),
+      });
     }
     return result;
   } catch (err) {
-    if (paced) {
+    const real = alwaysReal || (command.action === 'get_reply' && err?.api_status != null);
+    if (real) {
       lastAgentRequestAt = Date.now();
       const rateLimited = isRateLimitSignal(err, null);
-      if (rateLimited) { agentPacer.onRateLimit(); saveAgentPacerState(); }
-      appendRequestTiming({ action: command.action, ok: false, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, error: err.message, spacing_ms: agentPacer.spacingMs });
+      if (rateLimited) { applyRateLimit(retryAfterMsOf(err, null)); saveAgentPacerState(); }
+      appendRequestTiming({
+        action: command.action, ok: false, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, error: err.message, spacing_ms: agentPacer.spacingMs,
+        tab: err?.tab?.slice(0, 8) ?? null, agent_tab: err?.agent ?? null, incognito: err?.incognito ?? null,
+        api_status: err?.api_status ?? null, in_flight: agentRequestsInFlight, ...recordAndCountWindow(Date.now()),
+      });
     }
     throw err;
+  } finally {
+    if (tracked) agentRequestsInFlight--;
   }
 }
 
