@@ -303,6 +303,35 @@ test('ask_chatgpt runs two concurrent asks in parallel, one per idle agent tab',
   }
 });
 
+// Regression: the finished-reply check requires the SAME done text on two
+// consecutive polls (to rule out a mid-stream pause). If the first of those
+// two lands right at the deadline, the old code gave up and reported a
+// timeout even though it had just seen the real, finished reply -- observed
+// live 2026-09-17 ("No finished reply within 90s (last seen: ...done:
+// true...)"). The confirming poll must still run in that case.
+test('ask_chatgpt confirms a done reply seen right at the deadline instead of reporting a false timeout', async () => {
+  const agent = fakeTab('deadline-agent', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') { state.thread = null; return reply({ ok: true }); }
+      if (msg.action === 'send_prompt') { state.thread = 'deadline-thread'; return reply({ ok: true, thread_id: state.thread, dom_before: 0, messages_before: 0 }); }
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'settled answer', thread_id: state.thread, message_count: 2 });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await agent.open();
+  try {
+    // pollMs=60 with a 50ms deadline: the FIRST get_reply poll (at t=60ms)
+    // already lands past the deadline. The old code would already have
+    // thrown by the time it observed this done:true reply.
+    const result = await askChatgpt({ text: 'race the clock', timeout_seconds: 0.05, pollMs: 60 });
+    assert.equal(result.reply, 'settled answer');
+    assert.equal(result.thread_id, 'deadline-thread');
+  } finally {
+    agent.ws.close();
+  }
+});
+
 test('ask_chatgpt recovers a new thread when navigation drops the send acknowledgement', async () => {
   const agent = fakeTab('nav-drop-agent', {
     agent: true,
