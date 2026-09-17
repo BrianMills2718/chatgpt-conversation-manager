@@ -252,6 +252,57 @@ test('ask_chatgpt uses the idle agent tab, never Brian\'s tab, starts a new chat
   }
 });
 
+// Regression: askChatgpt() used to serialize every call through one global
+// queue, so two concurrent asks always ran one after another even with two
+// idle agent tabs open. Each concurrent call must claim its own tab and run
+// in parallel, with neither prompt landing on the other's tab.
+test('ask_chatgpt runs two concurrent asks in parallel, one per idle agent tab', async () => {
+  function slowIdleTab(tab, expectedText, replyText, threadId) {
+    return fakeTab(tab, {
+      agent: true,
+      onCommand: async (msg, state, reply) => {
+        if (msg.action === 'navigate_home') return reply({ ok: true, navigated: true });
+        if (msg.action === 'send_prompt') {
+          assert.equal(msg.text, expectedText, `${tab} received the wrong prompt`);
+          state.thread = threadId;
+          return reply({ ok: true, thread_id: threadId, dom_before: 0, messages_before: 0 });
+        }
+        if (msg.action === 'get_reply') {
+          // Hold the reply until both concurrent calls have had a chance to
+          // start, so a bug that serializes them would show up as one tab
+          // finishing fully before the other even receives its send_prompt.
+          await new Promise((r) => setTimeout(r, 150));
+          return reply({ ok: true, done: true, reply: replyText, thread_id: threadId });
+        }
+        reply({ ok: false, error: `unexpected ${msg.action}` });
+      },
+    });
+  }
+  const tabA = slowIdleTab('concurrent-tab-a', 'question for A', 'reply for A', 'thread-a');
+  const tabB = slowIdleTab('concurrent-tab-b', 'question for B', 'reply for B', 'thread-b');
+  await tabA.open();
+  await tabB.open();
+  await new Promise((r) => setTimeout(r, 50));
+  try {
+    const startedAt = Date.now();
+    const [resultA, resultB] = await Promise.all([
+      askChatgpt({ text: 'question for A', timeout_seconds: 10, pollMs: 20 }),
+      askChatgpt({ text: 'question for B', timeout_seconds: 10, pollMs: 20 }),
+    ]);
+    const elapsedMs = Date.now() - startedAt;
+    assert.equal(resultA.reply, 'reply for A');
+    assert.equal(resultB.reply, 'reply for B');
+    assert.notEqual(resultA.thread_id, resultB.thread_id, 'both calls landed on the same tab/thread');
+    // Serialized, this would take at least 2x the per-call reply delay.
+    assert.ok(elapsedMs < 400, `expected the two calls to overlap, took ${elapsedMs}ms`);
+    assert.equal(tabA.received.filter((a) => a === 'send_prompt').length, 1);
+    assert.equal(tabB.received.filter((a) => a === 'send_prompt').length, 1);
+  } finally {
+    tabA.ws.close();
+    tabB.ws.close();
+  }
+});
+
 test('ask_chatgpt recovers a new thread when navigation drops the send acknowledgement', async () => {
   const agent = fakeTab('nav-drop-agent', {
     agent: true,
