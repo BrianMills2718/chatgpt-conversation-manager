@@ -935,6 +935,27 @@ async function handleCommand(msg) {
     return { thread_id: threadId, navigated: true };
   }
   if (msg.action === "get_capabilities") return CAPABILITIES;
+  if (msg.action === "debug_inspect_toolbar") {
+    // Temporary, read-only reconnaissance for adding thinking-level control:
+    // dump every clickable control near the composer (text, aria-label,
+    // data-testid, role) instead of guessing selectors blind -- this repo's
+    // own changelog shows two prior bugs from hardcoding a DOM guess
+    // ("Skip to content"). Not wired to any MCP tool; safe to remove once
+    // the real picker is identified.
+    const composer = findFirst(COMPOSER_SELECTORS, visible)?.el;
+    const scope = composer ? composer.closest("form") || document.body : document.body;
+    const els = [...scope.querySelectorAll("button, [role=\"button\"], [role=\"menuitem\"], [data-testid]")];
+    return {
+      candidates: els.slice(0, 60).map((el) => ({
+        tag: el.tagName.toLowerCase(),
+        text: (el.textContent || "").trim().slice(0, 60),
+        ariaLabel: el.getAttribute("aria-label"),
+        testId: el.getAttribute("data-testid"),
+        role: el.getAttribute("role"),
+        expanded: el.getAttribute("aria-expanded"),
+      })),
+    };
+  }
   if (msg.action === "archive_all_chats") {
     if (bulkArchiving) throw new Error("A bulk archive is already running.");
     archiveAllChats({ known: msg.known || null }).catch((err) => log("error", "bulk archive failed", err));

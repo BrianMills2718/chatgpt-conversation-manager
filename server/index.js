@@ -421,6 +421,14 @@ app.post("/api/rename", async (req, res) => {
   try { const result = await dispatchToExtension({ action: "rename_current_chat", title: cleanTitle(req.body?.title), thread_id: req.body?.thread_id || undefined }); res.json(result); }
   catch (err) { res.status(503).json({ error: err.message }); }
 });
+// Temporary, read-only reconnaissance endpoint for adding thinking-level
+// control -- see the matching debug_inspect_toolbar action in content.js.
+// Not documented, not an MCP tool; remove once the real picker is found.
+app.post('/api/debug/inspect-toolbar', async (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  try { res.json(await dispatchToExtension({ action: 'debug_inspect_toolbar' }, COMMAND_TIMEOUT_MS, { single: true })); }
+  catch (err) { res.status(503).json({ error: err.message }); }
+});
 app.get('/api/search', (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   res.json({ results: archive.search(req.query.q || '', {
