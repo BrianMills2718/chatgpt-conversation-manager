@@ -10,6 +10,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { ArchiveStore, THREAD_STATUSES } from './archive.js';
 import { SyncScheduler } from './sync.js';
+import { AdaptivePacer } from '../extension/lib/api-capture.js';
 
 const PORT = Number(process.env.PORT || 8787);
 const AUTH_TOKEN = process.env.RENAMER_TOKEN || "change-me";
@@ -23,16 +24,67 @@ const ARCHIVE_DIR = process.env.ARCHIVE_DIR || path.resolve('data');
 const archive = new ArchiveStore(ARCHIVE_DIR);
 const BRIDGE_OBSERVATIONS_PATH = path.join(ARCHIVE_DIR, 'observations', 'bridge-events.jsonl');
 
+// Real backend text observed 2026-09-17: "You're making requests too
+// quickly. We've temporarily limited access to your conversations to
+// protect your data." The prior pattern only matched a generic "too many
+// requests" phrase and would have missed this exact banner -- broadened so
+// the same real signal drives both the failure classification below and the
+// agent request pacer, instead of only being noticed when Brian reports it.
+const RATE_LIMIT_TEXT = /too many requests|making requests too quickly|temporarily limited access to your conversations/i;
+
 function appendBridgeObservation(event) {
   fs.mkdirSync(path.dirname(BRIDGE_OBSERVATIONS_PATH), { recursive: true });
   fs.appendFileSync(BRIDGE_OBSERVATIONS_PATH, `${JSON.stringify({ schema_version: 1, event_id: crypto.randomUUID(), ...event })}\n`);
 }
 
 function bridgeFailureKind(error, last) {
-  if (last?.visible_error === 'too_many_requests' || /too many requests/i.test(String(error?.message || ''))) return 'rate_limited';
+  if (last?.visible_error === 'too_many_requests' || RATE_LIMIT_TEXT.test(String(error?.message || ''))) return 'rate_limited';
   if (/No finished reply within|Timed out waiting/i.test(String(error?.message || ''))) return 'timeout';
   if (/No browser extension|not connected|No idle agent ChatGPT tab/i.test(String(error?.message || ''))) return 'broker';
   return 'unknown';
+}
+
+// Agent request pacing and timing -----------------------------------------
+// Every ask_chatgpt/list_chatgpt_chats call goes through dispatchToExtension
+// below, but until now nothing paced or recorded them: a burst of live
+// verification calls on 2026-09-17 (list_recent_chats + concurrent
+// send_prompt/get_reply cycles) tripped ChatGPT's account-wide rate limit,
+// observed directly by Brian in his own ChatGPT UI, with no record of the
+// request timing that caused it. This reuses the same AIMD pacer already
+// proven for bulk-archive fetches (extension/lib/api-capture.js) -- every
+// success shortens the minimum gap a little, every detected rate-limit
+// signal doubles it -- so the gap settles just under whatever rate the
+// account actually tolerates instead of a guessed constant, and it is
+// persisted to disk so a broker restart does not forget a learned slowdown.
+const REQUEST_TIMING_PATH = path.join(ARCHIVE_DIR, 'observations', 'request-timing.jsonl');
+const AGENT_PACER_STATE_PATH = path.join(ARCHIVE_DIR, 'observations', 'agent-pacer-state.json');
+// Actions that make a real request against ChatGPT's backend (not a pure
+// local DOM/status read like get_tab or navigate_home).
+const BACKEND_TOUCHING_ACTIONS = new Set(['send_prompt', 'get_reply', 'list_recent_chats', 'capture_current_chat']);
+
+function loadAgentPacerState() {
+  try { return JSON.parse(fs.readFileSync(AGENT_PACER_STATE_PATH, 'utf8')); } catch { return null; }
+}
+function saveAgentPacerState() {
+  fs.mkdirSync(path.dirname(AGENT_PACER_STATE_PATH), { recursive: true });
+  fs.writeFileSync(AGENT_PACER_STATE_PATH, JSON.stringify({ spacingMs: agentPacer.spacingMs, rateLimited: agentPacer.rateLimited, successes: agentPacer.successes }));
+}
+const _savedAgentPacerState = loadAgentPacerState();
+const agentPacer = new AdaptivePacer({ initialMs: _savedAgentPacerState?.spacingMs ?? 3000, minMs: 1000, maxMs: 120000 });
+if (_savedAgentPacerState) {
+  agentPacer.rateLimited = _savedAgentPacerState.rateLimited || 0;
+  agentPacer.successes = _savedAgentPacerState.successes || 0;
+}
+let lastAgentRequestAt = 0;
+
+function appendRequestTiming(event) {
+  fs.mkdirSync(path.dirname(REQUEST_TIMING_PATH), { recursive: true });
+  fs.appendFileSync(REQUEST_TIMING_PATH, `${JSON.stringify({ schema_version: 1, ts: new Date().toISOString(), ...event })}\n`);
+}
+
+function isRateLimitSignal(err, result) {
+  if (result?.visible_error === 'too_many_requests') return true;
+  return RATE_LIMIT_TEXT.test(String(err?.message || result?.error || ''));
 }
 
 const app = express();
@@ -127,7 +179,10 @@ wss.on("connection", (ws, req) => {
 // every open chatgpt.com tab at once.
 // `tab` sends to the one tab carrying that token (it survives the tab's own
 // navigations), for actions that must happen in exactly one chosen tab.
-function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, { single = false, tab = null } = {}) {
+//
+// Wrapped below by the paced/logged public dispatchToExtension; this raw
+// form keeps its exact original synchronous-throw and broadcast semantics.
+function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { single = false, tab = null } = {}) {
   let sockets = [...extensionSockets].filter((ws) => ws.readyState === ws.OPEN);
   if (!sockets.length) throw new Error("No browser extension is connected to the broker.");
   if (tab) {
@@ -167,6 +222,34 @@ function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, { single =
       },
     });
   });
+}
+
+async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts = {}) {
+  const paced = BACKEND_TOUCHING_ACTIONS.has(command.action);
+  if (paced) {
+    const waitMs = agentPacer.spacingMs - (Date.now() - lastAgentRequestAt);
+    if (waitMs > 0) await sleep(waitMs);
+  }
+  const startedMs = Date.now();
+  try {
+    const result = await dispatchToExtensionRaw(command, timeoutMs, opts);
+    if (paced) {
+      lastAgentRequestAt = Date.now();
+      const rateLimited = isRateLimitSignal(null, result);
+      if (rateLimited) agentPacer.onRateLimit(); else agentPacer.onSuccess();
+      saveAgentPacerState();
+      appendRequestTiming({ action: command.action, ok: true, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, spacing_ms: agentPacer.spacingMs });
+    }
+    return result;
+  } catch (err) {
+    if (paced) {
+      lastAgentRequestAt = Date.now();
+      const rateLimited = isRateLimitSignal(err, null);
+      if (rateLimited) { agentPacer.onRateLimit(); saveAgentPacerState(); }
+      appendRequestTiming({ action: command.action, ok: false, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, error: err.message, spacing_ms: agentPacer.spacingMs });
+    }
+    throw err;
+  }
 }
 
 async function currentThreadId() {
@@ -717,4 +800,4 @@ if (isMain) {
   });
 }
 
-export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, promptDispatchTimeoutMs, BRIDGE_OBSERVATIONS_PATH };
+export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, promptDispatchTimeoutMs, BRIDGE_OBSERVATIONS_PATH, REQUEST_TIMING_PATH, agentPacer, dispatchToExtension };

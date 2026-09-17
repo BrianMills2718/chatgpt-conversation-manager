@@ -748,10 +748,16 @@ function realThreadId() {
 const STOP_BUTTON_SELECTORS = ['[data-testid="stop-button"]', 'button[aria-label*="Stop"]'];
 const RATE_LIMIT_SELECTORS = ['[role="alert"]', '[data-testid*="error"]', '[class*="error"]'];
 
+// Real banner text observed 2026-09-17: "You're making requests too
+// quickly. We've temporarily limited access to your conversations to
+// protect your data." The old pattern only matched a generic "too many
+// requests" phrase and would not have matched this actual wording.
+const RATE_LIMIT_BANNER_TEXT = /too many requests|making requests too quickly|temporarily limited access to your conversations/i;
+
 function visibleRateLimitError() {
   for (const selector of RATE_LIMIT_SELECTORS) {
     for (const el of document.querySelectorAll(selector)) {
-      if (visible(el) && /too many requests/i.test(el.innerText || el.textContent || '')) return 'too_many_requests';
+      if (visible(el) && RATE_LIMIT_BANNER_TEXT.test(el.innerText || el.textContent || '')) return 'too_many_requests';
     }
   }
   return null;

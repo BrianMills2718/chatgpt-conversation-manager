@@ -1,4 +1,4 @@
-import { test, before, after } from 'node:test';
+import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -18,6 +18,8 @@ let waitForBulkComplete;
 let promptDispatchTimeoutMs;
 let bridgeObservationsPath;
 let archive;
+let agentPacer;
+let requestTimingPath;
 
 before(async () => {
   process.env.PORT = '0';
@@ -34,12 +36,28 @@ before(async () => {
   promptDispatchTimeoutMs = mod.promptDispatchTimeoutMs;
   bridgeObservationsPath = mod.BRIDGE_OBSERVATIONS_PATH;
   archive = mod.archive;
+  agentPacer = mod.agentPacer;
+  requestTimingPath = mod.REQUEST_TIMING_PATH;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
     server.listen(0, resolve);
   });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
   wsUrl = `ws://127.0.0.1:${server.address().port}/extension?token=${TOKEN}`;
+});
+
+// The agent request pacer is shared, module-level state that reacts to a
+// "too_many_requests" visible_error/message on ANY dispatch, not only in the
+// tests dedicated to it -- an existing test that deliberately manufactures
+// that signal to test unrelated failure-classification logic triggered it as
+// a side effect, leaving spacingMs elevated (its own hardcoded 1000ms rate-
+// limit floor) for every test that ran afterward, each paying real wall-clock
+// wait for a pacer it never asked about (observed: one later test alone grew
+// from ~0.8s to ~8.3s). Reset it before every test so pacer state never
+// leaks across tests that don't explicitly exercise it.
+beforeEach(() => {
+  agentPacer.minMs = 0;
+  agentPacer.spacingMs = 0;
 });
 
 after(() => {
@@ -283,6 +301,15 @@ test('ask_chatgpt runs two concurrent asks in parallel, one per idle agent tab',
   await tabA.open();
   await tabB.open();
   await new Promise((r) => setTimeout(r, 50));
+  // The agent request pacer (below) enforces a real minimum gap between
+  // backend-touching dispatches, on purpose -- the account-wide rate limit
+  // it exists to avoid doesn't care which tab a request is for. That's
+  // orthogonal to what THIS test checks (no tab collision, no queue-wide
+  // stall), so shrink it to a floor for this test only.
+  const savedSpacing = agentPacer.spacingMs;
+  const savedMinMs = agentPacer.minMs;
+  agentPacer.minMs = 5;
+  agentPacer.spacingMs = 5;
   try {
     const startedAt = Date.now();
     const [resultA, resultB] = await Promise.all([
@@ -298,8 +325,77 @@ test('ask_chatgpt runs two concurrent asks in parallel, one per idle agent tab',
     assert.equal(tabA.received.filter((a) => a === 'send_prompt').length, 1);
     assert.equal(tabB.received.filter((a) => a === 'send_prompt').length, 1);
   } finally {
+    agentPacer.spacingMs = savedSpacing;
+    agentPacer.minMs = savedMinMs;
     tabA.ws.close();
     tabB.ws.close();
+  }
+});
+
+// The pacer is the actual fix for the account-wide rate limit ChatGPT itself
+// applies (observed live 2026-09-17): it must force a real minimum gap
+// between two backend-touching dispatches regardless of which tab or which
+// logical ask_chatgpt call they belong to.
+test('the agent request pacer enforces a minimum gap between backend-touching dispatches, across different tabs', async () => {
+  const tab = fakeTab('pacer-tab', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') { state.thread = null; return reply({ ok: true, navigated: true }); }
+      if (msg.action === 'send_prompt') { state.thread = 'pacer-thread'; return reply({ ok: true, thread_id: 'pacer-thread', dom_before: 0, messages_before: 0 }); }
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'paced reply', thread_id: 'pacer-thread' });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await tab.open();
+  const savedSpacing = agentPacer.spacingMs;
+  const savedMinMs = agentPacer.minMs;
+  agentPacer.minMs = 150;
+  agentPacer.spacingMs = 150;
+  fs.rmSync(requestTimingPath, { force: true });
+  try {
+    await askChatgpt({ text: 'first', timeout_seconds: 10, pollMs: 20 });
+    await askChatgpt({ text: 'second', timeout_seconds: 10, pollMs: 20 });
+    const events = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.ok(events.length >= 2, 'expected at least the two send_prompt dispatches to be logged');
+    // Each success shrinks the pacer's gap a little (AIMD), so compare each
+    // gap against the spacing the pacer actually held right after the prior
+    // dispatch (logged on that event), not a fixed constant.
+    for (let i = 1; i < events.length; i++) {
+      const gap = new Date(events[i].ts).getTime() - new Date(events[i - 1].ts).getTime();
+      const requiredGap = events[i - 1].spacing_ms - 20; // small scheduling slack
+      assert.ok(gap >= requiredGap, `expected >=${requiredGap}ms between "${events[i - 1].action}" and "${events[i].action}", got ${gap}ms`);
+    }
+  } finally {
+    agentPacer.spacingMs = savedSpacing;
+    agentPacer.minMs = savedMinMs;
+    tab.ws.close();
+  }
+});
+
+test('the agent request pacer widens its gap on a detected rate-limit signal and records it', async () => {
+  const tab = fakeTab('rate-limit-tab', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') return reply({ ok: true, navigated: true });
+      if (msg.action === 'send_prompt') { state.thread = 'rl-thread'; return reply({ ok: true, thread_id: 'rl-thread', dom_before: 0, messages_before: 0 }); }
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'ok', thread_id: 'rl-thread', visible_error: 'too_many_requests' });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await tab.open();
+  const savedSpacing = agentPacer.spacingMs;
+  const savedRateLimited = agentPacer.rateLimited;
+  agentPacer.spacingMs = 50;
+  try {
+    await askChatgpt({ text: 'trips the limit', timeout_seconds: 10, pollMs: 20 });
+    assert.ok(agentPacer.spacingMs > 50, `expected the gap to widen after a rate-limit signal, stayed at ${agentPacer.spacingMs}`);
+    assert.ok(agentPacer.rateLimited > savedRateLimited, 'expected at least one rate-limit signal to be recorded');
+    const lines = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.ok(lines.some((l) => l.action === 'get_reply' && l.rate_limited === true), 'expected the rate-limited get_reply to be logged');
+  } finally {
+    agentPacer.spacingMs = savedSpacing;
+    agentPacer.rateLimited = savedRateLimited;
+    tab.ws.close();
   }
 });
 
