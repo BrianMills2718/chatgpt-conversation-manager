@@ -14,6 +14,15 @@ import { AdaptivePacer } from '../extension/lib/api-capture.js';
 
 const PORT = Number(process.env.PORT || 8787);
 const AUTH_TOKEN = process.env.RENAMER_TOKEN || "change-me";
+// server.log's own console lines had no timestamps, making it impossible to
+// correlate broker activity (tab connects, sync/archive outcomes) against
+// timed data like request-timing.jsonl when reconstructing an incident after
+// the fact (2026-09-18: asked to explain a rate-limit spike against Brian's
+// own concurrent usage and could not line the two up in time).
+function logLine(fn, msg) { fn(`${new Date().toISOString()} ${msg}`); }
+const logInfo = (msg) => logLine(console.log, msg);
+const logWarn = (msg) => logLine(console.warn, msg);
+const logErr = (msg) => logLine(console.error, msg);
 // The sidebar-scroll-based commands (rename/move-to-project for a background
 // thread) have their own client-side budget of up to ~80 * 300ms = 24s just to
 // locate the thread in a virtualized list, before any menu interaction. This
@@ -102,6 +111,16 @@ function appendRequestTiming(event) {
   fs.appendFileSync(REQUEST_TIMING_PATH, `${JSON.stringify({ schema_version: 1, ts: new Date().toISOString(), ...event })}\n`);
 }
 
+// Zero-network-cost record of Brian's own ChatGPT activity (which tab, which
+// thread, whether a mutation was attempted/skipped/throttled), timestamped
+// against the same clock as request-timing.jsonl so the two can be lined up
+// for a future incident instead of reconstructed from memory.
+const DOM_ACTIVITY_PATH = path.join(ARCHIVE_DIR, 'observations', 'dom-activity.jsonl');
+function appendDomActivity(event) {
+  fs.mkdirSync(path.dirname(DOM_ACTIVITY_PATH), { recursive: true });
+  fs.appendFileSync(DOM_ACTIVITY_PATH, `${JSON.stringify({ schema_version: 1, ts: new Date().toISOString(), ...event })}\n`);
+}
+
 function isRateLimitSignal(err, result) {
   if (result?.visible_error === 'too_many_requests' || result?.api_status === 429) return true;
   if (err?.api_status === 429) return true;
@@ -156,7 +175,7 @@ async function checkBulkOrphan(owner) {
     try { if ((await dispatchToExtension({ action: "get_tab" }, 3000, { tab: owner })).busy) return; } catch { /* not connected */ }
   }
   const { running, type, ...counts } = bulkArchiveState;
-  console.error("[broker] bulk archive abandoned: its ChatGPT tab disconnected and is not archiving");
+  logErr("[broker] bulk archive abandoned: its ChatGPT tab disconnected and is not archiving");
   finishBulk({ type: "bulk_archive_complete", ...counts, failed: [], fatal_error: "the ChatGPT tab running the bulk archive disconnected (closed, refreshed, or extension reloaded) and is no longer archiving" });
 }
 
@@ -167,7 +186,7 @@ server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname !== "/extension") return socket.destroy();
   if (url.searchParams.get("token") !== AUTH_TOKEN) {
-    console.warn(`[broker] rejected extension upgrade from ${req.socket.remoteAddress}: bad or missing token`);
+    logWarn(`[broker] rejected extension upgrade from ${req.socket.remoteAddress}: bad or missing token`);
     return socket.destroy();
   }
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
@@ -180,30 +199,56 @@ wss.on("connection", (ws, req) => {
     ws.agentTab = params.get("agent") === "1";
   } catch { ws.tabToken = null; ws.agentTab = false; }
   extensionSockets.add(ws);
-  console.log(`[broker] extension connected (${extensionSockets.size} total)`);
+  logInfo(`[broker] extension connected (${extensionSockets.size} total)`);
   ws.send(JSON.stringify({ type: "hello", message: "connected" }));
   ws.on("message", (buf) => {
     let msg; try { msg = JSON.parse(buf.toString()); } catch { return; }
+    if (msg?.type === 'dom_activity') {
+      // Purely local signal the extension already computed from the DOM
+      // (thread id, message-count/role/length key, whether a capture was
+      // attempted/skipped/throttled) -- this is how Brian's own ChatGPT
+      // activity becomes visible without any of it costing a real request
+      // against ChatGPT itself.
+      appendDomActivity({
+        tab: ws.tabToken?.slice(0, 8) ?? null, agent_tab: ws.agentTab ?? null,
+        thread_id: msg.thread_id ?? null, dom_key: msg.dom_key ?? null, outcome: msg.outcome ?? null,
+      });
+      return;
+    }
     if (msg?.type === 'thread_snapshot') {
+      // Auto-archive pushes this straight over the socket -- it never goes
+      // through dispatchToExtension/agentPacer, so without this it was
+      // completely invisible to the same request-timing log and rate-limit
+      // reaction that covers ask_chatgpt/list_chatgpt_chats (found 2026-09-18
+      // investigating a rate-limit spike that coincided with heavy multi-tab
+      // use, not any explicit agent call). Logged into the same timeline
+      // under action "auto_capture" so both sources are comparable.
+      const autoCaptureRateLimited = msg.api_error_status === 429;
+      if (autoCaptureRateLimited) applyRateLimit(null); // same account, same quota -- be conservative account-wide too
+      appendRequestTiming({
+        action: 'auto_capture', ok: true, rate_limited: autoCaptureRateLimited, api_status: msg.api_error_status ?? null,
+        tab: ws.tabToken?.slice(0, 8) ?? null, agent_tab: ws.agentTab ?? null, spacing_ms: agentPacer.spacingMs,
+        ...recordAndCountWindow(Date.now()),
+      });
       try { const saved = archive.archiveSnapshot(msg.snapshot); ws.send(JSON.stringify({ type: 'snapshot_ack', thread_id: saved.thread_id, content_hash: saved.content_hash })); }
-      catch (err) { console.error(`[broker] snapshot_error for ${msg.snapshot?.thread_id}: ${err.message}`); ws.send(JSON.stringify({ type: 'snapshot_error', error: err.message })); }
+      catch (err) { logErr(`[broker] snapshot_error for ${msg.snapshot?.thread_id}: ${err.message}`); ws.send(JSON.stringify({ type: 'snapshot_error', error: err.message })); }
       return;
     }
     if (msg?.type === 'bulk_archive_progress') { bulkArchiveState = { running: true, ...msg }; bulkOwner = ws.tabToken || ws; clearTimeout(bulkOrphanTimer); bulkOrphanTimer = null; return; }
-    if (msg?.type === 'bulk_archive_complete') { finishBulk(msg); console.log(`[broker] bulk archive complete: ${msg.archived}/${msg.total} archived, ${msg.failed?.length || 0} failed`); return; }
+    if (msg?.type === 'bulk_archive_complete') { finishBulk(msg); logInfo(`[broker] bulk archive complete: ${msg.archived}/${msg.total} archived, ${msg.failed?.length || 0} failed`); return; }
     if (msg?.type !== "command_result" || !msg?.id) return;
     const waiter = pending.get(msg.id); if (!waiter) return;
     waiter.onReply(msg);
   });
   ws.on("close", () => {
     extensionSockets.delete(ws);
-    console.log(`[broker] extension disconnected (${extensionSockets.size} total)`);
+    logInfo(`[broker] extension disconnected (${extensionSockets.size} total)`);
     const owner = ws.tabToken || ws;
     if (bulkArchiveState.running && bulkOwner === owner && !bulkOrphanTimer) {
       bulkOrphanTimer = setTimeout(() => checkBulkOrphan(owner), BULK_ORPHAN_GRACE_MS);
     }
   });
-  ws.on("error", (err) => { console.error(`[broker] extension socket error: ${err.message}`); extensionSockets.delete(ws); });
+  ws.on("error", (err) => { logErr(`[broker] extension socket error: ${err.message}`); extensionSockets.delete(ws); });
 });
 
 // Broadcasts to every connected tab (there may be several) and resolves on the
@@ -867,14 +912,14 @@ const SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_INTERVAL_MINUTES || 0);
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   server.listen(PORT, () => {
-    console.log(`Conversation manager listening on http://localhost:${PORT}`);
-    console.log(`Archive: ${ARCHIVE_DIR}`);
-    console.log(`MCP:     http://localhost:${PORT}/mcp`);
+    logInfo(`Conversation manager listening on http://localhost:${PORT}`);
+    logInfo(`Archive: ${ARCHIVE_DIR}`);
+    logInfo(`MCP:     http://localhost:${PORT}/mcp`);
     if (SYNC_INTERVAL_MINUTES > 0) {
       sync.start(SYNC_INTERVAL_MINUTES * 60 * 1000);
-      console.log(`Sync:    incremental backup every ${SYNC_INTERVAL_MINUTES} min (status: GET /api/sync-status)`);
+      logInfo(`Sync:    incremental backup every ${SYNC_INTERVAL_MINUTES} min (status: GET /api/sync-status)`);
     }
   });
 }
 
-export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, promptDispatchTimeoutMs, BRIDGE_OBSERVATIONS_PATH, REQUEST_TIMING_PATH, agentPacer, dispatchToExtension };
+export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, promptDispatchTimeoutMs, BRIDGE_OBSERVATIONS_PATH, REQUEST_TIMING_PATH, DOM_ACTIVITY_PATH, agentPacer, dispatchToExtension };

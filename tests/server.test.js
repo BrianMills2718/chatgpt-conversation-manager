@@ -20,6 +20,7 @@ let bridgeObservationsPath;
 let archive;
 let agentPacer;
 let requestTimingPath;
+let domActivityPath;
 
 before(async () => {
   process.env.PORT = '0';
@@ -38,6 +39,7 @@ before(async () => {
   archive = mod.archive;
   agentPacer = mod.agentPacer;
   requestTimingPath = mod.REQUEST_TIMING_PATH;
+  domActivityPath = mod.DOM_ACTIVITY_PATH;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
     server.listen(0, resolve);
@@ -479,6 +481,78 @@ test('an authoritative Retry-After from a real 429 sets the pacer gap directly i
   } finally {
     agentPacer.spacingMs = savedSpacing;
     tab.ws.close();
+  }
+});
+
+// Auto-archive pushes thread_snapshot straight over the socket -- it never
+// goes through dispatchToExtension/agentPacer, so before this it was
+// invisible to request-timing.jsonl and the pacer's rate-limit reaction
+// entirely, even though its own code comment already documented one prior
+// incident from page activity alone. Found 2026-09-18 investigating a
+// rate-limit spike that coincided with heavy multi-tab use, not any
+// explicit ask_chatgpt call.
+function connectRawTab(tab, { agent = false } = {}) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${wsUrl}&tab=${tab}${agent ? '&agent=1' : ''}`);
+    ws.on('open', () => resolve(ws));
+    ws.on('error', reject);
+  });
+}
+
+test('a dom_activity push is logged with zero cost to ChatGPT -- no dispatch, no pacing, just a timestamped record', async () => {
+  const ws = await connectRawTab('dom-activity-tab', { agent: false });
+  fs.rmSync(domActivityPath, { force: true });
+  try {
+    ws.send(JSON.stringify({ type: 'dom_activity', thread_id: 'thread-xyz', dom_key: 'thread-xyz|3|assistant|40', outcome: 'attempted' }));
+    await new Promise((r) => setTimeout(r, 50));
+    const lines = fs.readFileSync(domActivityPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const entry = lines.find((l) => l.thread_id === 'thread-xyz');
+    assert.ok(entry, 'expected the dom_activity push to be logged');
+    assert.equal(entry.tab, 'dom-activ'.slice(0, 8));
+    assert.equal(entry.agent_tab, false);
+    assert.equal(entry.outcome, 'attempted');
+    assert.equal(entry.dom_key, 'thread-xyz|3|assistant|40');
+  } finally {
+    ws.close();
+  }
+});
+
+test('an auto-archive thread_snapshot is logged into the same request-timing timeline as agent calls', async () => {
+  const ws = await connectRawTab('snapshot-tab', { agent: false });
+  fs.rmSync(requestTimingPath, { force: true });
+  try {
+    ws.send(JSON.stringify({
+      type: 'thread_snapshot',
+      api_error_status: null,
+      snapshot: { thread_id: 'auto-thread-1', title: 'Auto', messages: [{ role: 'user', text: 'hi' }] },
+    }));
+    await new Promise((r) => setTimeout(r, 50));
+    const lines = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const entry = lines.find((l) => l.action === 'auto_capture');
+    assert.ok(entry, 'expected the auto-archive push to be logged as auto_capture');
+    assert.equal(entry.rate_limited, false);
+    assert.equal(entry.tab, 'snapshot-'.slice(0, 8));
+    assert.equal(typeof entry.requests_last_60s, 'number');
+  } finally {
+    ws.close();
+  }
+});
+
+test('an auto-archive thread_snapshot carrying a real 429 widens the shared agentPacer too, not just its own log line', async () => {
+  const ws = await connectRawTab('snapshot-429-tab', { agent: false });
+  const savedSpacing = agentPacer.spacingMs;
+  agentPacer.spacingMs = 50;
+  try {
+    ws.send(JSON.stringify({
+      type: 'thread_snapshot',
+      api_error_status: 429,
+      snapshot: { thread_id: 'auto-thread-2', title: 'Auto 429', messages: [{ role: 'user', text: 'hi' }] },
+    }));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.ok(agentPacer.spacingMs > 50, `expected a real 429 from auto-archive to widen the shared pacer, stayed at ${agentPacer.spacingMs}`);
+  } finally {
+    agentPacer.spacingMs = savedSpacing;
+    ws.close();
   }
 });
 

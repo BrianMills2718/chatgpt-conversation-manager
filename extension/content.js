@@ -25,6 +25,19 @@ let lastAutoDomKey = null;
 let isCapturing = false;
 let contextInvalidated = false;
 
+// Auto-archive (MutationObserver -> scheduleArchive -> sendSnapshot) pushes
+// thread_snapshot straight over the socket -- it never goes through the
+// server's dispatchToExtension/agentPacer path at all, so none of that
+// pacing or logging ever covered it, even though its own pre-existing code
+// comment already documented one prior incident from page activity alone
+// ("8 fetches for a two-message chat, 5 HTTP 429"). Found 2026-09-18 while
+// investigating a rate-limit spike that coincided with heavy multi-tab
+// ChatGPT use, not with any explicit ask_chatgpt call -- this is the missing
+// piece. Reuses the same AdaptivePacer already proven for bulk-archive.
+const AUTO_CAPTURE_PACER_STORAGE_KEY = "autoCaptureSpacingMs";
+let autoCapturePacer = null;
+let lastAutoCaptureAttemptAt = 0;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // -- status / observability --------------------------------------------------
@@ -274,6 +287,12 @@ function extractMessagesFromDom() {
 
 // -- snapshot capture ----------------------------------------------------------
 
+// Returns { snapshot, apiErrorStatus, apiErrorRetryAfterMs } rather than just
+// the snapshot: the real HTTP status/Retry-After from a failed API capture is
+// swallowed into a DOM fallback below (by design, so one failed endpoint
+// never blocks archiving), but callers pacing/logging against the real
+// backend signal (mirrors getReply's api_status/api_retry_after_ms) still
+// need it -- it must not leak into the archived snapshot's own schema.
 async function captureSnapshot() {
   const threadId = currentThreadId();
   if (!threadId) throw new Error("Open a normal ChatGPT conversation (/c/…) before capturing.");
@@ -286,10 +305,12 @@ async function captureSnapshot() {
     apiError = err;
     await log("warn", `same-origin API capture failed, falling back to DOM: ${err.message}`);
   }
+  const apiErrorStatus = apiError?.status ?? null;
+  const apiErrorRetryAfterMs = apiError?.retryAfterMs ?? null;
 
   if (apiResult && apiResult.messages.length) {
     const { title, source } = resolveTitle(apiResult.title);
-    return buildSnapshot({
+    return { snapshot: buildSnapshot({
       threadId,
       title,
       titleSource: source,
@@ -297,7 +318,7 @@ async function captureSnapshot() {
       messages: apiResult.messages,
       captureSource: "api",
       completenessWarning: null,
-    });
+    }), apiErrorStatus: null, apiErrorRetryAfterMs: null };
   }
 
   await scrollToTopBestEffort();
@@ -316,7 +337,7 @@ async function captureSnapshot() {
     );
   }
   const { title, source } = resolveTitle(null);
-  return buildSnapshot({
+  return { snapshot: buildSnapshot({
     threadId,
     title,
     titleSource: source,
@@ -326,7 +347,7 @@ async function captureSnapshot() {
     completenessWarning: apiError
       ? `Same-origin API capture unavailable (${apiError.message}); used DOM scraping, which cannot guarantee complete history on long/virtualized conversations.`
       : null,
-  });
+  }), apiErrorStatus, apiErrorRetryAfterMs };
 }
 
 async function sendSnapshot(force = false) {
@@ -352,22 +373,39 @@ async function sendSnapshot(force = false) {
   // (observed: 8 for a two-message chat, 5 of them HTTP 429), so skip when the
   // chat has no real id yet, is still generating, or looks unchanged.
   let domKey = null;
+  const threadIdForLog = currentThreadId();
   if (!force) {
     if (currentThreadId().startsWith("WEB:")) return null;
     if (findFirst(STOP_BUTTON_SELECTORS, visible)) return null;
     const messages = extractMessagesFromDom();
     const last = messages[messages.length - 1];
     domKey = `${currentThreadId()}|${messages.length}|${last?.role}|${(last?.text || "").length}`;
-    if (domKey === lastAutoDomKey) return null;
+    if (domKey === lastAutoDomKey) { reportDomActivity(threadIdForLog, domKey, "skipped_dedup"); return null; }
+    // Independent of the server's agentPacer (this push never goes through
+    // dispatchToExtension at all): a local minimum gap so a burst of DOM
+    // mutations -- Brian actively chatting, several tabs at once -- can't
+    // uncontrollably hit the same conversation-tree endpoint the pacer above
+    // exists to protect.
+    const pacer = await loadAutoCapturePacer();
+    if (Date.now() - lastAutoCaptureAttemptAt < pacer.spacingMs) {
+      reportDomActivity(threadIdForLog, domKey, "skipped_throttled");
+      return null;
+    }
   }
+  reportDomActivity(threadIdForLog, domKey, force ? "forced" : "attempted");
   isCapturing = true;
+  if (!force) lastAutoCaptureAttemptAt = Date.now();
   try {
-    const snapshot = await captureSnapshot();
+    const { snapshot, apiErrorStatus, apiErrorRetryAfterMs } = await captureSnapshot();
     if (domKey) lastAutoDomKey = domKey;
+    if (!force) {
+      if (apiErrorStatus === 429) { applyAutoCaptureRateLimit(apiErrorRetryAfterMs); await saveAutoCapturePacer(); }
+      else if (autoCapturePacer) { autoCapturePacer.onSuccess(); await saveAutoCapturePacer(); }
+    }
     const fp = snapshotFingerprint(snapshot);
     if (!force && fp === lastSnapshotFingerprint) return snapshot;
     lastSnapshotFingerprint = fp;
-    socket.send(JSON.stringify({ type: "thread_snapshot", snapshot }));
+    socket.send(JSON.stringify({ type: "thread_snapshot", snapshot, api_error_status: apiErrorStatus }));
     setStatus({
       threadId: snapshot.thread_id,
       title: snapshot.title,
@@ -835,6 +873,40 @@ async function loadLearnedSpacing() {
 }
 async function saveLearnedSpacing(ms) {
   try { await chrome.storage.local.set({ [PACER_STORAGE_KEY]: ms }); } catch (err) { handlePossibleContextInvalidation(err); }
+}
+
+async function loadAutoCapturePacer() {
+  if (autoCapturePacer) return autoCapturePacer;
+  let initialMs = 3000;
+  try {
+    const v = (await chrome.storage.local.get(AUTO_CAPTURE_PACER_STORAGE_KEY))[AUTO_CAPTURE_PACER_STORAGE_KEY];
+    if (Number.isFinite(v)) initialMs = v;
+  } catch { /* use default */ }
+  autoCapturePacer = new AdaptivePacer({ initialMs, minMs: 2000, maxMs: 120000 });
+  return autoCapturePacer;
+}
+async function saveAutoCapturePacer() {
+  try { await chrome.storage.local.set({ [AUTO_CAPTURE_PACER_STORAGE_KEY]: autoCapturePacer.spacingMs }); }
+  catch (err) { handlePossibleContextInvalidation(err); }
+}
+// Mirrors server/index.js's applyRateLimit: AdaptivePacer.onRateLimit only
+// returns the retry-after-aware wait, it doesn't persist it into spacingMs.
+function applyAutoCaptureRateLimit(retryAfterMs) {
+  const suggested = autoCapturePacer.onRateLimit(retryAfterMs);
+  if (retryAfterMs != null) autoCapturePacer.spacingMs = Math.max(autoCapturePacer.spacingMs, suggested);
+}
+
+// Purely local (thread id, DOM message count/role/length) -- zero network
+// cost, sent over the already-open broker WebSocket so Brian's own ChatGPT
+// activity is visible and timestamped without any extra request against
+// ChatGPT itself. Fires on every scheduleArchive debounce, whether or not
+// the capture attempt below actually proceeds.
+function reportDomActivity(threadId, domKey, outcome) {
+  try {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "dom_activity", thread_id: threadId, dom_key: domKey, outcome }));
+    }
+  } catch { /* best-effort; never block capture on this */ }
 }
 
 // `known` (thread id -> last_captured_at) switches to incremental mode: only
