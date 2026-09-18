@@ -584,6 +584,11 @@ app.post('/api/debug/inspect-toolbar', async (req, res) => {
   try { res.json(await dispatchToExtension({ action: 'debug_inspect_toolbar' }, COMMAND_TIMEOUT_MS, { single: true })); }
   catch (err) { res.status(503).json({ error: err.message }); }
 });
+app.post('/api/debug/click-and-inspect', async (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  try { res.json(await dispatchToExtension({ action: 'debug_click_and_inspect', text: req.body?.text }, COMMAND_TIMEOUT_MS, { single: true })); }
+  catch (err) { res.status(503).json({ error: err.message }); }
+});
 app.get('/api/search', (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   res.json({ results: archive.search(req.query.q || '', {

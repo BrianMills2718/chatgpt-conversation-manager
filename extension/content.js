@@ -979,6 +979,40 @@ async function handleCommand(msg) {
       })),
     };
   }
+  if (msg.action === "debug_click_and_inspect") {
+    // Temporary, read-only reconnaissance: click the first visible button
+    // whose text matches msg.text (e.g. the "Instant" thinking-level
+    // trigger), wait briefly for its menu to render, then dump every
+    // clickable control document-wide (a dropdown is often portaled to
+    // document.body, not nested under the composer). Escape afterward to
+    // leave the UI as found. Not wired to any MCP tool.
+    const target = [...document.querySelectorAll("button, [role=\"button\"]")]
+      .find((el) => visible(el) && (el.textContent || "").trim() === String(msg.text || "").trim());
+    if (!target) throw new Error(`no visible button with text "${msg.text}" found.`);
+    // A bare .click() doesn't always trigger a Radix/React dropdown that
+    // listens for pointer events specifically. Dispatch the full sequence a
+    // real mouse click produces.
+    const rect = target.getBoundingClientRect();
+    const opts = { bubbles: true, cancelable: true, view: window, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2 };
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      target.dispatchEvent(new (type.startsWith("pointer") ? PointerEvent : MouseEvent)(type, opts));
+    }
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        const els = [...document.querySelectorAll("button, [role=\"button\"], [role=\"menuitem\"], [role=\"menuitemradio\"], [data-testid], [data-radix-menu-content], [id^=radix]")];
+        const candidates = els.slice(0, 80).map((el) => ({
+          tag: el.tagName.toLowerCase(),
+          text: (el.textContent || "").trim().slice(0, 60),
+          ariaLabel: el.getAttribute("aria-label"),
+          testId: el.getAttribute("data-testid"),
+          role: el.getAttribute("role"),
+          checked: el.getAttribute("aria-checked"),
+          expanded: el.getAttribute("aria-expanded"),
+        }));
+        resolve({ target_expanded_after: target.getAttribute("aria-expanded"), candidates });
+      }, 500);
+    });
+  }
   if (msg.action === "archive_all_chats") {
     if (bulkArchiving) throw new Error("A bulk archive is already running.");
     archiveAllChats({ known: msg.known || null }).catch((err) => log("error", "bulk archive failed", err));
