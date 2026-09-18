@@ -58,7 +58,10 @@ This is the exact request the chatgpt.com web app itself issues, from the same p
 - `get_current_chat_title()` — read the current title.
 - `rename_current_chat(title)` — rename via ChatGPT's visible UI (verifies the result; fails loudly if the UI can't be found or the title doesn't stick).
 - `assign_current_chat_project(project)` — assign durable local project metadata.
+- `move_current_chat_to_project(project)` — move the current chat into a native ChatGPT Project (visible in the ChatGPT sidebar), creating it if needed. Separate from, and in addition to, `assign_current_chat_project`'s archive-side project.
 - `number_current_chat(project?, series?, stage?, sequence?, rename_visible_chat?)` — assign the next sequence and optionally rename the visible ChatGPT thread, e.g. `03 — Methods Review — Paper title`.
+- `tag_thread(tag, thread_id?)` — add a secondary-relevance tag to a thread (a thread can have many tags but only one primary project).
+- `untag_thread(tag, thread_id?)` — remove a secondary-relevance tag from a thread.
 - `set_thread_parent(parent_thread_id)` — record a lineage link (metadata only, no automatic inference).
 - `set_thread_status(status)` — `current | superseded | reference | final | abandoned`.
 - `undo_last_organization_change(thread_id?)` — revert the most recent project/sequence/status change for a thread.
@@ -267,7 +270,15 @@ Both clients are registered as the MCP server `chatgpt-bridge`, so an agent can 
 - Claude Code: `claude mcp add --scope user --transport http chatgpt-bridge http://localhost:8787/mcp -H "Authorization: Bearer <token>"`.
 - Codex: `[mcp_servers.chatgpt-bridge]` in `~/.codex/config.toml` with `url = "http://localhost:8787/mcp"` and `bearer_token_env_var = "CHATGPT_BRIDGE_TOKEN"`. `~/.bashrc` exports that variable from `~/.local/state/chatgpt-bridge/token` (mode 600), which holds the same value as `RENAMER_TOKEN`. If you rotate the token, update both.
 
-It needs the broker running and at least one ChatGPT tab open with the extension connected. The other direction — ChatGPT reaching this machine — goes through the separate `remote-mcp` project, not this broker.
+It needs the broker running and at least one ChatGPT tab open with the extension connected.
+
+**This is one direction only: agent → ChatGPT.** The other direction — ChatGPT itself reaching this
+machine to run commands, edit files, or hand work to Claude Code/Codex — goes through the separate
+`remote-mcp` project (`~/code/remote-mcp`, `https://rmcp.brianmills.dev`), not this broker. remote-mcp
+is the self-hosted replacement for a third-party tool called "Desktop Commander"; if ChatGPT mentions
+that name, it means remote-mcp, not this repo. See `CLAUDE.md` for more on keeping the two straight,
+and `remote-mcp/docs/chatgpt-setup.md` for that side's setup (including the Windows Task Scheduler
+launcher this broker itself can run under, `remote-mcp/deploy/windows/chatgpt-bridge.ps1`).
 
 ## Security model
 
