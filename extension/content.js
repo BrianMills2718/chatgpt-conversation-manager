@@ -989,10 +989,17 @@ async function handleCommand(msg) {
     const target = [...document.querySelectorAll("button, [role=\"button\"]")]
       .find((el) => visible(el) && (el.textContent || "").trim() === String(msg.text || "").trim());
     if (!target) throw new Error(`no visible button with text "${msg.text}" found.`);
-    target.click();
+    // A bare .click() doesn't always trigger a Radix/React dropdown that
+    // listens for pointer events specifically. Dispatch the full sequence a
+    // real mouse click produces.
+    const rect = target.getBoundingClientRect();
+    const opts = { bubbles: true, cancelable: true, view: window, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2 };
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      target.dispatchEvent(new (type.startsWith("pointer") ? PointerEvent : MouseEvent)(type, opts));
+    }
     return new Promise((resolve) => {
       setTimeout(() => {
-        const els = [...document.querySelectorAll("button, [role=\"button\"], [role=\"menuitem\"], [role=\"menuitemradio\"], [data-testid]")];
+        const els = [...document.querySelectorAll("button, [role=\"button\"], [role=\"menuitem\"], [role=\"menuitemradio\"], [data-testid], [data-radix-menu-content], [id^=radix]")];
         const candidates = els.slice(0, 80).map((el) => ({
           tag: el.tagName.toLowerCase(),
           text: (el.textContent || "").trim().slice(0, 60),
@@ -1002,9 +1009,8 @@ async function handleCommand(msg) {
           checked: el.getAttribute("aria-checked"),
           expanded: el.getAttribute("aria-expanded"),
         }));
-        document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-        resolve({ candidates });
-      }, 400);
+        resolve({ target_expanded_after: target.getAttribute("aria-expanded"), candidates });
+      }, 500);
     });
   }
   if (msg.action === "archive_all_chats") {
