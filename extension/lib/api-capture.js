@@ -113,6 +113,17 @@ function extractAttachments(message) {
   return attachments;
 }
 
+// ChatGPT marks a generated (or uploaded) image part with content_type
+// "image_asset_pointer" (asset_pointer like "file-service://file-XXXX" or
+// "sediment://file_XXXX"), or occasionally a plain "image/..." mime type in the
+// metadata.attachments list. Either way the pointer/id alone is not a fetchable
+// URL -- resolveFileDownloadUrl (below) exchanges it for one.
+function isImageAttachment(a) {
+  return Boolean(
+    a && (a.content_type === "image_asset_pointer" || (typeof a.content_type === "string" && a.content_type.startsWith("image/")))
+  );
+}
+
 // Walks the parent chain from current_node back to the root (the branch ChatGPT
 // is actually showing), then reverses it into chronological order. This follows
 // only the currently-selected branch, matching what the DOM would render, but
@@ -180,8 +191,38 @@ export function replyFromTree(data, beforeCount) {
   if (!finished || replies.length === 0) {
     return { done: false, role, status, message_count: messages.length };
   }
+  const images = replies.flatMap((m) => (m.attachments || []).filter(isImageAttachment));
   return { done: true, reply: replies.map((m) => m.text).join("\n\n"), message_count: messages.length,
-           model: replies[replies.length - 1].model || null };
+           model: replies[replies.length - 1].model || null,
+           images: images.length ? images : undefined };
+}
+
+// Exchanges an asset_pointer (file-service://file-XXXX or sediment://file_XXXX)
+// for the short-lived signed download URL ChatGPT's own UI fetches when a
+// generated or uploaded image is opened. Same same-origin + bearer-token
+// pattern as fetchConversationTree above.
+//
+// UNCONFIRMED against a live account as of 2026-09-23 -- built from the known
+// shape of ChatGPT's file-serving endpoint, not from a live capture (no
+// browser session was available while writing this). Every caller MUST treat
+// a failure or an unexpected response shape as "this image is unavailable"
+// and still return the text reply, exactly like fetchConversationTree's own
+// callers are required to do -- never as fatal.
+export async function resolveFileDownloadUrl(assetPointer, { fetchImpl = fetch, accessToken } = {}) {
+  const fileId = String(assetPointer || "").replace(/^(file-service|sediment):\/\//, "");
+  if (!fileId) throw new Error("resolveFileDownloadUrl requires an asset_pointer with a file id");
+  if (accessToken === undefined) accessToken = await getAccessToken({ fetchImpl });
+  const headers = { Accept: "application/json" };
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  const res = await fetchImpl(`/backend-api/files/${encodeURIComponent(fileId)}/download`, {
+    method: "GET",
+    credentials: "same-origin",
+    headers,
+  });
+  if (!res.ok) throw new Error(`file download-url fetch failed: HTTP ${res.status}`);
+  const data = await res.json();
+  if (typeof data?.download_url !== "string") throw new Error("file download response did not include download_url (schema may have changed)");
+  return data.download_url;
 }
 
 // Retry-After is either delay-seconds or an HTTP date. Returns ms or null.

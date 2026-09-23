@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations, captureWithRecovery, AdaptivePacer, parseRetryAfter, replyFromTree } from '../extension/lib/api-capture.js';
+import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations, captureWithRecovery, AdaptivePacer, parseRetryAfter, replyFromTree, resolveFileDownloadUrl } from '../extension/lib/api-capture.js';
 
 test('parseRemoteTime accepts epoch seconds, epoch ms, numeric strings and ISO strings', () => {
   assert.equal(parseRemoteTime(1757900000.5), 1757900000500);
@@ -29,6 +29,27 @@ test('selectChangedConversations keeps new and updated threads and skips unchang
 
 function userMsg(id, text, createTime) {
   return { id, message: { id, author: { role: 'user' }, content: { content_type: 'text', parts: [text] }, create_time: createTime }, parent: null, children: [] };
+}
+
+// Mirrors ChatGPT's actual shape for a reply that includes a generated image:
+// content_type "multimodal_text", with the image as an object part alongside
+// (or instead of) any caption text.
+function assistantImageMsg(id, text, assetPointer, createTime) {
+  const parts = [];
+  if (text) parts.push(text);
+  parts.push({ content_type: 'image_asset_pointer', asset_pointer: assetPointer, width: 1024, height: 1024 });
+  return {
+    id,
+    message: {
+      id,
+      author: { role: 'assistant' },
+      content: { content_type: 'multimodal_text', parts },
+      create_time: createTime,
+      metadata: { model_slug: 'gpt-image-1' },
+    },
+    parent: null,
+    children: [],
+  };
 }
 function assistantMsg(id, text, createTime) {
   return { id, message: { id, author: { role: 'assistant' }, content: { content_type: 'text', parts: [text] }, create_time: createTime, metadata: { model_slug: 'gpt-5' } }, parent: null, children: [] };
@@ -330,5 +351,71 @@ test('replyFromTree does not return the previous answer when our message has no 
   const r2 = replyFromTree(treeOf([{ id: 'u1', message: u1 }, { id: 'a1', message: a1 }, { id: 'u2', message: u2 }]), 2);
   assert.equal(r2.done, false);
   assert.equal(r2.role, 'user');
+});
+
+test('replyFromTree surfaces a generated image asset pointer alongside the text reply', () => {
+  const u1 = userMsg('u1', 'draw a legion banner', 1).message;
+  const a1 = { ...assistantImageMsg('a1', 'Here you go:', 'file-service://file-ABC123', 2).message, status: 'finished_successfully' };
+  const r = replyFromTree(treeOf([{ id: 'u1', message: u1 }, { id: 'a1', message: a1 }]), 1);
+  assert.equal(r.done, true);
+  assert.equal(r.reply, 'Here you go:');
+  assert.equal(r.images.length, 1);
+  assert.equal(r.images[0].asset_pointer, 'file-service://file-ABC123');
+  assert.equal(r.images[0].content_type, 'image_asset_pointer');
+});
+
+test('replyFromTree omits images entirely when the reply has no image parts', () => {
+  const a1 = { ...assistantMsg('a1', 'just text', 1).message, status: 'finished_successfully' };
+  const r = replyFromTree(treeOf([{ id: 'a1', message: a1 }]), 0);
+  assert.equal(r.done, true);
+  assert.equal(r.images, undefined);
+});
+
+test('replyFromTree collects images from every new assistant turn, not just the last', () => {
+  const a1 = { ...assistantImageMsg('a1', 'first', 'file-service://file-ONE', 1).message, status: 'finished_successfully' };
+  const u2 = userMsg('u2', 'and another', 2).message;
+  const a2 = { ...assistantImageMsg('a2', 'second', 'file-service://file-TWO', 3).message, status: 'finished_successfully' };
+  const r = replyFromTree(treeOf([{ id: 'a1', message: a1 }, { id: 'u2', message: u2 }, { id: 'a2', message: a2 }]), 0);
+  assert.deepEqual(r.images.map((i) => i.asset_pointer), ['file-service://file-ONE', 'file-service://file-TWO']);
+});
+
+test('resolveFileDownloadUrl exchanges an asset pointer for a signed download URL', async () => {
+  const fetchImpl = async (url, opts) => {
+    if (url === '/api/auth/session') return { ok: true, json: async () => ({ accessToken: 'tok-1' }) };
+    if (url === '/backend-api/files/file-ABC123/download') {
+      assert.equal(opts.headers.Authorization, 'Bearer tok-1');
+      return { ok: true, json: async () => ({ download_url: 'https://files.example/signed' }) };
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const url = await resolveFileDownloadUrl('file-service://file-ABC123', { fetchImpl });
+  assert.equal(url, 'https://files.example/signed');
+});
+
+test('resolveFileDownloadUrl strips the sediment:// scheme the same way', async () => {
+  const fetchImpl = async (url) => {
+    if (url === '/api/auth/session') return { ok: true, json: async () => ({ accessToken: null }) };
+    assert.equal(url, '/backend-api/files/file_XYZ/download');
+    return { ok: true, json: async () => ({ download_url: 'https://files.example/other' }) };
+  };
+  const url = await resolveFileDownloadUrl('sediment://file_XYZ', { fetchImpl });
+  assert.equal(url, 'https://files.example/other');
+});
+
+test('resolveFileDownloadUrl fails loudly on an unexpected response shape', async () => {
+  const fetchImpl = async (url) => (url.includes('auth/session') ? { ok: true, json: async () => ({}) } : { ok: true, json: async () => ({ nope: true }) });
+  await assert.rejects(resolveFileDownloadUrl('file-service://file-XYZ', { fetchImpl }), /download_url/);
+});
+
+test('resolveFileDownloadUrl fails loudly on a non-ok HTTP status', async () => {
+  const fetchImpl = async (url) => (url.includes('auth/session') ? { ok: true, json: async () => ({}) } : { ok: false, status: 404, json: async () => ({}) });
+  await assert.rejects(resolveFileDownloadUrl('file-service://file-XYZ', { fetchImpl }), /HTTP 404/);
+});
+
+test('resolveFileDownloadUrl rejects an asset pointer with no file id', async () => {
+  await assert.rejects(
+    resolveFileDownloadUrl('', { fetchImpl: async () => ({ ok: true, json: async () => ({}) }) }),
+    /asset_pointer/
+  );
 });
 

@@ -7,7 +7,7 @@
 (async () => {
 const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import(chrome.runtime.getURL("lib/title.js"));
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
-const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree } = await import(chrome.runtime.getURL("lib/api-capture.js"));
+const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
   brokerUrl: "ws://localhost:8787/extension",
@@ -806,6 +806,41 @@ function visibleRateLimitError() {
   return null;
 }
 
+// Fetches a resolved image URL in-page (so it always carries whatever auth the
+// URL actually needs, same-origin or not) and returns it as inline base64 --
+// the only shape that survives the trip through the WebSocket -> Node broker
+// -> MCP content block, since none of those hops can dereference a ChatGPT
+// tab-scoped URL themselves.
+async function fetchImageAsDataParts(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`image fetch failed: HTTP ${res.status}`);
+  const mimeType = res.headers.get("content-type") || "image/png";
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return { data: btoa(binary), mimeType };
+}
+
+// replyFromTree only hands back raw asset-pointer metadata (a pure function,
+// no network calls -- see its own comment). This is the async step that turns
+// each pointer into actual bytes. One image failing to resolve must not lose
+// the rest of the reply, so each is attempted independently and a failure is
+// logged and dropped rather than thrown.
+async function resolveReplyImages(images) {
+  if (!Array.isArray(images) || images.length === 0) return undefined;
+  const resolved = [];
+  for (const img of images) {
+    try {
+      const downloadUrl = await resolveFileDownloadUrl(img.asset_pointer);
+      const parts = await fetchImageAsDataParts(downloadUrl);
+      resolved.push({ ...parts, name: img.name || null });
+    } catch (err) {
+      await log("warn", "Could not resolve a generated image; returning the rest of the reply without it", err);
+    }
+  }
+  return resolved.length ? resolved : undefined;
+}
+
 // Read the reply from the page. Done when ChatGPT is no longer generating, and a
 // new assistant message follows our own. The caller requires the same text on
 // two consecutive polls before trusting it, so a pause mid-stream is not "done".
@@ -835,7 +870,8 @@ async function getReply(domBefore, messagesBefore = domBefore) {
     try {
       const apiReply = replyFromTree(await fetchConversationTree(threadId), Number(messagesBefore) || 0);
       if (apiReply.done) {
-        return { ...apiReply, generating: false, thread_id: threadId,
+        const images = await resolveReplyImages(apiReply.images);
+        return { ...apiReply, images, generating: false, thread_id: threadId,
                  visible_error: visibleRateLimitError(), source: "api",
                  api_checked: true, api_status: 200, api_retry_after_ms: null };
       }

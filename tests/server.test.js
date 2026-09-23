@@ -275,6 +275,55 @@ test('ask_chatgpt uses the idle agent tab, never Brian\'s tab, starts a new chat
   }
 });
 
+// The extension resolves generated images to inline base64 before it ever
+// dispatches a reply back over the WebSocket (see content.js's
+// resolveReplyImages) -- askChatgpt() just needs to carry that through
+// untouched to whatever calls it, the same way it already carries `reply`.
+test('ask_chatgpt carries resolved images through from the extension reply', async () => {
+  const idle = fakeTab('idle-tab-image-0001', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') { reply({ ok: true, navigated: true }); return; }
+      if (msg.action === 'send_prompt') { state.thread = 'img-thread-1'; return reply({ ok: true, thread_id: 'img-thread-1', dom_before: 0, messages_before: 0 }); }
+      if (msg.action === 'get_reply') {
+        return reply({
+          ok: true, done: true, reply: 'Here is the legion banner:', thread_id: 'img-thread-1',
+          images: [{ data: 'ZmFrZS1wbmctYnl0ZXM=', mimeType: 'image/png', name: null }],
+        });
+      }
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await idle.open();
+  try {
+    const r = await askChatgpt({ text: 'draw a legion banner', timeout_seconds: 10, pollMs: 20 });
+    assert.equal(r.reply, 'Here is the legion banner:');
+    assert.deepEqual(r.images, [{ data: 'ZmFrZS1wbmctYnl0ZXM=', mimeType: 'image/png', name: null }]);
+  } finally {
+    idle.ws.close();
+  }
+});
+
+test('ask_chatgpt leaves images undefined for an ordinary text-only reply', async () => {
+  const idle = fakeTab('idle-tab-noimg-0001', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') { reply({ ok: true, navigated: true }); return; }
+      if (msg.action === 'send_prompt') { state.thread = 'text-thread-1'; return reply({ ok: true, thread_id: 'text-thread-1', dom_before: 0, messages_before: 0 }); }
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'just text', thread_id: 'text-thread-1' });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await idle.open();
+  try {
+    const r = await askChatgpt({ text: 'say hi', timeout_seconds: 10, pollMs: 20 });
+    assert.equal(r.reply, 'just text');
+    assert.equal(r.images, undefined);
+  } finally {
+    idle.ws.close();
+  }
+});
+
 // Regression: askChatgpt() used to serialize every call through one global
 // queue, so two concurrent asks always ran one after another even with two
 // idle agent tabs open. Each concurrent call must claim its own tab and run
