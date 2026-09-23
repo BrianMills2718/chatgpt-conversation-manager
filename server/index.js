@@ -314,6 +314,24 @@ function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { singl
   });
 }
 
+// reload_tab tears its own page down as soon as it fires (content.js's
+// location.reload()), so there is no meaningful "reply" to wait for the way
+// every other dispatched command has one -- the normal targeted request/
+// response path in dispatchToExtensionRaw (pick Brian's tabs over the agent
+// tab, resolve on the first success) does not fit a command whose whole point
+// is to hit every stale tab at once, agent tab included. This is deliberately
+// a separate, simpler broadcast: send-and-forget to every open socket, report
+// only how many were reached, and let the caller re-verify success with a
+// normal call afterward (e.g. a fresh ask_chatgpt) rather than trusting this
+// one's own return value.
+function broadcastReloadTab() {
+  const sockets = [...extensionSockets].filter((ws) => ws.readyState === ws.OPEN);
+  if (!sockets.length) throw new Error("No browser extension is connected to the broker.");
+  const id = crypto.randomUUID();
+  for (const ws of sockets) ws.send(JSON.stringify({ type: "command", id, action: "reload_tab" }));
+  return { sent_to: sockets.length };
+}
+
 // get_reply is dispatched every poll cycle but only actually reaches
 // ChatGPT's backend roughly once per 10s per tab (its own internal
 // api-check cooldown, extension/content.js) -- the rest are free, local DOM
@@ -759,6 +777,13 @@ function createMcpServer() {
     } catch (err) { return { isError: true, content: [{ type: 'text', text: `ask_chatgpt failed: ${err.message}` }] }; }
   });
 
+  mcp.tool('reload_chatgpt_tabs', 'Hard-refresh every currently-connected ChatGPT tab (Brian\'s own tabs and any dedicated agent tab). Use this ONLY after Brian has already reloaded the extension itself in chrome://extensions -- that step cannot be done remotely, this tool cannot trigger it, and refreshing tabs before it happens just reloads the same old code. Fire-and-forget: each tab tears its page down the instant it reloads, so this does not wait for or confirm success -- verify the new code actually landed with a fresh call afterward (e.g. ask_chatgpt with a distinguishing marker), not by trusting this tool\'s own reply.', {}, async () => {
+    try {
+      const result = broadcastReloadTab();
+      return { content: [{ type: 'text', text: `Sent a reload command to ${result.sent_to} connected tab(s). Give Chrome a few seconds to reconnect, then verify with a fresh call.` }] };
+    } catch (err) { return { isError: true, content: [{ type: 'text', text: `reload_chatgpt_tabs failed: ${err.message}` }] }; }
+  });
+
   mcp.tool('list_chatgpt_chats', 'List Brian\'s most recent ChatGPT chats live from ChatGPT (newest first): id, title, last updated. Optional query filters by title. Use the id with ask_chatgpt to continue a chat. For older chats or searching message text, use search_archived_chats.', {
     query: z.string().optional(),
     limit: z.number().int().min(1).max(100).optional(),
@@ -930,4 +955,4 @@ if (isMain) {
   });
 }
 
-export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, promptDispatchTimeoutMs, BRIDGE_OBSERVATIONS_PATH, REQUEST_TIMING_PATH, DOM_ACTIVITY_PATH, agentPacer, dispatchToExtension };
+export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, promptDispatchTimeoutMs, BRIDGE_OBSERVATIONS_PATH, REQUEST_TIMING_PATH, DOM_ACTIVITY_PATH, agentPacer, dispatchToExtension, broadcastReloadTab };
