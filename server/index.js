@@ -577,7 +577,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         if (last.reply !== previousDoneText) { previousDoneText = last.reply; awaitingConfirmation = true; continue; }
         const threadId = last.thread_id || sent.thread_id || resolvedThreadId || null;
         appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'success', failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
-        return { thread_id: threadId, url: threadId ? `https://chatgpt.com/c/${threadId}` : null, reply: last.reply };
+        return { thread_id: threadId, url: threadId ? `https://chatgpt.com/c/${threadId}` : null, reply: last.reply, images: last.images };
       }
       throw new Error(`No finished reply within ${timeout_seconds}s (last seen: ${JSON.stringify(last)}). The message was sent; check ChatGPT (conversation ${sent.thread_id || "id not yet assigned"}).`);
     } catch (err) {
@@ -747,7 +747,15 @@ function createMcpServer() {
   }, async ({ text, thread_id, thread_title, timeout_seconds, fresh_tab }) => {
     try {
       const r = await askChatgpt({ text, thread_id: thread_id || null, thread_title: thread_title || null, timeout_seconds: timeout_seconds || 180, fresh_tab: Boolean(fresh_tab) });
-      return { content: [{ type: 'text', text: `${r.reply}\n\n[conversation ${r.thread_id} — ${r.url}]` }] };
+      const content = [{ type: 'text', text: `${r.reply}\n\n[conversation ${r.thread_id} — ${r.url}]` }];
+      // Images ChatGPT generated or returned inline (see extension/lib/api-capture.js
+      // resolveFileDownloadUrl and content.js resolveReplyImages) arrive already
+      // resolved to inline base64 -- nothing downstream of the extension can
+      // dereference a ChatGPT tab-scoped URL, so this must stay data, not a link.
+      if (Array.isArray(r.images)) {
+        for (const img of r.images) content.push({ type: 'image', data: img.data, mimeType: img.mimeType });
+      }
+      return { content };
     } catch (err) { return { isError: true, content: [{ type: 'text', text: `ask_chatgpt failed: ${err.message}` }] }; }
   });
 
