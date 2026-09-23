@@ -1045,6 +1045,19 @@ async function handleCommand(msg) {
     return { chats: page.items.map((c) => ({ id: c.id, title: c.title || "", update_time: c.update_time ?? null })), total: page.total ?? null };
   }
   if (msg.action === "get_tab") return { tab: TAB_TOKEN, agent: AGENT_TAB, busy: bulkArchiving, thread_id: currentThreadId() };
+  if (msg.action === "reload_tab") {
+    // Same fire-and-forget shape as navigate_home/navigate_to_thread below:
+    // the reply is sent synchronously before location.reload() tears this
+    // content-script instance down. Exists so a reload of the extension
+    // itself (chrome://extensions, which this content script cannot trigger
+    // on itself) can be followed by refreshing an already-open tab from the
+    // broker, instead of Brian doing it by hand -- Chrome loads content
+    // scripts per document load using whatever extension version is
+    // currently installed, so this refresh is only useful AFTER the
+    // extension has actually been reloaded.
+    location.reload();
+    return { reloaded: true };
+  }
   if (msg.action === "navigate_home") {
     refuseWhileArchiving("navigating");
     location.href = "https://chatgpt.com/";

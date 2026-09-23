@@ -21,6 +21,7 @@ let archive;
 let agentPacer;
 let requestTimingPath;
 let domActivityPath;
+let broadcastReloadTab;
 
 before(async () => {
   process.env.PORT = '0';
@@ -40,6 +41,7 @@ before(async () => {
   agentPacer = mod.agentPacer;
   requestTimingPath = mod.REQUEST_TIMING_PATH;
   domActivityPath = mod.DOM_ACTIVITY_PATH;
+  broadcastReloadTab = mod.broadcastReloadTab;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
     server.listen(0, resolve);
@@ -321,6 +323,50 @@ test('ask_chatgpt leaves images undefined for an ordinary text-only reply', asyn
     assert.equal(r.images, undefined);
   } finally {
     idle.ws.close();
+  }
+});
+
+function connectTaggedSocket(tab, { agent = false } = {}) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`${wsUrl}&tab=${tab}${agent ? '&agent=1' : ''}`);
+    ws.on('open', () => resolve(ws));
+    ws.on('error', reject);
+  });
+}
+
+// broadcastReloadTab reuses dispatchToExtensionRaw's own "No browser
+// extension is connected" guard verbatim -- already exercised end to end by
+// the POST /api/capture and POST /api/project 503 tests above, so it is not
+// re-asserted here in isolation (this test file opens sockets throughout, and
+// asserting a global zero-connections invariant at an arbitrary point in the
+// run would just be fragile to test order, not to this function).
+
+// The normal targeted dispatch path prefers Brian's own tabs and skips the
+// agent tab when both are open (dispatchToExtensionRaw's untargeted-command
+// rule) -- wrong for a reload, which must hit every stale tab, agent tab
+// included, or the agent tab silently keeps running the old code.
+test('broadcastReloadTab reaches every connected tab, human and agent alike, unlike a normal untargeted dispatch', async () => {
+  const human = await connectTaggedSocket('human-reload-0001');
+  const agentTab = await connectTaggedSocket('agent-reload-0001', { agent: true });
+  const humanMessages = [];
+  const agentMessages = [];
+  human.on('message', (buf) => humanMessages.push(JSON.parse(buf.toString())));
+  agentTab.on('message', (buf) => agentMessages.push(JSON.parse(buf.toString())));
+  try {
+    const result = broadcastReloadTab();
+    // >= 2, not === 2: other tests in this file open and asynchronously close
+    // sockets, so a not-yet-closed one from elsewhere can still be counted --
+    // what this test must prove is that OUR human tab and OUR agent tab both
+    // received it, not the exact total across the whole suite.
+    assert.ok(result.sent_to >= 2);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(humanMessages.length, 1);
+    assert.equal(humanMessages[0].action, 'reload_tab');
+    assert.equal(agentMessages.length, 1);
+    assert.equal(agentMessages[0].action, 'reload_tab');
+  } finally {
+    human.close();
+    agentTab.close();
   }
 });
 
