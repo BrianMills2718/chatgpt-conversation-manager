@@ -203,6 +203,11 @@ wss.on("connection", (ws, req) => {
   ws.send(JSON.stringify({ type: "hello", message: "connected" }));
   ws.on("message", (buf) => {
     let msg; try { msg = JSON.parse(buf.toString()); } catch { return; }
+    if (msg?.type === 'identity') {
+      ws.account = msg.account && (msg.account.email || msg.account.user_id) ? msg.account : null;
+      logInfo(`[broker] tab ${ws.tabToken?.slice(0, 8) ?? '?'} is signed into ${ws.account?.email || ws.account?.user_id || 'no readable account'}`);
+      return;
+    }
     if (msg?.type === 'dom_activity') {
       // Purely local signal the extension already computed from the DOM
       // (thread id, message-count/role/length key, whether a capture was
@@ -251,6 +256,42 @@ wss.on("connection", (ws, req) => {
   ws.on("error", (err) => { logErr(`[broker] extension socket error: ${err.message}`); extensionSockets.delete(ws); });
 });
 
+// Accounts --------------------------------------------------------------------
+// Each tab reports which ChatGPT account it is signed into (content.js
+// reportIdentity). `account` arguments match an email (case-insensitive) or a
+// user id. Several browsers/profiles signed into different accounts can all be
+// connected at once; reads and asks are routed to a tab on the right account.
+function accountMatches(identity, wanted) {
+  if (!identity || !wanted) return false;
+  const w = String(wanted).trim().toLowerCase();
+  return (identity.email || '').toLowerCase() === w || (identity.user_id || '').toLowerCase() === w;
+}
+function accountKey(identity) { return identity ? (identity.email || identity.user_id) : null; }
+function connectedAccounts() {
+  return [...new Set([...extensionSockets].filter((ws) => ws.readyState === ws.OPEN && ws.account).map((ws) => accountKey(ws.account)))];
+}
+function noAccountTabMessage(account) {
+  const have = connectedAccounts();
+  return `No connected ChatGPT tab is signed into ${account}. Connected accounts: ${have.length ? have.join(', ') : 'none reported'}. Open https://chatgpt.com in a browser profile signed into that account with this extension installed.`;
+}
+function listConnections() {
+  return [...extensionSockets].filter((ws) => ws.readyState === ws.OPEN).map((ws) => ({
+    tab: ws.tabToken ? ws.tabToken.slice(0, 8) : null, agent: Boolean(ws.agentTab),
+    account: accountKey(ws.account), account_name: ws.account?.name || null, plan: ws.account?.plan || null,
+  }));
+}
+// One open socket per distinct account (unknown-account tabs grouped together),
+// preferring an agent tab so reads never touch a tab Brian is typing in.
+function oneSocketPerAccount() {
+  const byKey = new Map();
+  for (const ws of [...extensionSockets].filter((w) => w.readyState === w.OPEN && w.tabToken)) {
+    const key = accountKey(ws.account) || '(unknown account)';
+    const prev = byKey.get(key);
+    if (!prev || (!prev.agentTab && ws.agentTab)) byKey.set(key, ws);
+  }
+  return [...byKey.entries()].map(([key, ws]) => ({ key, tab: ws.tabToken }));
+}
+
 // Broadcasts to every connected tab (there may be several) and resolves on the
 // first SUCCESS, not the first reply. A stale/incapable tab (e.g. one running
 // pre-reload code, or sitting on a page where the action doesn't apply) can
@@ -265,9 +306,13 @@ wss.on("connection", (ws, req) => {
 //
 // Wrapped below by the paced/logged public dispatchToExtension; this raw
 // form keeps its exact original synchronous-throw and broadcast semantics.
-function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { single = false, tab = null } = {}) {
+function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { single = false, tab = null, account = null } = {}) {
   let sockets = [...extensionSockets].filter((ws) => ws.readyState === ws.OPEN);
   if (!sockets.length) throw new Error("No browser extension is connected to the broker.");
+  if (account) {
+    sockets = sockets.filter((ws) => accountMatches(ws.account, account));
+    if (!sockets.length) throw new Error(noAccountTabMessage(account));
+  }
   if (tab) {
     sockets = sockets.filter((ws) => ws.tabToken === tab);
     if (!sockets.length) throw new Error(`ChatGPT tab ${tab.slice(0, 8)} is not connected (closed, or still reloading).`);
@@ -425,9 +470,73 @@ async function navigateToThread(threadId) {
 // Live chat list --------------------------------------------------------------
 // One request to ChatGPT's own list of recent chats (newest first), read through a
 // connected tab. It shares the account's request limit, so it is never paged.
-async function listRecentChats(limit = 28) {
-  const r = await dispatchToExtension({ action: "list_recent_chats", limit }, COMMAND_TIMEOUT_MS, { single: true });
-  return r.chats || [];
+async function listRecentChats(limit = 28, { account = null, includeProjects = false } = {}) {
+  const r = await dispatchToExtension({ action: "list_recent_chats", limit }, COMMAND_TIMEOUT_MS, { single: true, account });
+  const chats = (r.chats || []).map((c) => ({ ...c, project_name: null }));
+  if (!includeProjects) return chats;
+  // The main list leaves out chats filed inside a Project; merge those in
+  // (newest first) so a caller is not silently blind to them.
+  const p = await dispatchToExtension({ action: "list_project_chats", per_project: Math.min(limit, 100) }, COMMAND_TIMEOUT_MS, { single: true, account });
+  const seen = new Set(chats.map((c) => c.id));
+  for (const project of p.projects || []) for (const c of project.chats || []) if (!seen.has(c.id)) { seen.add(c.id); chats.push(c); }
+  const t = (v) => (typeof v === 'number' ? v * 1000 : Date.parse(v || '') || 0);
+  return chats.sort((a, b) => t(b.update_time) - t(a.update_time)).slice(0, limit);
+}
+
+// Accepts a bare conversation id or any chatgpt.com conversation URL
+// (/c/<id>, or /g/<project>/c/<id> for a chat inside a Project).
+function threadIdFromInput(input) {
+  const v = String(input || '').trim();
+  const fromUrl = v.match(/\/c\/([A-Za-z0-9-]+)/);
+  if (fromUrl) return fromUrl[1];
+  if (!v || /[\s/]/.test(v)) throw new Error(`"${v}" is not a ChatGPT conversation id or chatgpt.com/c/... link.`);
+  return v;
+}
+
+// read_chatgpt_chat -------------------------------------------------------------
+// Reads a whole conversation (text and images) by id without sending anything.
+// With no account given, each connected account is tried in turn, since a
+// conversation is only visible to the account that owns it. Images are also
+// written to disk so they outlive the tool call.
+const IMAGE_DIR = path.join(ARCHIVE_DIR, 'images');
+async function readChatgptChat({ thread, account = null, include_images = true, max_images = 40 }) {
+  const threadId = threadIdFromInput(thread);
+  const command = { action: 'read_conversation', thread_id: threadId, include_images, max_images };
+  const targets = account ? [{ key: account, account }] : oneSocketPerAccount().map((t) => ({ key: t.key, tab: t.tab }));
+  if (!targets.length) throw new Error('No browser extension is connected to the broker.');
+  const errors = [];
+  for (const t of targets) {
+    try {
+      const r = await dispatchToExtension(command, 180000, t.account ? { single: true, account: t.account } : { tab: t.tab });
+      const dir = path.join(IMAGE_DIR, threadId);
+      const images = (r.images || []).map((img, i) => {
+        if (!img.data) return { ...img, path: null };
+        fs.mkdirSync(dir, { recursive: true });
+        const ext = (String(img.mimeType || 'image/png').split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '');
+        const file = path.join(dir, `${String(i + 1).padStart(2, '0')}-${img.message_id || 'image'}.${ext}`);
+        fs.writeFileSync(file, Buffer.from(img.data, 'base64'));
+        return { ...img, path: path.resolve(file) };
+      });
+      return { ...r, images, account: accountKey(r.account) || t.key };
+    } catch (err) { errors.push(`${t.key}: ${err.message}`); }
+  }
+  throw new Error(`Could not read conversation ${threadId} from any connected account (${errors.join(' | ')}).`);
+}
+
+function formatChatTranscript(r) {
+  const imagesByMessage = new Map();
+  for (const img of r.images || []) {
+    if (!imagesByMessage.has(img.message_id)) imagesByMessage.set(img.message_id, []);
+    imagesByMessage.get(img.message_id).push(img);
+  }
+  const lines = [`# ${r.title || 'Untitled'}`, `conversation ${r.thread_id} · account ${r.account || 'unknown'}${r.project_id ? ` · project ${r.project_id}` : ''} · https://chatgpt.com/c/${r.thread_id}`, ''];
+  for (const m of r.messages || []) {
+    lines.push(`## ${m.role}${m.created_at ? ` (${m.created_at})` : ''}`);
+    if (m.text) lines.push(m.text);
+    for (const img of imagesByMessage.get(m.message_id) || []) lines.push(img.path ? `[image saved: ${img.path}]` : `[image unavailable: ${img.error || 'no data'}]`);
+    lines.push('');
+  }
+  return lines.join('\n');
 }
 
 // Case-insensitive title match: an exact title wins; otherwise every title that
@@ -439,8 +548,8 @@ function matchChatsByTitle(chats, query) {
   return exact.length ? exact : chats.filter((c) => (c.title || "").toLowerCase().includes(q));
 }
 
-async function resolveThreadTitle(title) {
-  const matches = matchChatsByTitle(await listRecentChats(100), title);
+async function resolveThreadTitle(title, account = null) {
+  const matches = matchChatsByTitle(await listRecentChats(100, { account, includeProjects: true }), title);
   if (matches.length === 1) return matches[0].id;
   if (!matches.length) throw new Error(`No chat among the 100 most recent has a title matching "${title}". Use list_chatgpt_chats or search_archived_chats to find its id.`);
   throw new Error(`"${title}" matches ${matches.length} chats; pass thread_id instead: ${matches.slice(0, 10).map((c) => `${c.id} "${c.title}"`).join("; ")}`);
@@ -478,9 +587,9 @@ let openAgentTab = async () => {
 };
 function setAgentTabOpener(fn) { openAgentTab = fn; }
 
-async function findIdleAgentTab(seen, excludeTokens = new Set()) {
+async function findIdleAgentTab(seen, excludeTokens = new Set(), account = null) {
   const tokens = [...new Set([...extensionSockets]
-    .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab && !excludeTokens.has(ws.tabToken))
+    .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab && !excludeTokens.has(ws.tabToken) && (!account || accountMatches(ws.account, account)))
     .map((ws) => ws.tabToken))];
   for (const tab of tokens) {
     if (claimedTabs.has(tab)) { seen.push({ tab: tab.slice(0, 8), busy: "claimed" }); continue; }
@@ -497,23 +606,24 @@ async function findIdleAgentTab(seen, excludeTokens = new Set()) {
   return null;
 }
 
-async function pickIdleTab({ openWaitMs = 90000, forceNew = false } = {}) {
+async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = null } = {}) {
   const seen = [];
   const existing = new Set([...extensionSockets]
     .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab)
     .map((ws) => ws.tabToken));
   if (!forceNew) {
-    const found = await findIdleAgentTab(seen);
+    const found = await findIdleAgentTab(seen, new Set(), account);
     if (found) return found;
   }
-  await openAgentTab();
+  await openAgentTab({ account });
   const deadline = Date.now() + openWaitMs;
   while (Date.now() < deadline) {
     await sleep(1000);
-    const next = await findIdleAgentTab([], forceNew ? existing : new Set());
+    const next = await findIdleAgentTab([], forceNew ? existing : new Set(), account);
     if (next) return next;
   }
-  throw new Error(`No idle agent ChatGPT tab (${JSON.stringify(seen)}); opened ${AGENT_TAB_URL} but it did not connect within ${Math.round(openWaitMs / 1000)}s (is Chrome signed in and the extension enabled?).`);
+  const where = account ? ` signed into ${account} (the broker's open command uses the default browser profile; open ${AGENT_TAB_URL} yourself in the profile signed into that account)` : '';
+  throw new Error(`No idle agent ChatGPT tab${where} (${JSON.stringify(seen)}); opened ${AGENT_TAB_URL} but no matching tab connected within ${Math.round(openWaitMs / 1000)}s (is the browser signed in and the extension enabled?).`);
 }
 
 async function waitForTab(tab, predicate, timeoutMs, what) {
@@ -536,7 +646,7 @@ function promptDispatchTimeoutMs(timeoutSeconds) {
   return Math.max(120000, Math.min((Number(timeoutSeconds) + 30) * 1000, 300000));
 }
 
-async function askChatgpt({ text, thread_id = null, thread_title = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000, sendTimeoutMs = null, fresh_tab = false }) {
+async function askChatgpt({ text, thread_id = null, thread_title = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000, sendTimeoutMs = null, fresh_tab = false, account = null }) {
   const run = async () => {
     const body = String(text || "").trim();
     if (!body) throw new Error("text is required.");
@@ -548,8 +658,9 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
     let conversationMode = thread_id || thread_title ? 'continuing' : 'new';
     let claimedTab = null;
     try {
-      if (thread_title) resolvedThreadId = await resolveThreadTitle(thread_title);
-      const { tab, thread_id: current } = await pickIdleTab({ openWaitMs, forceNew: fresh_tab });
+      if (thread_id) resolvedThreadId = threadIdFromInput(thread_id);
+      if (thread_title) resolvedThreadId = await resolveThreadTitle(thread_title, account);
+      const { tab, thread_id: current } = await pickIdleTab({ openWaitMs, forceNew: fresh_tab, account });
       claimedTab = tab;
       if (resolvedThreadId && current !== resolvedThreadId) {
         await dispatchToExtension({ action: "navigate_to_thread", thread_id: resolvedThreadId }, COMMAND_TIMEOUT_MS, { tab });
@@ -756,15 +867,16 @@ app.post('/api/undo', async (req, res) => {
 function createMcpServer() {
   const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.3.0" });
 
-  mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish.', {
+  mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish.', {
     text: z.string().min(1),
     thread_id: z.string().optional(),
     thread_title: z.string().min(1).optional(),
     timeout_seconds: z.number().int().min(10).max(900).optional(),
     fresh_tab: z.boolean().optional(),
-  }, async ({ text, thread_id, thread_title, timeout_seconds, fresh_tab }) => {
+    account: z.string().min(1).optional(),
+  }, async ({ text, thread_id, thread_title, timeout_seconds, fresh_tab, account }) => {
     try {
-      const r = await askChatgpt({ text, thread_id: thread_id || null, thread_title: thread_title || null, timeout_seconds: timeout_seconds || 180, fresh_tab: Boolean(fresh_tab) });
+      const r = await askChatgpt({ text, thread_id: thread_id || null, thread_title: thread_title || null, timeout_seconds: timeout_seconds || 180, fresh_tab: Boolean(fresh_tab), account: account || null });
       const content = [{ type: 'text', text: `${r.reply}\n\n[conversation ${r.thread_id} — ${r.url}]` }];
       // Images ChatGPT generated or returned inline (see extension/lib/api-capture.js
       // resolveFileDownloadUrl and content.js resolveReplyImages) arrive already
@@ -784,14 +896,37 @@ function createMcpServer() {
     } catch (err) { return { isError: true, content: [{ type: 'text', text: `reload_chatgpt_tabs failed: ${err.message}` }] }; }
   });
 
-  mcp.tool('list_chatgpt_chats', 'List Brian\'s most recent ChatGPT chats live from ChatGPT (newest first): id, title, last updated. Optional query filters by title. Use the id with ask_chatgpt to continue a chat. For older chats or searching message text, use search_archived_chats.', {
+  mcp.tool('list_chatgpt_connections', 'List every ChatGPT browser tab currently connected to the bridge, with the ChatGPT account each is signed into and whether it is an agent tab. Use it to see which accounts you can read from or send to. A chat started anywhere (another browser, the desktop app, a phone) is readable through any connected tab signed into the same account.', {}, async () => {
+    const rows = listConnections();
+    const text = rows.length ? rows.map((r) => `tab ${r.tab}  ${r.agent ? 'agent' : 'human'}  account ${r.account || '(not reported yet)'}${r.plan ? `  [${r.plan}]` : ''}`).join('\n') : 'No ChatGPT tabs are connected. Open https://chatgpt.com in a browser profile with the bridge extension installed.';
+    return { content: [{ type: 'text', text }] };
+  });
+
+  mcp.tool('read_chatgpt_chat', 'Read an entire ChatGPT conversation -- every message plus any generated or uploaded images -- by id or chatgpt.com link, WITHOUT sending anything into it. Works for any chat the signed-in account owns, wherever it was started (desktop app, another browser, inside a Project). Images are saved to disk (paths in the transcript) and, when inline_images is true, also returned inline. Omit account to try every connected account.', {
+    thread: z.string().min(1),
+    account: z.string().min(1).optional(),
+    include_images: z.boolean().optional(),
+    inline_images: z.boolean().optional(),
+    max_images: z.number().int().min(0).max(200).optional(),
+  }, async ({ thread, account, include_images, inline_images, max_images }) => {
+    try {
+      const r = await readChatgptChat({ thread, account: account || null, include_images: include_images !== false, max_images: max_images ?? 40 });
+      const content = [{ type: 'text', text: formatChatTranscript(r) }];
+      if (inline_images !== false) for (const img of r.images || []) if (img.data) content.push({ type: 'image', data: img.data, mimeType: img.mimeType });
+      return { content };
+    } catch (err) { return { isError: true, content: [{ type: 'text', text: `read_chatgpt_chat failed: ${err.message}` }] }; }
+  });
+
+  mcp.tool('list_chatgpt_chats', 'List Brian\'s most recent ChatGPT chats live from ChatGPT (newest first): id, title, last updated, and project. Includes chats filed inside Projects unless include_projects is false. Optional query filters by title; optional account (email) picks which signed-in account to list. Use the id with read_chatgpt_chat to read a chat or ask_chatgpt to continue it. For older chats or searching message text, use search_archived_chats.', {
     query: z.string().optional(),
     limit: z.number().int().min(1).max(100).optional(),
-  }, async ({ query, limit }) => {
+    account: z.string().min(1).optional(),
+    include_projects: z.boolean().optional(),
+  }, async ({ query, limit, account, include_projects }) => {
     try {
-      let chats = await listRecentChats(query ? 100 : (limit || 28));
+      let chats = await listRecentChats(query ? 100 : (limit || 28), { account: account || null, includeProjects: include_projects !== false });
       if (query) chats = matchChatsByTitle(chats, query).slice(0, limit || 28);
-      const text = chats.length ? chats.map((c) => `${c.id}  ${c.title || '(untitled)'}  [updated ${c.update_time ?? 'unknown'}]`).join('\n') : (query ? `No recent chat title matches "${query}".` : 'No chats returned.');
+      const text = chats.length ? chats.map((c) => `${c.id}  ${c.title || '(untitled)'}${c.project_name ? `  {project: ${c.project_name}}` : ''}  [updated ${c.update_time ?? 'unknown'}]`).join('\n') : (query ? `No recent chat title matches "${query}".` : 'No chats returned.');
       return { content: [{ type: 'text', text }] };
     } catch (err) { return { isError: true, content: [{ type: 'text', text: `list_chatgpt_chats failed: ${err.message}` }] }; }
   });
@@ -955,4 +1090,4 @@ if (isMain) {
   });
 }
 
-export { app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, promptDispatchTimeoutMs, BRIDGE_OBSERVATIONS_PATH, REQUEST_TIMING_PATH, DOM_ACTIVITY_PATH, agentPacer, dispatchToExtension, broadcastReloadTab };
+export { readChatgptChat, listRecentChats, listConnections, threadIdFromInput, formatChatTranscript, app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, promptDispatchTimeoutMs, BRIDGE_OBSERVATIONS_PATH, REQUEST_TIMING_PATH, DOM_ACTIVITY_PATH, agentPacer, dispatchToExtension, broadcastReloadTab };

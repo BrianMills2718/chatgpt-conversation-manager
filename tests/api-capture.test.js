@@ -419,3 +419,32 @@ test('resolveFileDownloadUrl rejects an asset pointer with no file id', async ()
   );
 });
 
+
+// -- multi-account / read-any-chat helpers -------------------------------------
+import { identityFromSession, imagesInMessages, parseProjectSidebar } from '../extension/lib/api-capture.js';
+
+test('identityFromSession keeps only identity fields and rejects a logged-out session', () => {
+  const id = identityFromSession({ user: { id: 'user-1', email: 'a@b.com', name: 'A' }, account: { id: 'acct-1', planType: 'pro' }, accessToken: 'secret' });
+  assert.deepEqual(id, { user_id: 'user-1', email: 'a@b.com', name: 'A', account_id: 'acct-1', plan: 'pro' });
+  assert.ok(!JSON.stringify(id).includes('secret'));
+  assert.equal(identityFromSession({}), null);
+  assert.equal(identityFromSession({ user: {} }), null);
+});
+
+test('imagesInMessages keeps images from tool turns (where the image generator puts them), not just assistant turns', () => {
+  const refs = imagesInMessages([
+    { message_id: 'u', role: 'user', attachments: [{ content_type: 'image/png', asset_pointer: 'file-service://file-up' }] },
+    { message_id: 't', role: 'tool', attachments: [{ content_type: 'image_asset_pointer', asset_pointer: 'sediment://file_gen' }] },
+    { message_id: 'a', role: 'assistant', text: 'here you go' },
+    { message_id: 'x', role: 'tool', attachments: [{ content_type: 'text/plain', asset_pointer: 'file-service://doc' }] },
+  ]);
+  assert.deepEqual(refs.map((r) => [r.message_id, r.asset_pointer]), [['u', 'file-service://file-up'], ['t', 'sediment://file_gen']]);
+});
+
+test('parseProjectSidebar reads project chats and fails loudly on an unrecognized shape', () => {
+  const projects = parseProjectSidebar({ items: [{ gizmo: { gizmo: { id: 'g-p-1', display: { name: 'DoDAF' } } }, conversations: { items: [{ id: 'c1', title: 'Tabs', update_time: '2026-09-24T01:00:00Z' }] } }] });
+  assert.equal(projects[0].project_name, 'DoDAF');
+  assert.deepEqual(projects[0].chats[0], { id: 'c1', title: 'Tabs', update_time: '2026-09-24T01:00:00Z', project_id: 'g-p-1', project_name: 'DoDAF' });
+  assert.throws(() => parseProjectSidebar({ projects: [] }), /no items array/);
+  assert.throws(() => parseProjectSidebar({ items: [{ conversations: { items: [] } }] }), /no project id/);
+});

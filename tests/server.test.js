@@ -920,12 +920,15 @@ test('ask_chatgpt continues the one chat whose title matches, and refuses an amb
   const chats = [{ id: 'chat-1', title: 'Metamodel review' }, { id: 'chat-2', title: 'Budget 2026' }, { id: 'chat-3', title: 'Budget 2027' }];
   const human = fakeTab('human-tab-0010', { onCommand: async (msg, state, reply) => {
     if (msg.action === 'list_recent_chats') return reply({ ok: true, chats });
+    // Title lookup also searches chats filed inside Projects (none here).
+    if (msg.action === 'list_project_chats') return reply({ ok: true, projects: [] });
     reply({ ok: false, error: 'should not be used' });
   } });
   const agentTab = fakeTab('agent-tab-0011', {
     agent: true,
     onCommand: async (msg, state, reply, reopen) => {
       if (msg.action === 'list_recent_chats') return reply({ ok: true, chats });
+      if (msg.action === 'list_project_chats') return reply({ ok: true, projects: [] });
       if (msg.action === 'navigate_to_thread') {
         reply({ ok: true, navigated: true });
         state.ws.close();

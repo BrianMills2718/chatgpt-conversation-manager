@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.6.0 (2026-09-24)
+
+### Added — any account, any chat, read without sending
+
+Found 2026-09-24: an agent could not see ChatGPT chats Brian had just started, because they were in the ChatGPT desktop app and Edge (no extension), and possibly inside a Project (left out of ChatGPT's main chat list).
+
+- Each tab reports the ChatGPT account it is signed into (`identity` message on connect; `/api/auth/session` identity fields only, never the token). The broker routes by account.
+- `read_chatgpt_chat`: read any conversation by id or link — text plus images, saved to `data/images/<thread>/` — without sending into it. Tries every connected account when none is given.
+- `list_chatgpt_connections`: connected tabs and their accounts.
+- `list_chatgpt_chats` merges chats from inside Projects (`/backend-api/gizmos/snorlax/sidebar`, parsed defensively and failing loudly on an unrecognized shape — unconfirmed against a live account at release) and accepts `account`.
+- `ask_chatgpt` accepts `account` and a `chatgpt.com/c/...` link as `thread_id`.
+- Images from tool-authored turns (where the image generator puts them) are now included when reading a chat.
+
 ## v0.4.0 (2026-09-14)
 
 ### Added — scheduled incremental backup

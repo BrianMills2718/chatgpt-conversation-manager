@@ -7,7 +7,7 @@
 (async () => {
 const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import(chrome.runtime.getURL("lib/title.js"));
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
-const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl } = await import(chrome.runtime.getURL("lib/api-capture.js"));
+const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
   brokerUrl: "ws://localhost:8787/extension",
@@ -1044,7 +1044,32 @@ async function handleCommand(msg) {
     const page = await listConversationsPage({ offset: 0, limit });
     return { chats: page.items.map((c) => ({ id: c.id, title: c.title || "", update_time: c.update_time ?? null })), total: page.total ?? null };
   }
-  if (msg.action === "get_tab") return { tab: TAB_TOKEN, agent: AGENT_TAB, busy: bulkArchiving, thread_id: currentThreadId() };
+  if (msg.action === "get_tab") return { tab: TAB_TOKEN, agent: AGENT_TAB, busy: bulkArchiving, thread_id: currentThreadId(), account: tabIdentity };
+  if (msg.action === "list_project_chats") {
+    const perProject = Math.min(Math.max(Number(msg.per_project) || 20, 1), 100);
+    return { projects: await listProjectChats({ perProject }) };
+  }
+  if (msg.action === "read_conversation") {
+    // Reads any conversation this tab's account can see, by id, without
+    // navigating or sending anything. Images are resolved to bytes here
+    // because nothing past this page can dereference ChatGPT's signed URLs;
+    // an image that fails is reported with its error, never silently dropped.
+    const threadId = String(msg.thread_id || "").trim();
+    if (!threadId) throw new Error("read_conversation requires thread_id");
+    const data = await fetchConversationTree(threadId);
+    const messages = linearizeMapping(data);
+    const images = [];
+    if (msg.include_images !== false) {
+      const maxImages = Math.min(Math.max(Number(msg.max_images) || 40, 0), 200);
+      for (const ref of imagesInMessages(messages).slice(0, maxImages)) {
+        try { images.push({ ...ref, ...(await fetchImageAsDataParts(await resolveFileDownloadUrl(ref.asset_pointer))) }); }
+        catch (err) { images.push({ ...ref, error: err.message }); }
+      }
+    }
+    return { thread_id: threadId, title: typeof data.title === "string" ? data.title : null,
+             project_id: data.conversation_template_id || data.gizmo_id || null,
+             messages, images, account: tabIdentity };
+  }
   if (msg.action === "reload_tab") {
     // Same fire-and-forget shape as navigate_home/navigate_to_thread below:
     // the reply is sent synchronously before location.reload() tears this
@@ -1144,6 +1169,16 @@ async function handleCommand(msg) {
 
 // -- broker connection ------------------------------------------------------------
 
+// Which ChatGPT account this tab is signed into, so the broker can route reads
+// and asks to a tab that can see the target account's conversations. Sent on
+// every (re)connect; a failure is reported to the broker rather than hidden.
+let tabIdentity = null;
+async function reportIdentity() {
+  try { tabIdentity = await getSessionIdentity(); }
+  catch (err) { tabIdentity = null; await log("warn", "could not read this tab's ChatGPT account", err); }
+  try { socket?.send(JSON.stringify({ type: "identity", account: tabIdentity })); } catch {}
+}
+
 async function connect() {
   if (contextInvalidated) return;
   clearTimeout(reconnectTimer);
@@ -1169,6 +1204,7 @@ async function connect() {
     setStatus({ connected: true });
     log("info", "broker connected");
     scheduleArchive();
+    reportIdentity();
   };
   socket.onmessage = async (event) => {
     let msg;
