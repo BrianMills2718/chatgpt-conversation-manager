@@ -371,3 +371,77 @@ export async function listAllConversations({ fetchImpl = fetch, pageSize = 50, o
   }
   return all;
 }
+
+// -- multi-account / read-any-chat support -------------------------------------
+// A ChatGPT conversation lives server-side, not in a tab: any tab logged into
+// the same account can read any of that account's conversations by id, no
+// matter where it was started (another browser, the desktop app, a phone).
+// The broker therefore needs to know which account each connected tab is
+// signed into, so it can route a read/ask to a tab that can actually see the
+// conversation. /api/auth/session is the same same-origin endpoint
+// getAccessToken() already reads; this only keeps its identity fields.
+export function identityFromSession(data) {
+  const user = data?.user;
+  if (!user || typeof user !== "object") return null;
+  const email = typeof user.email === "string" ? user.email : null;
+  const userId = typeof user.id === "string" ? user.id : null;
+  if (!email && !userId) return null;
+  return {
+    user_id: userId,
+    email,
+    name: typeof user.name === "string" ? user.name : null,
+    account_id: typeof data?.account?.id === "string" ? data.account.id : null,
+    plan: typeof data?.account?.planType === "string" ? data.account.planType : null,
+  };
+}
+
+export async function getSessionIdentity({ fetchImpl = fetch } = {}) {
+  const res = await fetchImpl("/api/auth/session", { credentials: "same-origin", headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`session fetch failed: HTTP ${res.status}`);
+  const identity = identityFromSession(await res.json());
+  if (!identity) throw new Error("session response carried no signed-in user (logged out, or schema changed)");
+  return identity;
+}
+
+// Every image anywhere in a linearized conversation -- generated images arrive
+// on tool-authored turns (the image generator), not only on assistant turns,
+// so this deliberately does not filter by role the way replyFromTree does.
+export function imagesInMessages(messages) {
+  const out = [];
+  for (const m of messages || []) {
+    for (const a of m.attachments || []) {
+      if (isImageAttachment(a) && a.asset_pointer) out.push({ message_id: m.message_id, role: m.role, asset_pointer: a.asset_pointer, name: a.name || null });
+    }
+  }
+  return out;
+}
+
+// ChatGPT's main conversation list (/backend-api/conversations) leaves out
+// chats filed inside a Project, so a list built only from it is blind to
+// them. The Projects sidebar endpoint returns each project with its recent
+// conversations. UNCONFIRMED against a live account as of 2026-09-24: the
+// shape below is parsed defensively and anything unrecognized throws, so a
+// schema change fails loudly instead of silently returning "no project chats".
+export function parseProjectSidebar(data) {
+  const items = data?.items;
+  if (!Array.isArray(items)) throw new Error("projects sidebar response has no items array (schema may have changed)");
+  return items.map((item) => {
+    const g = item?.gizmo?.gizmo || item?.gizmo || {};
+    const convs = item?.conversations?.items || item?.gizmo?.conversations?.items || [];
+    if (!g.id) throw new Error("projects sidebar item has no project id (schema may have changed)");
+    return {
+      project_id: g.id,
+      project_name: g.display?.name || g.name || null,
+      chats: (Array.isArray(convs) ? convs : []).map((c) => ({ id: c.id, title: c.title || "", update_time: c.update_time ?? null, project_id: g.id, project_name: g.display?.name || g.name || null })),
+    };
+  });
+}
+
+export async function listProjectChats({ perProject = 20, fetchImpl = fetch, accessToken } = {}) {
+  if (accessToken === undefined) accessToken = await getAccessToken({ fetchImpl });
+  const headers = { Accept: "application/json" };
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  const res = await fetchImpl(`/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=${encodeURIComponent(perProject)}`, { method: "GET", credentials: "same-origin", headers });
+  if (!res.ok) throw new Error(`projects sidebar fetch failed: HTTP ${res.status}`);
+  return parseProjectSidebar(await res.json());
+}
