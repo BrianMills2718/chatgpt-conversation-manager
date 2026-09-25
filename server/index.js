@@ -179,6 +179,16 @@ async function checkBulkOrphan(owner) {
   finishBulk({ type: "bulk_archive_complete", ...counts, failed: [], fatal_error: "the ChatGPT tab running the bulk archive disconnected (closed, refreshed, or extension reloaded) and is no longer archiving" });
 }
 
+// The extension's background worker compares this with its running version and
+// reloads itself when they differ (extension/background.js), so a merged
+// extension change reaches every browser without a manual reload. Read from
+// disk on each request so a git merge is picked up without restarting.
+const EXTENSION_MANIFEST_PATH = new URL('../extension/manifest.json', import.meta.url);
+function extensionVersionOnDisk() {
+  try { return JSON.parse(fs.readFileSync(EXTENSION_MANIFEST_PATH, 'utf8')).version || null; }
+  catch (err) { logErr(`[broker] cannot read extension manifest version: ${err.message}`); return null; }
+}
+
 function authOk(req) { return (req.headers.authorization || "") === `Bearer ${AUTH_TOKEN}`; }
 function cleanTitle(v) { const s = String(v || '').trim(); if (!s || s.length > 120) throw new Error('title must be 1-120 characters'); return s; }
 
@@ -198,6 +208,21 @@ wss.on("connection", (ws, req) => {
     ws.tabToken = params.get("tab") || null;
     ws.agentTab = params.get("agent") === "1";
   } catch { ws.tabToken = null; ws.agentTab = false; }
+  // A tab keeps its token across reloads, so a new socket carrying a token that
+  // is already connected means the old one belongs to superseded code (an
+  // extension update leaves the previous content script alive in the page with
+  // its socket still open, able to act on commands a second time). Close it
+  // with 4001 so it stops; current code that receives 4001 while still alive
+  // (e.g. a duplicated tab sharing sessionStorage) takes a fresh token instead.
+  if (ws.tabToken) {
+    for (const other of extensionSockets) {
+      if (other.tabToken === ws.tabToken && other.readyState === other.OPEN) {
+        logInfo(`[broker] tab ${ws.tabToken.slice(0, 8)} reconnected; closing its superseded socket`);
+        try { other.close(4001, 'superseded'); } catch {}
+        extensionSockets.delete(other);
+      }
+    }
+  }
   extensionSockets.add(ws);
   logInfo(`[broker] extension connected (${extensionSockets.size} total)`);
   ws.send(JSON.stringify({ type: "hello", message: "connected" }));
@@ -725,7 +750,7 @@ app.post("/api/ask", async (req, res) => {
   catch (err) { res.status(503).json({ error: err.message }); }
 });
 
-app.get("/health", (_req, res) => res.json({ ok: true, extension_connections: extensionSockets.size, archive_dir: ARCHIVE_DIR }));
+app.get("/health", (_req, res) => res.json({ ok: true, extension_connections: extensionSockets.size, archive_dir: ARCHIVE_DIR, extension_version: extensionVersionOnDisk() }));
 app.post('/api/capture', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   try { const result = await dispatchToExtension({ action: 'capture_current_chat' }); res.json(result); }

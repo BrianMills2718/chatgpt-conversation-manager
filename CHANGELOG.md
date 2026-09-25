@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.7.0 (2026-09-24)
+
+### Added — the extension keeps itself current; no manual reloads or refreshes
+
+- `extension/background.js`: injects the content script into already-open chatgpt.com tabs on install/update, and every minute compares its version with `extension_version` from the broker's `/health`, reloading itself when they differ. A merged extension change (with a manifest version bump) now reaches every browser without Brian.
+- The broker closes a tab's older socket with code 4001 when the same tab token reconnects, so a superseded content script left in the page after an update cannot act on commands a second time. Current code that receives 4001 (a duplicated tab sharing sessionStorage) takes a fresh in-memory token.
+
 ## v0.6.0 (2026-09-24)
 
 ### Added — any account, any chat, read without sending

@@ -1,12 +1,46 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Conversation Manager Bridge",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Archives ChatGPT conversations and exposes narrow organization tools through a trusted local/remote broker.",
-  "permissions": ["storage"],
-  "host_permissions": ["https://chatgpt.com/*", "http://localhost/*", "ws://localhost/*"],
-  "content_scripts": [{ "matches": ["https://chatgpt.com/*"], "js": ["content.js"], "run_at": "document_idle" }],
-  "web_accessible_resources": [{ "resources": ["lib/*.js"], "matches": ["https://chatgpt.com/*"] }],
+  "permissions": [
+    "alarms",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "http://localhost/*",
+    "ws://localhost/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/*.js"
+      ],
+      "matches": [
+        "https://chatgpt.com/*"
+      ]
+    }
+  ],
   "options_page": "options.html",
-  "action": { "default_popup": "popup.html", "default_title": "ChatGPT Conversation Manager" }
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ChatGPT Conversation Manager"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
 }

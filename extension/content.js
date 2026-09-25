@@ -669,7 +669,7 @@ const CAPABILITIES = { incremental_archive: true, rate_limit_recovery: true, ada
 // A tab keeps one token across full-page navigations (sessionStorage is per tab
 // and per origin), so the broker can address THIS tab again after it navigates
 // and reconnects. Without it, a command meant for one tab reaches every tab.
-const TAB_TOKEN = (() => {
+let TAB_TOKEN = (() => {
   try {
     let t = sessionStorage.getItem("ccm_tab_token");
     if (!t) { t = crypto.randomUUID(); sessionStorage.setItem("ccm_tab_token", t); }
@@ -1245,8 +1245,16 @@ async function connect() {
       await log("error", `command ${msg.action} failed`, err);
     }
   };
-  socket.onclose = () => {
+  socket.onclose = (event) => {
     setStatus({ connected: false });
+    // 4001: the broker saw another live socket with this tab's token. If this
+    // code is still current (a duplicated tab shares sessionStorage), take a
+    // fresh in-memory token so both tabs stay connected. Deliberately not
+    // written back to sessionStorage: a page being torn down can receive 4001
+    // too, and rewriting the shared token under the page that replaces it
+    // would break agents waiting on that tab by token. Superseded code stops
+    // on its own when connect() hits the invalidated extension context.
+    if (event?.code === 4001) TAB_TOKEN = crypto.randomUUID();
     if (!contextInvalidated) reconnectTimer = setTimeout(connect, 2000);
   };
   socket.onerror = () => {
