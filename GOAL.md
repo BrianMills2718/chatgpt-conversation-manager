@@ -234,6 +234,14 @@ non_gating_utility_review:
   (per-account pacer code exists but has never run with two real
   simultaneously-connected accounts) rather than describing an aspirational
   state.
+- Added `weekly-plans/scripts/verify_multi_account_dispatch.py` (PR #164,
+  merged): a ready-to-run script that performs C3/C4's exact check (real
+  concurrent `dispatch_many` to two named accounts, then inspects the
+  persisted pacer state for two independent account-keyed entries) and
+  fails loudly rather than accepting a degraded single-account result. Not
+  runnable yet -- still only one account connected -- but removes all
+  remaining engineering work from the resume: once a second account is
+  connected, this is one command, not ad-hoc work.
 - Only C3 and C4 remain, both requiring a genuine second connected ChatGPT
   account -- blocked on Brian; see "Need anything from human" in this
   session's closeout message. Every other acceptance check (C1, C2, C5) is
