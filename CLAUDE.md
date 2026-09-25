@@ -29,11 +29,16 @@ straight in anything you write about this repo.
 - The live broker's cwd is the main checkout, so a merged fix only takes effect once you restart the
   process there (`pgrep -f server/index.js`, kill it, relaunch via `scripts/run-server.sh` in the
   background) — restarting doesn't need any client action.
-- A `content.js` (extension) change needs **two** things from Brian, not one: reload the extension in
-  `chrome://extensions`, **and** refresh the actual open ChatGPT tab. Reloading the extension alone
-  does not reliably re-inject a fresh content script into a tab that was already open — it can keep
-  running old code in memory while the extension listing shows the new version. Verify a change
-  actually landed via a distinguishing marker in the next response rather than trusting a "done" reply.
+- An extension change reaches the browser **without Brian**, as long as you **bump `version` in
+  `extension/manifest.json`** in the same change: the broker's `/health` reports the on-disk version,
+  and `extension/background.js` checks it every minute, calls `chrome.runtime.reload()` when it
+  differs, and on reload injects the new content script into every open chatgpt.com tab (Chrome
+  otherwise leaves open tabs on old code until refreshed). The broker closes a tab's older socket
+  (code 4001) when the same tab reconnects, so superseded code left in the page cannot act on
+  commands twice. Without a version bump nothing reloads. Verify a change landed with a real call
+  (e.g. `list_chatgpt_connections`), not by trusting the bump. The one exception is the first
+  install into a new browser/profile (Load unpacked + token), which only Brian can do; after that,
+  no refreshes.
 - There's also a supervised Windows Task Scheduler launcher for this same broker
   (`remote-mcp/deploy/windows/chatgpt-bridge.ps1`, installed as task "ChatGPT Bridge (\<user\>)",
   restart-on-failure, "At logon" trigger) — an alternative to manually running `scripts/run-server.sh`.

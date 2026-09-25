@@ -108,3 +108,22 @@ test('threadIdFromInput accepts ids and chatgpt.com links, rejects junk', () => 
   assert.equal(mod.threadIdFromInput(' 6ab4445d-04e0-83e9-ad97-78db2e45b9b7 '), '6ab4445d-04e0-83e9-ad97-78db2e45b9b7');
   assert.throws(() => mod.threadIdFromInput('not a link'), /not a ChatGPT conversation id/);
 });
+
+test('health reports the extension version on disk, which the extension compares to reload itself', async () => {
+  const res = await fetch(`http://127.0.0.1:${server.address().port}/health`);
+  const body = await res.json();
+  const onDisk = JSON.parse(fs.readFileSync(new URL('../extension/manifest.json', import.meta.url), 'utf8')).version;
+  assert.equal(body.extension_version, onDisk);
+});
+
+test('a tab reconnecting with the same token closes its superseded socket (4001) so old code cannot act twice', async () => {
+  const oldCode = await tab('99999999-dup', 'dup@example.com', { handlers: { read_conversation: () => { throw new Error('old code must not be used'); } } });
+  const closed = new Promise((resolve) => oldCode.ws.on('close', (code) => resolve(code)));
+  const newCode = await tab('99999999-dup', 'dup@example.com', { handlers: { read_conversation: (m) => ({ thread_id: m.thread_id, title: 'new', messages: [], images: [], account: { email: 'dup@example.com' } }) } });
+  assert.equal(await closed, 4001);
+  const r = await mod.readChatgptChat({ thread: 'x-1', account: 'dup@example.com' });
+  assert.equal(r.title, 'new');
+  assert.equal(oldCode.received.length, 0);
+  assert.equal(newCode.received.length, 1);
+  assert.equal(mod.listConnections().filter((c) => c.tab === '99999999').length, 1);
+});
