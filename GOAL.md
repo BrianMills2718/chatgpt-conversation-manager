@@ -217,9 +217,24 @@ non_gating_utility_review:
   goal that only Brian can resolve — see "Need anything from human" in
   this session's closeout message. Everything else in Phase 3 that doesn't
   require a second live account is done.
-- Next once unblocked: run the real C3/C4 verification (two concurrent
-  `dispatch_many` requests, one per account, both transcripts read back
-  directly; inspect `agent-pacer-state.json` for two independent
-  account-keyed entries). Then Phase 2 (review-sweep rebuilt on the shared
-  client) and Phase 4 (deployment docs) remain, and do not depend on the
-  second account.
+- **Phase 2 complete** (C2): `weekly-plans/scripts/review_sweep.py` built
+  on `chatgpt_dispatch_client.dispatch_many` (weekly-plans PR #163, merged,
+  commit `ad8e478`) -- replaces the raw `ask_chatgpt` + PowerShell
+  focus-lock loop used all through 2026-09-25. Verified with 5 new mocked
+  tests AND one real live dispatch against DIGIMON's actual pending
+  manifest (`Core/Prompt/RaptorPrompt.py`), which correctly recovered a
+  real reply through the broker's known false-timeout bug with zero manual
+  intervention, was independently verified, and landed as
+  `digimon_application_20260215` PR #380 (merged) -- a real manifest row
+  went from `pending` to `clean` using the new dispatch path end-to-end.
+- **Phase 4 / C5 complete**: added a "Sharing this with a teammate" section
+  to this repo's `README.md`, describing exactly what's built (per-person
+  local broker, no centralized/hosted broker) and, per the Forbidden
+  Substitutes rule above, explicitly stating what's still unverified
+  (per-account pacer code exists but has never run with two real
+  simultaneously-connected accounts) rather than describing an aspirational
+  state.
+- Only C3 and C4 remain, both requiring a genuine second connected ChatGPT
+  account -- blocked on Brian; see "Need anything from human" in this
+  session's closeout message. Every other acceptance check (C1, C2, C5) is
+  done and verified.
