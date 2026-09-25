@@ -1,0 +1,174 @@
+# Long-Running Goal: Consolidate ChatGPT orchestration + activate multi-account
+
+## Goal
+
+**Mission:** Stop maintaining two competing ChatGPT-dispatch mechanisms (an
+ad-hoc raw-`ask_chatgpt` loop vs. the more mature `weekly_chatgpt_supervisor.py`),
+extract the latter's proven dispatch robustness into one shared client, prove
+real multi-account dispatch works (never actually tried with two distinct live
+accounts), fix the broker's rate-limit pacer so accounts are properly
+independent, and document the per-person deployment shape that lets Brian
+hand this to a colleague. Full plan and rationale:
+`/home/brian/.claude/plans/async-snuggling-thompson.md` (approved by Brian,
+2026-09-25).
+
+**Execution profile:** `continuous-coordinated`
+
+Two repos are involved (`chatgpt-conversation-manager-v0.2` and
+`weekly-plans`) with dependent phases: Phase 2 and 3 both depend on Phase 1's
+extracted client existing first.
+
+**Stage and investment boundary:** PoC-to-tool hardening on Brian's own
+personal infrastructure, not a release/migration/destructive action. No
+formal budget given; revalidate per the Loop Bounds below rather than a token
+count.
+
+**Canonical example:** `dispatch_many([{"text": "...", "account": "A"}, {"text": "...", "account": "B"}])`
+sends two prompts to two different, simultaneously-connected real ChatGPT
+accounts and returns both real replies, verified by reading each conversation
+transcript back directly (not trusting a reported success status) — the
+capability that failed all of the prior session (2026-09-25) due to browser
+focus contention and a since-fixed `fresh_tab` PATH bug.
+
+**Forbidden substitutes:** A single-account dispatch relabeled as "multi-account
+verified." A mocked/stubbed broker response standing in for a real ChatGPT
+reply. Claiming Phase 3 done from the pacer code change alone without an
+actual live two-account concurrent dispatch and inspection of the persisted
+pacer state file showing two independent entries.
+
+**Repository / working scope:** Primary: `chatgpt-conversation-manager-v0.2`
+(Phases 1, 3, 4 — new shared client module, server pacer fix, README
+addition). Secondary: `weekly-plans` (Phase 1's refactor of
+`scripts/weekly_chatgpt_supervisor.py` to call the shared client; Phase 2's
+review-sweep script, exact repo TBD at that phase). Each repo's own
+`AGENTS.md`/`CLAUDE.md` governs while working in it.
+
+## Boundaries
+
+- In scope: the shared dispatch client, the review-sweep's dispatch mechanism,
+  the broker's rate-limit pacer, connecting a second real ChatGPT account,
+  documenting per-person deployment.
+- Out of scope: any centralized/hosted broker (Brian's explicit call,
+  2026-09-25); any new "router" that decides ChatGPT-vs-Claude (Decision 0014
+  governs that, reused as-is); `weekly_chatgpt_supervisor.py`'s task-profile
+  model itself (`autonomous`/`review_gated`/`hands_on`/`human_only` stays
+  exactly as-is — only its dispatch internals move to the shared client).
+- Writes allowed: `chatgpt-conversation-manager-v0.2/{server,client,README.md,CLAUDE.md}`,
+  `weekly-plans/scripts/weekly_chatgpt_supervisor.py`, and each affected
+  repo's own `investigations/chatgpt-review-sweep-manifest.{tsv,md}`.
+- Read-only or externally owned: the two DIGIMON/OntoCanon repos the
+  review-sweep targets (only their manifest files are written by this goal;
+  actual file fixes found by future sweep runs go through each repo's own
+  worktree+PR+merge discipline, unchanged from tonight's established pattern).
+- Irreversible actions requiring authorization: none anticipated. If one
+  appears (e.g. deleting `data-account2`/`data-account3` — unexplained
+  pre-existing directories found during Phase 1 investigation, not yet
+  understood), stop and report rather than acting.
+
+## Acceptance Checks
+
+| ID | Criterion | Evidence to report |
+| --- | --- | --- |
+| C1 | Shared dispatch client extracted and working | `weekly_chatgpt_supervisor.py`'s existing test suite (11 tests per its design doc) passes after refactoring it to call the new client |
+| C2 | Review-sweep uses the shared client, not the old raw-`ask_chatgpt`+focus-lock pattern | A real sweep run against currently-`pending` manifest rows in either target repo, reaching real ChatGPT replies without any manual PowerShell foreground-locking |
+| C3 | Real two-account concurrent dispatch | Two real replies from two distinct connected accounts in one `dispatch_many` call, both transcripts read back directly |
+| C4 | Pacer is per-account | Persisted pacer state file shows two independent account-keyed entries after C3's run, not one shared global entry |
+| C5 | Per-person deployment documented | The written README/CLAUDE.md section accurately describes what C1-C4 actually built, not an aspirational future state |
+
+## Increments
+
+1. Resolve the two open unknowns found entering Phase 1 before writing new
+   code: (a) `chatgpt-conversation-manager-v0.2` is pure Node.js/JavaScript —
+   the plan's Python `client/dispatch.py` location needs reconciling with
+   that (server-side fix vs. a Python client living elsewhere); (b)
+   `data-account2`/`data-account3` directories already exist in this repo
+   (dated 2026-08-20) — determine whether they represent real prior
+   multi-account testing that changes what Phase 3 actually needs to prove.
+2. Phase 1: shared dispatch mechanism extracted; `weekly_chatgpt_supervisor.py`
+   refactored to use it; its test suite still passes (C1).
+3. Phase 2: review-sweep rebuilt on the shared mechanism (C2).
+4. Phase 3: pacer made per-account; second real account connected; live
+   two-account concurrent dispatch proven (C3, C4).
+5. Phase 4: per-person deployment documented (C5).
+
+## Loop Bounds
+
+- No-progress stop: after 3 materially different attempts at the same
+  reproduced blocker (e.g. the Chrome focus-contention problem from the prior
+  session, or a broker-side race) produce no new evidence, stop and report
+  the blocker plus the exact resume event, rather than continuing to retry.
+- Finite turn/attempt bound: each phase gets its own bounded attempt budget;
+  do not silently keep expanding scope within a phase past what its
+  acceptance check requires.
+- Strategy revalidation: after three substantive increments, roughly four
+  hours of active work, or a scope/roadmap change from Brian — compare
+  user-visible progress (a real capability proven) against enabling/process
+  work (refactoring, doc-writing) and report which. If the plan no longer
+  represents the shortest path to "share this with the team," stop and
+  return control for replanning rather than continuing on the original path.
+- Exact blocked resume event: if blocked on something only Brian can resolve
+  (e.g. a second real ChatGPT account credential, or a deployment-topology
+  reversal), name that exact event in the closeout and stop there — do not
+  poll or retry it.
+
+<!-- goal-authority-reversion:v1:start -->
+```yaml
+schema_version: "1.1"
+owner: "coordinator:primary"
+receiver: "coordinator:recovery"
+transfer:
+  trigger: "owner_runtime_absent_after_missed_event_and_probe"
+reporting:
+  event: "phase_acceptance_check_passed_or_blocked"
+  deadline: "PT30M"
+  one_probe_transition: "recover"
+non_gating_utility_review:
+  broad_cycle_limit: 2
+  on_limit: "compare_direct_route_and_merge_or_defer"
+  later_review: "exact_counterexample_only_unless_scope_expands"
+```
+<!-- goal-authority-reversion:v1:end -->
+
+- One progress authority: this document's "Current State" section, kept
+  current at each phase boundary — not an append-only diary.
+- Active owners/claims: single active lane, this session/its continuations.
+  No coordination-claim tooling exists in `chatgpt-conversation-manager-v0.2`
+  (Brian's own single-writer personal tool) or `weekly-plans`; the *targets*
+  of the review-sweep (DIGIMON, OntoCanon) do have claim tooling and it is
+  used for any actual code changes there, unchanged from tonight's pattern.
+- Authority transfer/reversion: per the machine block above. Given this
+  session crashed and lost work repeatedly earlier tonight (WSL/disk
+  instability, documented in `~/projects/.claude/DEVICES_AND_ACCOUNTS.md`),
+  the realistic transfer trigger is `owner_runtime_absent_after_missed_event_and_probe`,
+  not an explicit handoff. A fresh session recovering this goal should read
+  this document's "Current State" section, the referenced plan file, and
+  `git log` on both repos before resuming, not just this file's prose.
+- Worker reporting/status: single lane, no sub-workers. Report at each phase
+  acceptance-check boundary (C1-C5); no polling loop.
+- Pinned cross-repository dependencies: Phase 1 must land in
+  `chatgpt-conversation-manager-v0.2` before Phase 1's refactor of
+  `weekly-plans/scripts/weekly_chatgpt_supervisor.py` or Phase 2's
+  review-sweep rebuild can proceed.
+- Dependency-sensitive stop points: do not start Phase 3's pacer change until
+  Phase 1's client extraction is merged and C1 passes — the pacer fix and
+  the client extraction both touch dispatch-adjacent code and should not be
+  developed against a moving base.
+
+## Non-Gating Next Actions
+
+- Connecting a *third* account, or any teammate's actual account, is future
+  scope once C3/C4 prove the mechanism with two.
+- The underlying WSL disk/vhdx issue found earlier tonight
+  (`~/projects/.claude/DEVICES_AND_ACCOUNTS.md`) remains open, needs Brian's
+  `wsl --shutdown` window, and is explicitly not part of this goal.
+- Any future decision to centralize the broker is out of scope per Brian's
+  2026-09-25 call and should not be revisited without a new explicit ask.
+
+## Current State
+
+- Demonstrated (2026-09-25, prior to this goal starting): single-account
+  sequential ChatGPT dispatch works end-to-end (multiple real code-review bugs
+  found and fixed via the existing raw pathway). Multi-account dispatch:
+  never attempted with two real distinct live accounts.
+- Technical execution status: goal just authored; Increment 1 (resolve the
+  Node/Python and `data-account2`/`data-account3` unknowns) not yet started.
