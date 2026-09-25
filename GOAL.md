@@ -188,8 +188,23 @@ non_gating_utility_review:
   sequential ChatGPT dispatch works end-to-end (multiple real code-review bugs
   found and fixed via the existing raw pathway). Multi-account dispatch:
   never attempted with two real distinct live accounts.
-- Technical execution status: Increment 1 complete (see Increments section
-  above for the resolution). Next: Increment 2 / Phase 1 — extract
-  `weekly-plans/scripts/chatgpt_dispatch_client.py` from
-  `weekly_chatgpt_supervisor.py`, refactor the supervisor to call it, confirm
-  its existing test suite still passes (C1).
+- Technical execution status: Increment 1 and Phase 1 (Increment 2) complete.
+  `weekly-plans/scripts/chatgpt_dispatch_client.py` extracted (PR #162,
+  merged, commit `b196a14`); `weekly_chatgpt_supervisor.py` refactored to
+  import it. C1 verified: all 18 pre-existing supervisor tests pass
+  unmodified, plus 5 new tests for the extracted client (23/23), CLI
+  smoke-tested (`weekly_chatgpt_supervisor.py validate`). The new client
+  also gained account-aware `dispatch_one`/`dispatch_many` entry points for
+  Phase 3, ahead of need.
+- Only one ChatGPT account is currently connected to the broker
+  (`therakorski@gmail.com`, confirmed via `list_chatgpt_connections`
+  2026-09-25) — Phase 3's C3/C4 (real two-account dispatch, per-account
+  pacer state) cannot be verified live until a second account is connected
+  as an agent tab. This is a genuine blocker requiring Brian (sign into a
+  second account in Chrome) — see Non-Gating Next Actions; it does not gate
+  the Phase 3 *code* change itself, only its live verification.
+- Next: Phase 3's server-side pacer fix (`server/index.js`'s `agentPacer`
+  from one global object to a `Map` keyed by account), verified via the
+  existing mocked `npm test` suite per this repo's own CLAUDE.md guidance
+  (live smoke tests are constrained to at most one minimal call). Live C3/C4
+  verification is blocked on the second-account connection above.
