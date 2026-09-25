@@ -196,15 +196,30 @@ non_gating_utility_review:
   smoke-tested (`weekly_chatgpt_supervisor.py validate`). The new client
   also gained account-aware `dispatch_one`/`dispatch_many` entry points for
   Phase 3, ahead of need.
-- Only one ChatGPT account is currently connected to the broker
-  (`therakorski@gmail.com`, confirmed via `list_chatgpt_connections`
-  2026-09-25) — Phase 3's C3/C4 (real two-account dispatch, per-account
-  pacer state) cannot be verified live until a second account is connected
-  as an agent tab. This is a genuine blocker requiring Brian (sign into a
-  second account in Chrome) — see Non-Gating Next Actions; it does not gate
-  the Phase 3 *code* change itself, only its live verification.
-- Next: Phase 3's server-side pacer fix (`server/index.js`'s `agentPacer`
-  from one global object to a `Map` keyed by account), verified via the
-  existing mocked `npm test` suite per this repo's own CLAUDE.md guidance
-  (live smoke tests are constrained to at most one minimal call). Live C3/C4
-  verification is blocked on the second-account connection above.
+- Phase 3's code side is complete and deployed: `server/index.js`'s
+  `agentPacer` is now an `accountPacers` Map keyed by normalized account
+  (PR #17, merged, commit `8c5bd83`), with `agentPacer` itself kept as the
+  `'(default)'` entry for backward compatibility. Found and fixed a real
+  gap while wiring this up: `askChatgpt`'s own `send_prompt`/`get_reply`
+  calls only passed `{tab}`, not `{tab, account}`, so an explicit account
+  request would have silently landed in the default bucket. Verified: full
+  mocked suite 125/125 (was 124), including a new test proving two
+  accounts' pacers widen independently via the persisted state file. The
+  live broker was restarted (old PID 351 confirmed dead via `ps -p`,
+  relaunched via `scripts/run-server.sh`, `/health` and
+  `list_chatgpt_connections` confirmed it came back up with real tabs
+  reconnected) so this fix is live, not just merged.
+- Still only one ChatGPT account is connected to the broker
+  (`therakorski@gmail.com`, reconfirmed post-restart). Phase 3's C3/C4
+  (real two-account dispatch, per-account pacer state *with a genuine
+  second account*) cannot be verified live until a second account is
+  connected as an agent tab. This is the one remaining blocker on this
+  goal that only Brian can resolve — see "Need anything from human" in
+  this session's closeout message. Everything else in Phase 3 that doesn't
+  require a second live account is done.
+- Next once unblocked: run the real C3/C4 verification (two concurrent
+  `dispatch_many` requests, one per account, both transcripts read back
+  directly; inspect `agent-pacer-state.json` for two independent
+  account-keyed entries). Then Phase 2 (review-sweep rebuilt on the shared
+  client) and Phase 4 (deployment docs) remain, and do not depend on the
+  second account.
