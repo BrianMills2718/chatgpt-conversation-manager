@@ -102,6 +102,41 @@ test('list includes chats inside Projects, merged newest first, from the request
   assert.deepEqual(f.received.map((m) => m.action), ['list_recent_chats', 'list_project_chats']);
 });
 
+test('a rate-limit signal on one account widens only that account\'s pacer, and the persisted state keys them independently', async () => {
+  const a = await tab('a1111111-a', 'pacer-a@example.com', { agent: true, handlers: {
+    get_tab: () => ({ busy: false, thread_id: null }),
+    send_prompt: () => ({ thread_id: 'thread-a', dom_before: 0, messages_before: 0 }),
+    // api_checked + api_status 429 is the real signal a live rate-limited
+    // reply carries (see tests/server.test.js's own rate-limit test).
+    get_reply: () => ({ done: true, reply: 'a reply', thread_id: 'thread-a', visible_error: 'too_many_requests', api_checked: true, api_status: 429 }),
+  } });
+  const b = await tab('b2222222-b', 'pacer-b@example.com', { agent: true, handlers: {
+    get_tab: () => ({ busy: false, thread_id: null }),
+    send_prompt: () => ({ thread_id: 'thread-b', dom_before: 0, messages_before: 0 }),
+    get_reply: () => ({ done: true, reply: 'b reply', thread_id: 'thread-b', api_checked: true }),
+  } });
+
+  // Fresh per-account entries start at the same floor as the shared
+  // agentPacer did before before() zeroed it; zero these too so the test
+  // exercises the rate-limit reaction itself, not real multi-second waits.
+  mod.getPacerEntry('pacer-a@example.com').pacer.minMs = 0;
+  mod.getPacerEntry('pacer-a@example.com').pacer.spacingMs = 0;
+  mod.getPacerEntry('pacer-b@example.com').pacer.minMs = 0;
+  mod.getPacerEntry('pacer-b@example.com').pacer.spacingMs = 0;
+
+  await mod.askChatgpt({ text: 'trips the limit on A only', account: 'pacer-a@example.com', timeout_seconds: 10, pollMs: 5 });
+  await mod.askChatgpt({ text: 'clean reply on B', account: 'pacer-b@example.com', timeout_seconds: 10, pollMs: 5 });
+
+  const raw = JSON.parse(fs.readFileSync(path.join(process.env.ARCHIVE_DIR, 'observations', 'agent-pacer-state.json'), 'utf8'));
+  assert.ok('pacer-a@example.com' in raw, `expected a per-account entry for pacer-a@example.com, got keys: ${Object.keys(raw)}`);
+  assert.ok('pacer-b@example.com' in raw, `expected a per-account entry for pacer-b@example.com, got keys: ${Object.keys(raw)}`);
+  assert.ok(raw['pacer-a@example.com'].rateLimited > 0, 'expected account A\'s own pacer to record the rate-limit signal');
+  assert.equal(raw['pacer-b@example.com'].rateLimited, 0, 'account B never saw a rate-limit signal, so its pacer must not have widened');
+  assert.ok(raw['pacer-a@example.com'].spacingMs > raw['pacer-b@example.com'].spacingMs, 'A\'s gap should be wider than B\'s after only A was rate-limited');
+  assert.ok(a.received.some((m) => m.action === 'get_reply'));
+  assert.ok(b.received.some((m) => m.action === 'get_reply'));
+});
+
 test('threadIdFromInput accepts ids and chatgpt.com links, rejects junk', () => {
   assert.equal(mod.threadIdFromInput('https://chatgpt.com/c/6ab4445d-04e0-83e9-ad97-78db2e45b9b7'), '6ab4445d-04e0-83e9-ad97-78db2e45b9b7');
   assert.equal(mod.threadIdFromInput('https://chatgpt.com/g/g-p-abc-dodaf/c/6ab4445d-04e0-83e9-ad97-78db2e45b9b7'), '6ab4445d-04e0-83e9-ad97-78db2e45b9b7');

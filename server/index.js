@@ -71,20 +71,48 @@ const AGENT_PACER_STATE_PATH = path.join(ARCHIVE_DIR, 'observations', 'agent-pac
 // local DOM/status read like get_tab or navigate_home).
 const BACKEND_TOUCHING_ACTIONS = new Set(['send_prompt', 'get_reply', 'list_recent_chats', 'capture_current_chat']);
 
+// One pacer per ChatGPT account, not one global pacer, so a rate-limit signal
+// on one account's quota does not throttle every other connected account too
+// (found 2026-09-25: a single shared agentPacer meant adding a second account
+// for load-spreading or team sharing would have undermined its own point --
+// see GOAL.md Phase 3). `agentPacer` below stays a plain AdaptivePacer for
+// backward compatibility with existing single-account tests/callers -- it is
+// literally the '(default)' account's entry, used whenever no explicit
+// account is requested.
+const DEFAULT_PACER_KEY = '(default)';
+function normalizePacerKey(account) { return account ? String(account).trim().toLowerCase() : DEFAULT_PACER_KEY; }
+
 function loadAgentPacerState() {
   try { return JSON.parse(fs.readFileSync(AGENT_PACER_STATE_PATH, 'utf8')); } catch { return null; }
 }
+// The pre-2026-09-25 file was a flat {spacingMs, rateLimited, successes}
+// object for the single global pacer; treat that shape as the default
+// account's saved state instead of discarding a machine's already-learned
+// spacing on the first restart after this change.
+function migrateLegacyPacerState(raw) {
+  return raw && typeof raw.spacingMs === 'number' ? { [DEFAULT_PACER_KEY]: raw } : (raw || {});
+}
 function saveAgentPacerState() {
   fs.mkdirSync(path.dirname(AGENT_PACER_STATE_PATH), { recursive: true });
-  fs.writeFileSync(AGENT_PACER_STATE_PATH, JSON.stringify({ spacingMs: agentPacer.spacingMs, rateLimited: agentPacer.rateLimited, successes: agentPacer.successes }));
+  const out = {};
+  for (const [key, entry] of accountPacers) {
+    out[key] = { spacingMs: entry.pacer.spacingMs, rateLimited: entry.pacer.rateLimited, successes: entry.pacer.successes };
+  }
+  fs.writeFileSync(AGENT_PACER_STATE_PATH, JSON.stringify(out));
 }
-const _savedAgentPacerState = loadAgentPacerState();
-const agentPacer = new AdaptivePacer({ initialMs: _savedAgentPacerState?.spacingMs ?? 3000, minMs: 1000, maxMs: 120000 });
-if (_savedAgentPacerState) {
-  agentPacer.rateLimited = _savedAgentPacerState.rateLimited || 0;
-  agentPacer.successes = _savedAgentPacerState.successes || 0;
+const _savedPacerStateByKey = migrateLegacyPacerState(loadAgentPacerState());
+const accountPacers = new Map();
+function getPacerEntry(key) {
+  let entry = accountPacers.get(key);
+  if (entry) return entry;
+  const saved = _savedPacerStateByKey[key];
+  const pacer = new AdaptivePacer({ initialMs: saved?.spacingMs ?? 3000, minMs: 1000, maxMs: 120000 });
+  if (saved) { pacer.rateLimited = saved.rateLimited || 0; pacer.successes = saved.successes || 0; }
+  entry = { pacer, lastRequestAt: 0 };
+  accountPacers.set(key, entry);
+  return entry;
 }
-let lastAgentRequestAt = 0;
+const agentPacer = getPacerEntry(DEFAULT_PACER_KEY).pacer;
 // How many paced dispatches are currently waiting on or executing a real
 // request at once -- a direct measure of concurrency pressure, independent
 // of the minimum-gap the pacer enforces, for correlating a future rate-limit
@@ -139,9 +167,10 @@ function retryAfterMsOf(err, result) {
 // Retry-After, that has to become the new floor directly -- otherwise the
 // real value the account just told us is silently discarded and only the
 // blind doubling survives.
-function applyRateLimit(retryAfterMs) {
-  const suggested = agentPacer.onRateLimit(retryAfterMs);
-  if (retryAfterMs != null) agentPacer.spacingMs = Math.max(agentPacer.spacingMs, suggested);
+function applyRateLimit(retryAfterMs, pacerKey = DEFAULT_PACER_KEY) {
+  const pacer = getPacerEntry(pacerKey).pacer;
+  const suggested = pacer.onRateLimit(retryAfterMs);
+  if (retryAfterMs != null) pacer.spacingMs = Math.max(pacer.spacingMs, suggested);
 }
 
 const app = express();
@@ -254,10 +283,14 @@ wss.on("connection", (ws, req) => {
       // use, not any explicit agent call). Logged into the same timeline
       // under action "auto_capture" so both sources are comparable.
       const autoCaptureRateLimited = msg.api_error_status === 429;
-      if (autoCaptureRateLimited) applyRateLimit(null); // same account, same quota -- be conservative account-wide too
+      const autoCapturePacerKey = normalizePacerKey(accountKey(ws.account));
+      // Conservative for this tab's own account only -- a different account
+      // connected in another tab has its own independent quota and pacer.
+      if (autoCaptureRateLimited) applyRateLimit(null, autoCapturePacerKey);
       appendRequestTiming({
         action: 'auto_capture', ok: true, rate_limited: autoCaptureRateLimited, api_status: msg.api_error_status ?? null,
-        tab: ws.tabToken?.slice(0, 8) ?? null, agent_tab: ws.agentTab ?? null, spacing_ms: agentPacer.spacingMs,
+        account: autoCapturePacerKey === DEFAULT_PACER_KEY ? null : autoCapturePacerKey,
+        tab: ws.tabToken?.slice(0, 8) ?? null, agent_tab: ws.agentTab ?? null, spacing_ms: getPacerEntry(autoCapturePacerKey).pacer.spacingMs,
         ...recordAndCountWindow(Date.now()),
       });
       try { const saved = archive.archiveSnapshot(msg.snapshot); ws.send(JSON.stringify({ type: 'snapshot_ack', thread_id: saved.thread_id, content_hash: saved.content_hash })); }
@@ -417,8 +450,10 @@ const ALWAYS_REAL_ACTIONS = new Set(['send_prompt', 'list_recent_chats', 'captur
 async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts = {}) {
   const tracked = BACKEND_TOUCHING_ACTIONS.has(command.action);
   const alwaysReal = ALWAYS_REAL_ACTIONS.has(command.action);
+  const pacerKey = normalizePacerKey(opts.account);
+  const entry = getPacerEntry(pacerKey);
   if (alwaysReal) {
-    const waitMs = agentPacer.spacingMs - (Date.now() - lastAgentRequestAt);
+    const waitMs = entry.pacer.spacingMs - (Date.now() - entry.lastRequestAt);
     if (waitMs > 0) await sleep(waitMs);
   }
   if (tracked) agentRequestsInFlight++;
@@ -427,12 +462,13 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
     const result = await dispatchToExtensionRaw(command, timeoutMs, opts);
     const real = alwaysReal || (command.action === 'get_reply' && result?.api_checked);
     if (real) {
-      lastAgentRequestAt = Date.now();
+      entry.lastRequestAt = Date.now();
       const rateLimited = isRateLimitSignal(null, result);
-      if (rateLimited) applyRateLimit(retryAfterMsOf(null, result)); else agentPacer.onSuccess();
+      if (rateLimited) applyRateLimit(retryAfterMsOf(null, result), pacerKey); else entry.pacer.onSuccess();
       saveAgentPacerState();
       appendRequestTiming({
-        action: command.action, ok: true, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, spacing_ms: agentPacer.spacingMs,
+        action: command.action, ok: true, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, spacing_ms: entry.pacer.spacingMs,
+        account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: result?.tab?.slice(0, 8) ?? null, agent_tab: result?.agent ?? null, incognito: result?.incognito ?? null,
         api_checked: result?.api_checked ?? null, api_status: result?.api_status ?? null,
         in_flight: agentRequestsInFlight, ...recordAndCountWindow(Date.now()),
@@ -442,11 +478,12 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
   } catch (err) {
     const real = alwaysReal || (command.action === 'get_reply' && err?.api_status != null);
     if (real) {
-      lastAgentRequestAt = Date.now();
+      entry.lastRequestAt = Date.now();
       const rateLimited = isRateLimitSignal(err, null);
-      if (rateLimited) { applyRateLimit(retryAfterMsOf(err, null)); saveAgentPacerState(); }
+      if (rateLimited) { applyRateLimit(retryAfterMsOf(err, null), pacerKey); saveAgentPacerState(); }
       appendRequestTiming({
-        action: command.action, ok: false, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, error: err.message, spacing_ms: agentPacer.spacingMs,
+        action: command.action, ok: false, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, error: err.message, spacing_ms: entry.pacer.spacingMs,
+        account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: err?.tab?.slice(0, 8) ?? null, agent_tab: err?.agent ?? null, incognito: err?.incognito ?? null,
         api_status: err?.api_status ?? null, in_flight: agentRequestsInFlight, ...recordAndCountWindow(Date.now()),
       });
@@ -699,7 +736,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         sent = await dispatchToExtension(
           { action: "send_prompt", text: body },
           sendTimeoutMs ?? promptDispatchTimeoutMs(timeout_seconds),
-          { tab },
+          { tab, account },
         );
       } catch (err) {
         // Submitting the first message can navigate the new-chat page and tear
@@ -724,7 +761,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       let awaitingConfirmation = false;
       while (Date.now() < deadline || awaitingConfirmation) {
         await sleep(pollMs);
-        try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before }, 30000, { tab }); }
+        try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before }, 30000, { tab, account }); }
         catch (err) { last = { done: false, error: err.message }; previousDoneText = null; awaitingConfirmation = false; continue; }
         if (!last.done) { previousDoneText = null; awaitingConfirmation = false; continue; }
         // The same finished text twice in a row: a pause mid-stream is not a reply.
@@ -1130,4 +1167,4 @@ if (isMain) {
   });
 }
 
-export { readChatgptChat, listRecentChats, listConnections, threadIdFromInput, formatChatTranscript, app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, promptDispatchTimeoutMs, BRIDGE_OBSERVATIONS_PATH, REQUEST_TIMING_PATH, DOM_ACTIVITY_PATH, agentPacer, dispatchToExtension, broadcastReloadTab };
+export { readChatgptChat, listRecentChats, listConnections, threadIdFromInput, formatChatTranscript, app, server, archive, sync, askChatgpt, waitForBulkComplete, setAgentTabOpener, matchChatsByTitle, runOpenCommand, promptDispatchTimeoutMs, BRIDGE_OBSERVATIONS_PATH, REQUEST_TIMING_PATH, DOM_ACTIVITY_PATH, agentPacer, getPacerEntry, dispatchToExtension, broadcastReloadTab };
