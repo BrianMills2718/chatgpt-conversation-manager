@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.7.1 (2026-09-25)
+
+### Fixed — `ask_chatgpt` on ChatGPT's new Home layout
+
+- ChatGPT's 2026-09 Home page no longer renders `#prompt-textarea`, so every `send_prompt` failed with "no ChatGPT composer found". `COMPOSER_SELECTORS` now falls back to generic editor selectors (`[data-testid*="composer"] [contenteditable]`, `div.ProseMirror[contenteditable]`, `main [contenteditable][data-placeholder]`, `main [role="textbox"]`, `main textarea`), each still gated by visibility.
+- `debug_inspect_toolbar` now also returns `composerSelector` (which selector matched, or null) and `editables` (every textarea / contenteditable / textbox on the page with id, classes, test ids, placeholder, visibility), so the next layout change is diagnosed from a live tab instead of guessed.
+
+
 ## v0.7.0 (2026-09-24)
 
 ### Added — the extension keeps itself current; no manual reloads or refreshes

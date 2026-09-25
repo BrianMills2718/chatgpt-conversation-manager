@@ -704,7 +704,21 @@ showAgentTabBadge();
 
 // ask_chatgpt ------------------------------------------------------------------
 
-const COMPOSER_SELECTORS = ["#prompt-textarea", 'div[contenteditable="true"][id*="prompt"]', "form textarea"];
+// Ordered most-specific first. ChatGPT's 2026-09 Home layout dropped the
+// #prompt-textarea id, so generic editor fallbacks follow the known ids; each is
+// still gated by visible() and must accept text, so a stray hidden editor cannot
+// be picked. debug_inspect_toolbar now lists every editable it can see, so the
+// next layout change can be diagnosed from a live tab instead of guessed.
+const COMPOSER_SELECTORS = [
+  "#prompt-textarea",
+  'div[contenteditable="true"][id*="prompt"]',
+  "form textarea",
+  '[data-testid*="composer"] [contenteditable="true"]',
+  'div.ProseMirror[contenteditable="true"]',
+  'main [contenteditable="true"][data-placeholder]',
+  'main div[contenteditable="true"][role="textbox"]',
+  "main textarea",
+];
 const SEND_BUTTON_SELECTORS = ['[data-testid="send-button"]', 'button[aria-label*="Send"]'];
 
 function findFirst(selectors, accept = () => true) {
@@ -1111,10 +1125,26 @@ async function handleCommand(msg) {
     // own changelog shows two prior bugs from hardcoding a DOM guess
     // ("Skip to content"). Not wired to any MCP tool; safe to remove once
     // the real picker is identified.
-    const composer = findFirst(COMPOSER_SELECTORS, visible)?.el;
-    const scope = composer ? composer.closest("form") || document.body : document.body;
+    const composer = findFirst(COMPOSER_SELECTORS, visible);
+    const scope = composer ? composer.el.closest("form") || document.body : document.body;
     const els = [...scope.querySelectorAll("button, [role=\"button\"], [role=\"menuitem\"], [data-testid]")];
+    // Every editable on the page, so a composer-selector miss can be diagnosed
+    // from the live DOM instead of guessed.
+    const editables = [...document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')].slice(0, 20).map((el) => ({
+      tag: el.tagName.toLowerCase(),
+      id: el.id || null,
+      classes: (el.className && typeof el.className === "string" ? el.className : "").slice(0, 120),
+      role: el.getAttribute("role"),
+      testId: el.getAttribute("data-testid"),
+      placeholder: el.getAttribute("placeholder") || el.getAttribute("data-placeholder"),
+      ariaLabel: el.getAttribute("aria-label"),
+      visible: visible(el),
+      inForm: Boolean(el.closest("form")),
+      ancestorTestIds: (() => { const out = []; let n = el.parentElement; while (n && out.length < 4) { const t = n.getAttribute && n.getAttribute("data-testid"); if (t) out.push(t); n = n.parentElement; } return out; })(),
+    }));
     return {
+      composerSelector: composer ? composer.selector : null,
+      editables,
       candidates: els.slice(0, 60).map((el) => ({
         tag: el.tagName.toLowerCase(),
         text: (el.textContent || "").trim().slice(0, 60),
