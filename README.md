@@ -179,6 +179,45 @@ data/raw/chats/<conversation-id>.history.jsonl
 
 Click the toolbar icon to open the popup and confirm broker/connection/archive status.
 
+## Sharing this with a teammate
+
+Each person runs their own broker locally and connects their own ChatGPT
+account(s) -- exactly the setup above, repeated per person. There is no
+shared/hosted broker (a deliberate call, 2026-09-25: centralizing would only
+save the server piece, since each teammate's Chrome extension still has to
+be logged into their own account regardless of where the broker runs, and it
+would add a security surface and an ops burden for nothing currently
+needed). A colleague installing this:
+
+1. Clones the repo, runs Install above with their own `RENAMER_TOKEN`.
+2. Loads the extension into their own Chrome profile, signed into their own
+   ChatGPT account.
+3. Can independently run any of the three dispatch layers against their own
+   broker: the low-level `ask_chatgpt`/`list_chatgpt_chats` MCP tools
+   directly, the shared `chatgpt_dispatch_client.py` (in the separate
+   `weekly-plans` repo -- `dispatch_one`/`dispatch_many`, with real
+   `SentWithoutReply` poll-recovery and parallel dispatch), or a consumer
+   built on it like `weekly_chatgpt_supervisor.py` or `scripts/review_sweep.py`.
+
+**What's actually verified as of 2026-09-25**, so this section doesn't
+overstate the current state:
+
+- Single-account dispatch: fully working, used all day to find and fix real
+  bugs via ChatGPT-orchestrated code review (see the `chatgpt-review-sweep`
+  investigations in target repos for a worked example).
+- The broker's rate-limit pacer (`agentPacer`) is per-account in code (a
+  `Map` keyed by account, not one shared global instance) and covered by a
+  mocked test proving two accounts' pacers widen independently -- but this
+  has **not yet been exercised with two real, simultaneously-connected
+  ChatGPT accounts**. Only one account has been connected to this broker so
+  far. If you connect a second account and see anything surprising about
+  request pacing, that's the first real-world test of this code path.
+- `list_chatgpt_connections`/`readChatgptChat`/`listRecentChats` already
+  support routing to a specific connected account by email, and multiple
+  accounts connecting to the same broker at once is expected to work (the
+  routing logic doesn't special-case a single account) -- again, genuinely
+  untested with two live accounts as of this writing.
+
 ## Automated tests
 
 ```bash
