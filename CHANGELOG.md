@@ -2,6 +2,10 @@
 
 ## v0.7.1 (2026-09-25)
 
+### Added
+
+- `GET /api/read/:thread` — REST twin of the `read_chatgpt_chat` MCP tool: full transcript plus generated images saved to `data/images/<thread>/` (base64 stripped from the JSON), for callers that only have `curl`.
+
 ### Fixed — `ask_chatgpt` on ChatGPT's new Home layout
 
 - ChatGPT's 2026-09 Home page no longer renders `#prompt-textarea`, so every `send_prompt` failed with "no ChatGPT composer found". `COMPOSER_SELECTORS` now falls back to generic editor selectors (`[data-testid*="composer"] [contenteditable]`, `div.ProseMirror[contenteditable]`, `main [contenteditable][data-placeholder]`, `main [role="textbox"]`, `main textarea`), each still gated by visibility.
