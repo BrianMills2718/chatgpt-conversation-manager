@@ -36,12 +36,13 @@ reply. Claiming Phase 3 done from the pacer code change alone without an
 actual live two-account concurrent dispatch and inspection of the persisted
 pacer state file showing two independent entries.
 
-**Repository / working scope:** Primary: `chatgpt-conversation-manager-v0.2`
-(Phases 1, 3, 4 — new shared client module, server pacer fix, README
-addition). Secondary: `weekly-plans` (Phase 1's refactor of
-`scripts/weekly_chatgpt_supervisor.py` to call the shared client; Phase 2's
-review-sweep script, exact repo TBD at that phase). Each repo's own
-`AGENTS.md`/`CLAUDE.md` governs while working in it.
+**Repository / working scope:** Primary: `weekly-plans` (Phase 1 — new
+`scripts/chatgpt_dispatch_client.py` module extracted from
+`weekly_chatgpt_supervisor.py`'s proven dispatch logic, plus Phase 2's
+review-sweep script). Secondary: `chatgpt-conversation-manager-v0.2` (Phase 3's
+server pacer fix, Phase 4's README addition — no client code lives here; see
+Increment 1 resolution below for why). Each repo's own `AGENTS.md`/`CLAUDE.md`
+governs while working in it.
 
 ## Boundaries
 
@@ -53,9 +54,10 @@ review-sweep script, exact repo TBD at that phase). Each repo's own
   governs that, reused as-is); `weekly_chatgpt_supervisor.py`'s task-profile
   model itself (`autonomous`/`review_gated`/`hands_on`/`human_only` stays
   exactly as-is — only its dispatch internals move to the shared client).
-- Writes allowed: `chatgpt-conversation-manager-v0.2/{server,client,README.md,CLAUDE.md}`,
-  `weekly-plans/scripts/weekly_chatgpt_supervisor.py`, and each affected
-  repo's own `investigations/chatgpt-review-sweep-manifest.{tsv,md}`.
+- Writes allowed: `chatgpt-conversation-manager-v0.2/{server,README.md,CLAUDE.md}`,
+  `weekly-plans/scripts/{weekly_chatgpt_supervisor.py,chatgpt_dispatch_client.py,
+  test_chatgpt_dispatch_client.py,review_sweep.py}`, and each affected repo's
+  own `investigations/chatgpt-review-sweep-manifest.{tsv,md}`.
 - Read-only or externally owned: the two DIGIMON/OntoCanon repos the
   review-sweep targets (only their manifest files are written by this goal;
   actual file fixes found by future sweep runs go through each repo's own
@@ -77,13 +79,29 @@ review-sweep script, exact repo TBD at that phase). Each repo's own
 
 ## Increments
 
-1. Resolve the two open unknowns found entering Phase 1 before writing new
-   code: (a) `chatgpt-conversation-manager-v0.2` is pure Node.js/JavaScript —
-   the plan's Python `client/dispatch.py` location needs reconciling with
-   that (server-side fix vs. a Python client living elsewhere); (b)
-   `data-account2`/`data-account3` directories already exist in this repo
-   (dated 2026-08-20) — determine whether they represent real prior
-   multi-account testing that changes what Phase 3 actually needs to prove.
+1. **Resolved 2026-09-25.** Two open unknowns from Phase 1 entry:
+   (a) *Language mismatch:* `chatgpt-conversation-manager-v0.2` is pure
+   Node.js — it owns only the broker/REST API (`/api/ask`, `/api/thread/:id`,
+   `/api/read/:thread`), confirmed via repo search (no Python files anywhere).
+   The plan's proposed `client/dispatch.py` inside that repo was wrong.
+   Resolution: the shared dispatch client stays Python and lives in
+   `weekly-plans` (`scripts/chatgpt_dispatch_client.py`), because that's
+   where the proven `SentWithoutReply`/poll-recovery/`ThreadPoolExecutor`
+   logic already exists (`weekly_chatgpt_supervisor.py:457-533`) — extracting
+   it in place reuses proven code instead of porting it into a new language.
+   The Node repo's only remaining goal-scope work is the Phase 3 pacer fix
+   and Phase 4 docs, both server-side, no client module needed there.
+   (b) *`data-account2`/`data-account3`:* inspected directly — both are
+   untracked (never in `git log`, gitignored via `data-account*` in
+   `.gitignore`), empty (`catalog.json` has zero threads/projects/actions,
+   `raw/chats/` and `wiki/` subdirs empty), dated 2026-08-20, and not
+   referenced anywhere in `server/*.js` or `extension/*.js` (grep for
+   `data-account`/`ACCOUNT_DATA`/`dataDirFor` returns nothing). The current
+   `.env` only configures a single `ARCHIVE_DIR=./data`. Conclusion: these are
+   stale, abandoned, disconnected scaffolding — **not** evidence of prior
+   multi-account testing. Phase 3's premise stands unchanged: real
+   two-account dispatch has never been tried. Left in place untouched per
+   the Boundaries section (no deletion without asking).
 2. Phase 1: shared dispatch mechanism extracted; `weekly_chatgpt_supervisor.py`
    refactored to use it; its test suite still passes (C1).
 3. Phase 2: review-sweep rebuilt on the shared mechanism (C2).
@@ -170,5 +188,8 @@ non_gating_utility_review:
   sequential ChatGPT dispatch works end-to-end (multiple real code-review bugs
   found and fixed via the existing raw pathway). Multi-account dispatch:
   never attempted with two real distinct live accounts.
-- Technical execution status: goal just authored; Increment 1 (resolve the
-  Node/Python and `data-account2`/`data-account3` unknowns) not yet started.
+- Technical execution status: Increment 1 complete (see Increments section
+  above for the resolution). Next: Increment 2 / Phase 1 — extract
+  `weekly-plans/scripts/chatgpt_dispatch_client.py` from
+  `weekly_chatgpt_supervisor.py`, refactor the supervisor to call it, confirm
+  its existing test suite still passes (C1).
