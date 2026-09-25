@@ -815,6 +815,21 @@ app.get('/api/current', async (req, res) => {
   try { const result = await dispatchToExtension({ action: 'get_current_thread_info' }); res.json(result); }
   catch (err) { res.status(503).json({ error: err.message }); }
 });
+// Read any conversation the signed-in account owns (text + generated images,
+// images saved under data/images/<thread>/) without sending anything -- the
+// REST twin of the read_chatgpt_chat MCP tool, for callers that only have curl.
+app.get('/api/read/:thread', async (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const r = await readChatgptChat({
+      thread: req.params.thread,
+      account: req.query.account || null,
+      include_images: req.query.include_images !== 'false',
+      max_images: req.query.max_images ? Number(req.query.max_images) : 40,
+    });
+    res.json({ ...r, images: (r.images || []).map(({ data, ...rest }) => rest), transcript: formatChatTranscript(r) });
+  } catch (err) { res.status(503).json({ error: err.message }); }
+});
 app.get('/api/thread/:id', (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   if (req.query.full === '1') {
