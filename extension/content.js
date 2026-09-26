@@ -7,6 +7,7 @@
 (async () => {
 const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import(chrome.runtime.getURL("lib/title.js"));
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
+const { sendEvidence, sendEvidenceFromCounts } = await import(chrome.runtime.getURL("lib/send-confirm.js"));
 const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
@@ -779,21 +780,31 @@ async function sendPrompt(text) {
   }
   const button = await waitFor(() => findFirst(SEND_BUTTON_SELECTORS, (b) => visible(b) && !b.disabled), 8000)
     .catch(() => { throw new Error(`no enabled send button found (tried ${SEND_BUTTON_SELECTORS.join(", ")}); nothing was sent.`); });
+  const threadRawBefore = currentThreadId();
   button.el.click();
-  await waitFor(() => ((el.value ?? el.innerText ?? "").trim() === "" ? true : null), 10000)
-    .catch(() => {
-      // Diagnostic only (2026-09-17): this fired for a fresh tab opened
-      // concurrently with another fresh tab, while the message had actually
-      // been sent (confirmed via list_chatgpt_chats afterward). Suspected
-      // cause is Chrome throttling the backgrounded tab's timers/rendering,
-      // not a real failed send -- surface the tab's own visibility state so
-      // the next occurrence confirms or rules that out, instead of guessing.
-      throw new Error(`clicked send but the composer did not clear; the prompt may not have been sent. (tab visibilityState=${document.visibilityState}, hasFocus=${document.hasFocus()})`);
-    });
+  // After the click the prompt may already be with ChatGPT, so from here on a
+  // missing confirmation is "unconfirmed", never "not sent". A hidden tab's
+  // composer often does not clear in time even though the send landed
+  // (lib/send-confirm.js has the evidence), and the old "composer did not
+  // clear" error turned each such send into a caller retry and a duplicate
+  // chat. Any observable consequence confirms it; failing that, an existing
+  // thread's server-side message count; failing that, the broker keeps
+  // watching the thread and reports truthfully if nothing ever shows up.
+  let confirmedBy = await waitFor(() => sendEvidence({
+    composerText: el.value ?? el.innerText ?? "",
+    threadRawBefore, threadRawNow: currentThreadId(),
+    domBefore, domMessages: extractMessagesFromDom(), expected: body,
+  }), 10000, 250).catch(() => null);
+  if (!confirmedBy && threadBefore) {
+    try { confirmedBy = sendEvidenceFromCounts(linearizeMapping(await fetchConversationTree(threadBefore)).length, messagesBefore); }
+    catch (err) { await log("warn", "Could not read the post-send conversation count to confirm the send", err); }
+  }
   // A new chat first shows a temporary id ("WEB:<uuid>") in the URL and swaps in
   // the real conversation id once the server has created it.
-  const threadId = threadBefore || await waitFor(() => realThreadId(), 60000, 250).catch(() => null);
+  const threadId = threadBefore || (confirmedBy ? await waitFor(() => realThreadId(), 60000, 250).catch(() => null) : realThreadId());
   return { thread_id: threadId, dom_before: domBefore, messages_before: messagesBefore,
+           send_confirmed: Boolean(confirmedBy), confirmed_by: confirmedBy,
+           visibility: document.visibilityState, has_focus: document.hasFocus(),
            composer_selector: composer.selector, send_selector: button.selector };
 }
 
@@ -1080,9 +1091,14 @@ async function handleCommand(msg) {
         catch (err) { images.push({ ...ref, error: err.message }); }
       }
     }
+    // Same completion rule ask_chatgpt uses, so a caller collecting a reply
+    // that outlived its ask_chatgpt timeout can tell a finished answer from
+    // one ChatGPT is still writing.
+    let latestReplyFinished = null;
+    try { latestReplyFinished = replyFromTree(data, 0).done; } catch { /* unreadable tree: unknown */ }
     return { thread_id: threadId, title: typeof data.title === "string" ? data.title : null,
              project_id: data.conversation_template_id || data.gizmo_id || null,
-             messages, images, account: tabIdentity };
+             messages, images, account: tabIdentity, latest_reply_finished: latestReplyFinished };
   }
   if (msg.action === "reload_tab") {
     // Same fire-and-forget shape as navigate_home/navigate_to_thread below:

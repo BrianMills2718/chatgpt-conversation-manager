@@ -28,7 +28,7 @@ sends two prompts to two different, simultaneously-connected real ChatGPT
 accounts and returns both real replies, verified by reading each conversation
 transcript back directly (not trusting a reported success status) — the
 capability that failed all of the prior session (2026-09-25) due to browser
-focus contention and a since-fixed `fresh_tab` PATH bug.
+focus contention and a since-fixed `fresh_tab` PATH bug. (Correction 2026-09-26: the "focus contention" failures were false "composer did not clear" send failures in hidden tabs — the prompts were sent; see CHANGELOG v0.7.2.)
 
 **Forbidden substitutes:** A single-account dispatch relabeled as "multi-account
 verified." A mocked/stubbed broker response standing in for a real ChatGPT
