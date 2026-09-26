@@ -27,8 +27,14 @@ straight in anything you write about this repo.
   by temporarily `chmod u+w`-ing those three paths, `git merge --ff-only origin/main`, and restoring
   `chmod 555` on all three immediately after. Never leave the lock off.
 - The live broker's cwd is the main checkout, so a merged fix only takes effect once you restart the
-  process there (`pgrep -f server/index.js`, kill it, relaunch via `scripts/run-server.sh` in the
-  background) — restarting doesn't need any client action.
+  process there — restarting doesn't need any client action. As of 2026-09-26 the live broker runs
+  under the systemd user unit `chatgpt-bridge.service` (`~/.config/systemd/user/`, `Restart=always`):
+  restart it with `systemctl --user restart chatgpt-bridge`, not by killing it and relaunching
+  `scripts/run-server.sh` (systemd relaunches a killed broker within 5s on its own, so a manual
+  relaunch just races it). Its logs go to `journalctl --user -u chatgpt-bridge`, not
+  `data/logs/server.log`. A restart drops any in-flight `ask_chatgpt`, so first wait until
+  `data/observations/request-timing.jsonl` shows no `get_reply`/`send_prompt` for ~45s (an ask
+  waiting on a reply logs an API-checked `get_reply` about every 10s).
 - An extension change reaches the browser **without Brian**, as long as you **bump `version` in
   `extension/manifest.json`** in the same change: the broker's `/health` reports the on-disk version,
   and `extension/background.js` checks it every minute, calls `chrome.runtime.reload()` when it
@@ -65,7 +71,8 @@ account-wide throttle mid-session, observed directly by Brian in his own ChatGPT
 - A restarted broker triggers a full background sync ~60 seconds later
   (`SyncScheduler`'s `firstRunMs`, `server/sync.js`) that makes its own real requests — count that as a
   live call too when reasoning about request volume around a deploy, and check
-  `data/logs/server.log` for `[sync] FAILED` after any restart.
+  the broker log (`journalctl --user -u chatgpt-bridge`, or `data/logs/server.log` when started via
+  `scripts/run-server.sh`) for `[sync] FAILED` after any restart.
 
 ## Temporary debug surface (remove when done)
 
