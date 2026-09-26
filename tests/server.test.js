@@ -837,6 +837,138 @@ test('ask_chatgpt leaves an unobserved failure source unknown', async () => {
   }
 });
 
+// Real case 2026-09-26: concurrent asks landed on background (hidden) agent
+// tabs; Send was clicked but the composer did not visibly clear in time, and
+// the old extension threw even though ChatGPT received and answered the
+// prompt. The extension now reports such a send as unconfirmed; the broker
+// must keep watching each tab and return the real reply, sending each prompt
+// exactly once.
+test('concurrent asks whose hidden tabs cannot confirm the send still return the real replies, one send each', async () => {
+  function hiddenTab(tab, expectedText, replyText, threadId) {
+    let polls = 0;
+    return fakeTab(tab, {
+      agent: true,
+      onCommand: async (msg, state, reply) => {
+        if (msg.action === 'navigate_home') return reply({ ok: true, navigated: true });
+        if (msg.action === 'send_prompt') {
+          assert.equal(msg.text, expectedText);
+          return reply({ ok: true, thread_id: null, dom_before: 0, messages_before: 0, send_confirmed: false, confirmed_by: null, visibility: 'hidden' });
+        }
+        if (msg.action === 'get_reply') {
+          polls++;
+          if (polls === 1) return reply({ ok: true, done: false, generating: false, thread_id: null, message_count: 0 });
+          if (polls === 2) return reply({ ok: true, done: false, generating: true, thread_id: threadId, message_count: 1 });
+          return reply({ ok: true, done: true, reply: replyText, thread_id: threadId, message_count: 2 });
+        }
+        reply({ ok: false, error: `unexpected ${msg.action}` });
+      },
+    });
+  }
+  const tabA = hiddenTab('hidden-tab-a', 'hidden question A', 'hidden reply A', 'hidden-thread-a');
+  const tabB = hiddenTab('hidden-tab-b', 'hidden question B', 'hidden reply B', 'hidden-thread-b');
+  await tabA.open();
+  await tabB.open();
+  await new Promise((r) => setTimeout(r, 50));
+  try {
+    const [a, b] = await Promise.all([
+      askChatgpt({ text: 'hidden question A', timeout_seconds: 10, pollMs: 20 }),
+      askChatgpt({ text: 'hidden question B', timeout_seconds: 10, pollMs: 20 }),
+    ]);
+    assert.deepEqual([a.reply, a.thread_id], ['hidden reply A', 'hidden-thread-a']);
+    assert.deepEqual([b.reply, b.thread_id], ['hidden reply B', 'hidden-thread-b']);
+    assert.equal(tabA.received.filter((x) => x === 'send_prompt').length, 1);
+    assert.equal(tabB.received.filter((x) => x === 'send_prompt').length, 1);
+  } finally {
+    tabA.ws.close();
+    tabB.ws.close();
+  }
+});
+
+// Most logged ask failures are callers' timeout_seconds expiring while a slow
+// thinking model is still answering a prompt that WAS sent. The old error said
+// "check ChatGPT" with the send-time thread id (often "id not yet assigned"
+// for a new chat) and no supported way to collect the answer, so callers
+// resent and duplicated the question.
+test('a timeout after a seen send names the conversation, says not to resend, and points at read_chatgpt_chat', async () => {
+  const agentTab = fakeTab('agent-tab-slow-thinker', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'send_prompt') return reply({ ok: true, thread_id: null, dom_before: 0, messages_before: 0, send_confirmed: true, confirmed_by: 'thread_assigned' });
+      if (msg.action === 'get_reply') return reply({ ok: true, done: false, generating: true, thread_id: 'slow-thread-1', message_count: 1 });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await agentTab.open();
+  try {
+    const err = await askChatgpt({ text: 'think hard', timeout_seconds: 0.1, pollMs: 20 }).then(() => null, (e) => e);
+    assert.ok(err, 'expected a timeout');
+    assert.match(err.message, /^No finished reply within 0\.1s, but the prompt WAS sent/);
+    assert.match(err.message, /Do NOT resend/);
+    assert.match(err.message, /read_chatgpt_chat\(thread="slow-thread-1"\)/);
+    const event = fs.readFileSync(bridgeObservationsPath, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+    assert.equal(event.failure_kind, 'timeout');
+    assert.match(event.error_message, /prompt WAS sent/);
+    assert.equal(event.error_message.includes('last seen'), false);
+  } finally {
+    agentTab.ws.close();
+  }
+});
+
+// The other side of truthfulness: when Send was clicked but nothing ever shows
+// the prompt reached ChatGPT, the error must not claim it was sent.
+test('an unconfirmed send with no later evidence fails as unconfirmed, never as "sent"', async () => {
+  const agentTab = fakeTab('agent-tab-never-confirmed', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'send_prompt') return reply({ ok: true, thread_id: null, dom_before: 0, messages_before: 0, send_confirmed: false, confirmed_by: null, visibility: 'hidden' });
+      if (msg.action === 'get_reply') return reply({ ok: true, done: false, generating: false, thread_id: null, message_count: 0 });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await agentTab.open();
+  try {
+    const err = await askChatgpt({ text: 'did this go?', timeout_seconds: 0.1, pollMs: 20 }).then(() => null, (e) => e);
+    assert.ok(err, 'expected a failure');
+    assert.match(err.message, /^Could not confirm the prompt was sent/);
+    assert.match(err.message, /tab visibility=hidden/);
+    assert.match(err.message, /list_chatgpt_chats/);
+    // Neither the new "WAS sent" claim nor the old "The message was sent" one.
+    assert.equal(/WAS sent|The message was sent/.test(err.message), false);
+    const event = fs.readFileSync(bridgeObservationsPath, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+    assert.equal(event.failure_kind, 'send_unconfirmed');
+  } finally {
+    agentTab.ws.close();
+  }
+});
+
+test('a send-step UI failure is classified browser_ui and its error text is recorded', async () => {
+  const agentTab = fakeTab('agent-tab-no-send-button', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'send_prompt') return reply({ ok: false, error: 'no enabled send button found (tried [data-testid="send-button"], button[aria-label*="Send"]); nothing was sent.' });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await agentTab.open();
+  try {
+    await assert.rejects(askChatgpt({ text: 'secret prompt body', timeout_seconds: 1, pollMs: 20 }), /no enabled send button found/);
+    const event = fs.readFileSync(bridgeObservationsPath, 'utf8').trim().split('\n').map(JSON.parse).at(-1);
+    assert.equal(event.failure_kind, 'browser_ui');
+    assert.match(event.error_message, /^no enabled send button found/);
+    assert.equal(JSON.stringify(event).includes('secret prompt body'), false);
+  } finally {
+    agentTab.ws.close();
+  }
+});
+
+test('read_chatgpt_chat transcripts say whether the latest reply is finished', async () => {
+  const { formatChatTranscript } = await import('../server/index.js');
+  const base = { thread_id: 't-late', title: 'Late', account: 'a@example.com', messages: [{ role: 'user', text: 'q' }], images: [] };
+  assert.match(formatChatTranscript({ ...base, latest_reply_finished: false }), /latest reply: NOT finished/);
+  assert.match(formatChatTranscript({ ...base, latest_reply_finished: true }), /latest reply: finished/);
+  assert.equal(/latest reply/.test(formatChatTranscript(base)), false);
+});
+
 test('bridge observation report summarizes local outcomes and preserves raw thread IDs', () => {
   const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-observation-report-'));
   const observationDir = path.join(archiveDir, 'observations');

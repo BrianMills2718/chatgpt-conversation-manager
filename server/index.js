@@ -48,7 +48,10 @@ function appendBridgeObservation(event) {
 
 function bridgeFailureKind(error, last) {
   if (last?.visible_error === 'too_many_requests' || RATE_LIMIT_TEXT.test(String(error?.message || ''))) return 'rate_limited';
+  if (/^Could not confirm the prompt was sent/.test(String(error?.message || ''))) return 'send_unconfirmed';
   if (/No finished reply within|Timed out waiting/i.test(String(error?.message || ''))) return 'timeout';
+  // Send-step failures the extension raises before anything was sent.
+  if (/no ChatGPT composer found|no enabled send button found|prompt text did not appear in the composer/i.test(String(error?.message || ''))) return 'browser_ui';
   if (/No browser extension|not connected|No idle agent ChatGPT tab/i.test(String(error?.message || ''))) return 'broker';
   return 'unknown';
 }
@@ -471,6 +474,7 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: result?.tab?.slice(0, 8) ?? null, agent_tab: result?.agent ?? null, incognito: result?.incognito ?? null,
         api_checked: result?.api_checked ?? null, api_status: result?.api_status ?? null,
+        ...(command.action === 'send_prompt' ? { send_confirmed: result?.send_confirmed ?? null, confirmed_by: result?.confirmed_by ?? null, visibility: result?.visibility ?? null } : {}),
         in_flight: agentRequestsInFlight, ...recordAndCountWindow(Date.now()),
       });
     }
@@ -591,7 +595,10 @@ function formatChatTranscript(r) {
     if (!imagesByMessage.has(img.message_id)) imagesByMessage.set(img.message_id, []);
     imagesByMessage.get(img.message_id).push(img);
   }
-  const lines = [`# ${r.title || 'Untitled'}`, `conversation ${r.thread_id} · account ${r.account || 'unknown'}${r.project_id ? ` · project ${r.project_id}` : ''} · https://chatgpt.com/c/${r.thread_id}`, ''];
+  const lines = [`# ${r.title || 'Untitled'}`, `conversation ${r.thread_id} · account ${r.account || 'unknown'}${r.project_id ? ` · project ${r.project_id}` : ''} · https://chatgpt.com/c/${r.thread_id}`];
+  if (r.latest_reply_finished === true) lines.push('latest reply: finished');
+  if (r.latest_reply_finished === false) lines.push('latest reply: NOT finished -- ChatGPT is still answering (or the last message is the prompt); read again later');
+  lines.push('');
   for (const m of r.messages || []) {
     lines.push(`## ${m.role}${m.created_at ? ` (${m.created_at})` : ''}`);
     if (m.text) lines.push(m.text);
@@ -708,6 +715,29 @@ function promptDispatchTimeoutMs(timeoutSeconds) {
   return Math.max(120000, Math.min((Number(timeoutSeconds) + 30) * 1000, 300000));
 }
 
+// A timeout must say exactly what happened, because the caller's natural move
+// ("it failed, send it again") duplicates the question whenever the prompt was
+// in fact sent -- which is the usual case: a thinking model can take minutes
+// even for a one-line prompt, well past a caller's timeout_seconds. So the
+// error states whether the send was seen, names the conversation, and points
+// at the supported way to collect the late reply (read_chatgpt_chat, which
+// reports whether the latest reply is finished) instead of a resend.
+function askTimeoutMessage({ timeout_seconds, sendSeen, threadId, last, sent }) {
+  const lastSeen = ` (last seen: ${JSON.stringify(last)})`;
+  const read = threadId ? `read_chatgpt_chat(thread="${threadId}")` : null;
+  if (sendSeen) {
+    const where = threadId
+      ? `conversation ${threadId} -- https://chatgpt.com/c/${threadId}`
+      : 'conversation id not assigned yet -- it will be the newest chat in list_chatgpt_chats';
+    return `No finished reply within ${timeout_seconds}s, but the prompt WAS sent and ChatGPT is still answering (${where}). `
+      + `Do NOT resend it: that would ask the same question twice. Collect the reply when it lands with ${read || 'read_chatgpt_chat on that conversation'} `
+      + `-- its header says "latest reply: finished" once ChatGPT is done -- or allow a larger timeout_seconds (up to 900) next time.${lastSeen}`;
+  }
+  return `Could not confirm the prompt was sent: Send was clicked, but within ${timeout_seconds}s no new message, conversation id, or reply appeared `
+    + `(tab visibility=${sent?.visibility || 'unknown'}). It may or may not have reached ChatGPT. Before resending, check `
+    + `${read || 'list_chatgpt_chats for a new chat'} so the question is not asked twice.${lastSeen}`;
+}
+
 async function askChatgpt({ text, thread_id = null, thread_title = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000, sendTimeoutMs = null, fresh_tab = false, account = null }) {
   const run = async () => {
     const body = String(text || "").trim();
@@ -750,6 +780,19 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         if (!currentTab.thread_id) throw err;
         sent = { thread_id: currentTab.thread_id, dom_before: 0, messages_before: 0, recovered_after_navigation: true };
       }
+      // The extension reports send_confirmed:false when Send was clicked but no
+      // consequence was observable yet (typically a hidden tab: see
+      // extension/lib/send-confirm.js). That prompt may well be with ChatGPT,
+      // so keep watching the thread instead of failing; any later sign of the
+      // turn (a conversation id for a new chat, generation, a new message)
+      // confirms it. An older extension omits the field: treat as confirmed,
+      // which is what its successful send_prompt meant.
+      let sendSeen = sent.send_confirmed !== false;
+      const noteSendEvidence = (poll) => {
+        if (sendSeen || !poll) return;
+        if (poll.done || poll.generating || (conversationMode === 'new' && poll.thread_id)
+          || (Number.isInteger(poll.message_count) && poll.message_count > (Number(sent.dom_before) || 0))) sendSeen = true;
+      };
       const deadline = Date.now() + timeout_seconds * 1000;
       let previousDoneText = null;
       // A finished reply needs two consecutive identical polls to rule out a
@@ -763,6 +806,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         await sleep(pollMs);
         try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before }, 30000, { tab, account }); }
         catch (err) { last = { done: false, error: err.message }; previousDoneText = null; awaitingConfirmation = false; continue; }
+        noteSendEvidence(last);
         if (!last.done) { previousDoneText = null; awaitingConfirmation = false; continue; }
         // The same finished text twice in a row: a pause mid-stream is not a reply.
         if (last.reply !== previousDoneText) { previousDoneText = last.reply; awaitingConfirmation = true; continue; }
@@ -770,9 +814,9 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'success', failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
         return { thread_id: threadId, url: threadId ? `https://chatgpt.com/c/${threadId}` : null, reply: last.reply, images: last.images };
       }
-      throw new Error(`No finished reply within ${timeout_seconds}s (last seen: ${JSON.stringify(last)}). The message was sent; check ChatGPT (conversation ${sent.thread_id || "id not yet assigned"}).`);
+      throw new Error(askTimeoutMessage({ timeout_seconds, sendSeen, threadId: last?.thread_id || sent.thread_id || resolvedThreadId || null, last, sent }));
     } catch (err) {
-      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'failed', failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'failed', failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
       throw err;
     } finally {
       if (claimedTab) claimedTabs.delete(claimedTab);
@@ -944,7 +988,7 @@ app.post('/api/undo', async (req, res) => {
 function createMcpServer() {
   const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.3.0" });
 
-  mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish.', {
+  mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),
     thread_id: z.string().optional(),
     thread_title: z.string().min(1).optional(),

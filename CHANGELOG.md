@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.7.2 (2026-09-26)
+
+### Fixed — `ask_chatgpt` no longer reports a sent prompt as failed, and says how to collect a late reply
+
+- **False "composer did not clear" failures.** After clicking Send, the extension treated "the composer cleared within 10s" as the only proof of a send. In a hidden (background) agent tab that often does not happen in time, yet the prompt was sent: of the 18 such failures in `request-timing.jsonl` (2026-09-25/26), 14 have a conversation created on ChatGPT's side seconds later (most already answered), and 16 of the 18 ran with no other ask in flight — so the cause was hidden tabs, not concurrent sends. Callers retried every one, producing duplicate chats. A send is now confirmed by any observable consequence (composer cleared, a conversation id assigned, the user turn rendered, or the server-side message count growing — `extension/lib/send-confirm.js`), and otherwise reported as `send_confirmed: false` instead of an error; the broker keeps watching the thread and returns the real reply.
+- **Truthful failures.** If nothing ever shows the prompt arrived, the error now starts `Could not confirm the prompt was sent` (failure kind `send_unconfirmed`) instead of claiming it was sent. A timeout after a seen send says `the prompt WAS sent`, names the conversation (taken from the latest poll, not only the send-time id, which is empty for a new chat), says not to resend, and points at `read_chatgpt_chat`.
+- **`read_chatgpt_chat` reports whether the latest reply is finished** (`latest reply: finished` / `NOT finished` in the transcript header), so it is the supported way to collect an answer that outlived `timeout_seconds`.
+- **Observability.** `bridge-events.jsonl` failures now carry `error_message` (previously no error text was recorded, so failures could not be grouped by cause), send-step UI failures are classified `browser_ui` instead of `unknown`, and `request-timing.jsonl` records `send_confirmed` / `confirmed_by` / `visibility` for each `send_prompt`.
+- Decided against serializing sends across tabs: the evidence above shows the false failures happened without concurrency, and nothing in the send path competes for browser focus.
+
 ## v0.7.1 (2026-09-25)
 
 ### Added
