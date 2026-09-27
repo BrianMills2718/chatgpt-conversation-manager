@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.7.6 (2026-09-27)
+
+### Fixed: the extension stopped reloading itself onto new versions, silently
+
+- **What happened.** Read from Brian's Chrome profile on disk (read-only). The minute alarm fired and the worker called `chrome.runtime.reload()` at 2026-09-26 21:21:21Z. The extension reloaded (its `last_update_time` pref), but Chrome deleted the old service-worker registration and never wrote a new one (`Service Worker/Database`). It also cleared the update alarm and never re-created it (`Extension State`), and the recorded worker events are empty. Since then the extension has had no background worker, so nothing has checked `/health`. 0.7.2 (synced 90s later), 0.7.3, 0.7.4 and 0.7.5 all sat on disk unloaded. The alarm was the only trigger, so nothing reported it.
+- **What it was not.** The worker already used `chrome.alarms`, not a timer that an idle worker would drop. The manifest already had `alarms` and `http://localhost/*`, and the version compare is correct. In a throwaway profile the same code self-reloads correctly: Windows Chrome 153 (Brian's build) from the same `\\wsl.localhost` path, and Linux Chrome 154. Why Chrome skipped the new registration in Brian's browser is not known. The extension's Errors panel at chrome://extensions was not inspected.
+- **Second trigger.** Every ChatGPT tab now pings the background worker when it connects to the broker (`extension/lib/background-ping.js`). That wakes an idle worker, which checks `/health` at once. The worker also checks on browser startup and on install/update, besides the minute alarm.
+- **A missing worker is now visible.** The tab reports whether the ping was answered. If it was not, the broker log warns that the extension cannot update itself and must be reloaded by hand. `GET /health` lists `extension_background_ok` (`false`: no worker; `null`: tab older than 0.7.6). This part needs a broker restart to take effect.
+- **The alarm is only created when missing.** Re-creating it on every worker start resets its countdown, so with tab pings waking the worker the alarm would never fire.
+- **No reload loop.** The worker does not reload again within 5 minutes of its own reload (stored in `chrome.storage.local`, which survives the reload). This covers a mismatch that a reload cannot fix, such as the broker reading a different checkout's manifest.
+- **The fix cannot install itself.** The running browser has no worker, so 0.7.6 needs one manual reload at chrome://extensions. The auto-reload is only proven once a later version bump loads on its own.
+- Extension manifest 0.7.5 -> 0.7.6.
+
 ## v0.7.5 (2026-09-27)
 
 ### Fixed: the composer wait could give up without looking at the page it waited for

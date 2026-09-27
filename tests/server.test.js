@@ -1480,3 +1480,23 @@ test('each tab\'s running extension version is visible next to the version on di
     ws.close();
   }
 });
+
+test('a tab whose extension background worker did not answer is visible in /health', async () => {
+  // Without a background worker the extension cannot reload itself onto a new
+  // version (2026-09-26/27: 0.7.2-0.7.5 each sat on disk unloaded, silently).
+  const dead = new WebSocket(`${wsUrl}&tab=bg-dead-tab-0001&v=0.7.6`);
+  const alive = new WebSocket(`${wsUrl}&tab=bg-live-tab-0001&v=0.7.6`);
+  await Promise.all([dead, alive].map((ws) => new Promise((resolve) => ws.on('open', resolve))));
+  try {
+    dead.send(JSON.stringify({ type: 'background_status', ok: false, error: 'Could not establish connection. Receiving end does not exist.' }));
+    alive.send(JSON.stringify({ type: 'background_status', ok: true, version: '0.7.6' }));
+    await new Promise((r) => setTimeout(r, 50));
+    const health = await (await fetch(`${baseUrl}/health`)).json();
+    assert.ok(Array.isArray(health.extension_background_ok), JSON.stringify(health));
+    assert.ok(health.extension_background_ok.includes(false), JSON.stringify(health));
+    assert.ok(health.extension_background_ok.includes(true), JSON.stringify(health));
+  } finally {
+    dead.close();
+    alive.close();
+  }
+});
