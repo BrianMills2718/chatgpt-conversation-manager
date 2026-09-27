@@ -179,21 +179,45 @@ export async function captureViaApi(threadId, { fetchImpl = fetch, accessToken }
 // only when the current node is an assistant message the backend marks finished
 // (status finished_successfully, or end_turn true) AND new messages exist beyond
 // our own; anything else is "not yet", with the observed status for diagnosis.
-export function replyFromTree(data, beforeCount) {
+//
+// `beforeCount` null means the pre-send count is unknown (the pre-send read of
+// a continued thread failed, e.g. HTTP 429). The mounted-DOM count is not a
+// substitute: a hidden tab can report 0, which made every earlier answer in
+// the thread part of "the reply". Instead the reply is what follows the last
+// user message, and when `expected` (the prompt's opening text) is given that
+// user message must be ours, so a read that lands before our turn is saved
+// cannot return the previous answer.
+//
+// `end_turn` is reported so the broker can accept the backend's own "this
+// turn is over" without spending a second read to confirm it.
+function normText(s) { return String(s ?? "").replace(/\s+/g, " ").trim(); }
+
+export function replyFromTree(data, beforeCount, { expected = null } = {}) {
   const node = data?.mapping?.[data?.current_node];
   const message = node?.message;
   const role = message?.author?.role || null;
   const status = message?.status || null;
   const finished = role === "assistant" && (status === "finished_successfully" || message?.end_turn === true);
   const messages = linearizeMapping(data);
-  const added = messages.slice(beforeCount);
+  let added;
+  if (beforeCount == null) {
+    let lastUser = -1;
+    for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { lastUser = i; break; }
+    const want = normText(expected).slice(0, 40);
+    if (lastUser < 0 || (want && !normText(messages[lastUser].text).includes(want))) {
+      return { done: false, role, status: lastUser < 0 ? status : "prompt_not_in_tree", message_count: messages.length };
+    }
+    added = messages.slice(lastUser + 1);
+  } else {
+    added = messages.slice(beforeCount);
+  }
   const replies = added.filter((m) => m.role === "assistant");
   if (!finished || replies.length === 0) {
     return { done: false, role, status, message_count: messages.length };
   }
   const images = replies.flatMap((m) => (m.attachments || []).filter(isImageAttachment));
   return { done: true, reply: replies.map((m) => m.text).join("\n\n"), message_count: messages.length,
-           model: replies[replies.length - 1].model || null,
+           model: replies[replies.length - 1].model || null, end_turn: message?.end_turn === true,
            images: images.length ? images : undefined };
 }
 
@@ -444,4 +468,18 @@ export async function listProjectChats({ perProject = 20, fetchImpl = fetch, acc
   const res = await fetchImpl(`/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=${encodeURIComponent(perProject)}`, { method: "GET", credentials: "same-origin", headers });
   if (!res.ok) throw new Error(`projects sidebar fetch failed: HTTP ${res.status}`);
   return parseProjectSidebar(await res.json());
+}
+
+// How long ask_chatgpt's reply check waits before its next conversation-tree
+// read. Normally 10s. A throttled read (HTTP 429) doubles the gap up to 60s,
+// or waits as long as the server's own Retry-After says, instead of reading
+// every 10s regardless: on 2026-09-26/27 five of every six reads while
+// throttled were 429s that only spent the account's quota. Any other outcome
+// returns to 10s.
+export const REPLY_CHECK_MIN_GAP_MS = 10000;
+export const REPLY_CHECK_MAX_GAP_MS = 60000;
+export function nextReplyCheckGapMs(gapMs, { status = null, retryAfterMs = null } = {}) {
+  if (status !== 429) return REPLY_CHECK_MIN_GAP_MS;
+  const doubled = Math.min(REPLY_CHECK_MAX_GAP_MS, Math.max(REPLY_CHECK_MIN_GAP_MS, Number(gapMs) || 0) * 2);
+  return Number.isFinite(retryAfterMs) ? Math.max(doubled, retryAfterMs) : doubled;
 }

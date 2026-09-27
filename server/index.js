@@ -738,7 +738,14 @@ function askTimeoutMessage({ timeout_seconds, sendSeen, threadId, last, sent }) 
     + `${read || 'list_chatgpt_chats for a new chat'} so the question is not asked twice.${lastSeen}`;
 }
 
-async function askChatgpt({ text, thread_id = null, thread_title = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000, sendTimeoutMs = null, fresh_tab = false, account = null }) {
+// A get_reply result for a thread with a real id that carries no evidence
+// about completion: the extension skipped its API read (cooldown) or the read
+// failed (e.g. HTTP 429), and ChatGPT is not visibly generating.
+function pollLearnedNothing(poll) {
+  return poll.source === "api_waiting" && !poll.generating && (!poll.api_checked || poll.api_status != null);
+}
+
+async function askChatgpt({ text, thread_id = null, thread_title = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000, sendTimeoutMs = null, fresh_tab = false, account = null, confirmGraceMs = 75000 }) {
   const run = async () => {
     const body = String(text || "").trim();
     if (!body) throw new Error("text is required.");
@@ -795,21 +802,36 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       };
       const deadline = Date.now() + timeout_seconds * 1000;
       let previousDoneText = null;
-      // A finished reply needs two consecutive identical polls to rule out a
-      // mid-stream pause. If the FIRST of those two lands right at the
-      // deadline, the confirming poll must still run instead of the whole
-      // call being reported as a timeout despite already having the answer
-      // (observed live 2026-09-17) -- so once a done candidate is seen, one
-      // more bounded confirmation poll is allowed even past the deadline.
-      let awaitingConfirmation = false;
-      while (Date.now() < deadline || awaitingConfirmation) {
+      // A finished reply needs two agreeing reads to rule out a mid-stream
+      // pause or an intermediate message -- unless ChatGPT's own conversation
+      // tree marks it end_turn, which is the backend saying the turn is over.
+      // If the FIRST of two reads lands right at the deadline, the confirming
+      // read must still run instead of reporting a timeout despite already
+      // having the answer (observed live 2026-09-17), so once a done candidate
+      // is seen, confirmation may run past the deadline -- bounded by
+      // confirmGraceMs, which covers the extension's backed-off API-read gap.
+      let confirmUntil = 0;
+      while (Date.now() < deadline || Date.now() < confirmUntil) {
         await sleep(pollMs);
-        try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before }, 30000, { tab, account }); }
-        catch (err) { last = { done: false, error: err.message }; previousDoneText = null; awaitingConfirmation = false; continue; }
+        try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before, expected: body.slice(0, 200) }, 30000, { tab, account }); }
+        catch (err) { last = { done: false, error: err.message }; continue; }
         noteSendEvidence(last);
-        if (!last.done) { previousDoneText = null; awaitingConfirmation = false; continue; }
-        // The same finished text twice in a row: a pause mid-stream is not a reply.
-        if (last.reply !== previousDoneText) { previousDoneText = last.reply; awaitingConfirmation = true; continue; }
+        if (!last.done) {
+          // Only a read that actually observed "not finished" discards a done
+          // candidate. Between two API reads the extension answers from the
+          // page alone (api_checked:false), and a throttled read (HTTP 429)
+          // learns nothing either; treating those as "not done" meant two
+          // consecutive done polls never happened and every ask waited out
+          // its full timeout with the answer in hand (2026-09-26/27).
+          if (!pollLearnedNothing(last)) { previousDoneText = null; confirmUntil = 0; }
+          continue;
+        }
+        const authoritative = last.source === "api" && last.end_turn === true;
+        if (!authoritative && last.reply !== previousDoneText) {
+          previousDoneText = last.reply;
+          confirmUntil = Date.now() + confirmGraceMs;
+          continue;
+        }
         const threadId = last.thread_id || sent.thread_id || resolvedThreadId || null;
         appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'success', failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
         return { thread_id: threadId, url: threadId ? `https://chatgpt.com/c/${threadId}` : null, reply: last.reply, images: last.images };

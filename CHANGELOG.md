@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.7.3 (2026-09-26)
+
+### Fixed — `ask_chatgpt` waited its full timeout although ChatGPT had already answered
+
+- **Root cause.** A finished reply needed two consecutive "done" polls. Once a thread has a real conversation id, only a conversation-tree (API) read can report "done", and the extension makes at most one such read per ~10s; the 3s polls in between answer `api_waiting` / `api_checked: false`. The broker treated those as "not done" and discarded the done candidate it was confirming, so two consecutive done polls almost never happened (only when an API read itself took >~7s). Evidence, 2026-09-26/27: five serial asks each failed after 900s while `request-timing.jsonl` shows their API reads returning the finished reply (api_status 200 is logged only on the "done" path) about once a minute for the whole 15 minutes, e.g. the new chat sent ~23:44:10 was already done at the 23:44:24 read. (The ~2.5-minute "finish" gap seen in the threads comes from the user message's client-clock timestamp; the thread ids and assistant timestamps show the replies finished within seconds to a minute.)
+- **Fix.** Only a poll that actually observed "not finished" (ChatGPT generating, or an API read saying not done) discards a done candidate; a skipped or throttled (HTTP 429) read no longer does. A reply the backend marks `end_turn: true` is returned on the first read with no confirming read. Confirmation past the deadline is bounded (`confirmGraceMs`, 75s).
+- **Wrong-answer guard for continued threads.** If the pre-send tree read failed, the extension fell back to the mounted-DOM message count, which a hidden tab can report as 0 — making every earlier answer in the thread part of "the reply". The baseline is now "unknown", and the reply is what follows the user message containing our prompt text (`replyFromTree(tree, null, { expected })`).
+- **Fewer wasted reads while throttled.** The reply check's API-read gap doubles on HTTP 429 up to 60s (or the server's Retry-After) and returns to 10s on any other outcome; previously it read every 10s regardless, and five of six reads were 429s.
+- Extension manifest 0.7.2 -> 0.7.3.
+
 ## v0.7.2 (2026-09-26)
 
 ### Fixed — `ask_chatgpt` no longer reports a sent prompt as failed, and says how to collect a late reply

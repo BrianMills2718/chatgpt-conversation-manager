@@ -8,7 +8,7 @@
 const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import(chrome.runtime.getURL("lib/title.js"));
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
 const { sendEvidence, sendEvidenceFromCounts } = await import(chrome.runtime.getURL("lib/send-confirm.js"));
-const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats } = await import(chrome.runtime.getURL("lib/api-capture.js"));
+const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats, nextReplyCheckGapMs, REPLY_CHECK_MIN_GAP_MS } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
   brokerUrl: "ws://localhost:8787/extension",
@@ -749,12 +749,17 @@ async function sendPrompt(text) {
   // One authoritative pre-send read gives getReply the exact full-tree count.
   // Fall back to the DOM count if the private endpoint is unavailable or
   // temporarily rate-limited; sending the prompt must not depend on capture.
+  // If that read fails, the count is unknown (null), never the DOM count: a
+  // hidden tab can mount 0 messages, and a 0 baseline on a continued thread
+  // made every earlier answer part of "the reply". getReply then locates our
+  // turn by the prompt text instead (lib/api-capture.js replyFromTree).
   let messagesBefore = domBefore;
   if (threadBefore) {
     try {
       messagesBefore = linearizeMapping(await fetchConversationTree(threadBefore)).length;
     } catch (err) {
-      await log("warn", "Could not read the pre-send conversation count; using DOM fallback", err);
+      messagesBefore = null;
+      await log("warn", "Could not read the pre-send conversation count; the reply will be located by the prompt text", err);
     }
   }
   // Right after a navigation the composer can be on the page before its editor
@@ -868,8 +873,10 @@ async function resolveReplyImages(images) {
 
 // Read the reply from the page. Done when ChatGPT is no longer generating, and a
 // new assistant message follows our own. The caller requires the same text on
-// two consecutive polls before trusting it, so a pause mid-stream is not "done".
-async function getReply(domBefore, messagesBefore = domBefore) {
+// two done reads with no "not finished" read between them (reads that learn
+// nothing, like a skipped or throttled API check, do not count), unless the
+// backend marks the reply end_turn -- so a pause mid-stream is not "done".
+async function getReply(domBefore, messagesBefore = domBefore, expected = null) {
   const generating = Boolean(findFirst(STOP_BUTTON_SELECTORS, visible));
   const messages = extractMessagesFromDom();
   const added = messages.slice(Number(domBefore) || 0);
@@ -881,8 +888,9 @@ async function getReply(domBefore, messagesBefore = domBefore) {
   // messages even after the authoritative conversation tree contains the
   // completed assistant answer. When generation is not visibly active, check
   // that tree regardless of the DOM-derived `done` flag. Throttle the private
-  // API read so long tool runs do not poll it every three seconds.
-  const shouldCheckApi = !generating && threadId && Date.now() - getReply.lastApiCheckAt >= 10000;
+  // API read so long tool runs do not poll it every three seconds, and back
+  // it off while the account is throttled (nextReplyCheckGapMs).
+  const shouldCheckApi = !generating && threadId && Date.now() - getReply.lastApiCheckAt >= getReply.apiGapMs;
   // Whether this call actually hit ChatGPT's backend, and with what result --
   // an HTTP status/Retry-After from a real failed fetch is a far more
   // reliable rate-limit signal than scraping a DOM banner for wording that
@@ -893,7 +901,8 @@ async function getReply(domBefore, messagesBefore = domBefore) {
   if (shouldCheckApi) {
     getReply.lastApiCheckAt = Date.now();
     try {
-      const apiReply = replyFromTree(await fetchConversationTree(threadId), Number(messagesBefore) || 0);
+      const apiReply = replyFromTree(await fetchConversationTree(threadId), messagesBefore == null ? null : (Number(messagesBefore) || 0), { expected });
+      getReply.apiGapMs = REPLY_CHECK_MIN_GAP_MS;
       if (apiReply.done) {
         const images = await resolveReplyImages(apiReply.images);
         return { ...apiReply, images, generating: false, thread_id: threadId,
@@ -903,6 +912,7 @@ async function getReply(domBefore, messagesBefore = domBefore) {
     } catch (err) {
       apiStatus = err.status ?? null;
       apiRetryAfterMs = err.retryAfterMs ?? null;
+      getReply.apiGapMs = nextReplyCheckGapMs(getReply.apiGapMs, { status: apiStatus, retryAfterMs: apiRetryAfterMs });
       await log("warn", "Could not read the completed reply from the conversation API; waiting instead of trusting virtualized DOM text", err);
     }
   }
@@ -923,6 +933,7 @@ async function getReply(domBefore, messagesBefore = domBefore) {
            api_checked: false, api_status: null, api_retry_after_ms: null };
 }
 getReply.lastApiCheckAt = 0;
+getReply.apiGapMs = REPLY_CHECK_MIN_GAP_MS;
 
 const PACER_STORAGE_KEY = "bulkFetchSpacingMs";
 
@@ -1119,7 +1130,7 @@ async function handleCommand(msg) {
     return { navigated: true };
   }
   if (msg.action === "send_prompt") return sendPrompt(msg.text);
-  if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before);
+  if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before, msg.expected ?? null);
   if (msg.action === "navigate_to_thread") {
     refuseWhileArchiving("navigating");
     const threadId = String(msg.thread_id || "").trim();

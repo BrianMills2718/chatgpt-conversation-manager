@@ -1096,3 +1096,148 @@ test('opening the agent tab retries a transient failure and reports every attemp
   const broken = async () => { throw new Error('accept4 failed 110'); };
   await assert.rejects(runOpenCommand('open', { attempts: 3, delayMs: 10, exec: broken }), /failed 3 times: attempt 1: accept4 failed 110 \| attempt 2: .* \| attempt 3: /);
 });
+
+// Real incident 2026-09-26/27: five serial asks each waited their full 900s
+// although ChatGPT had finished within ~a minute. request-timing.jsonl shows
+// the extension's API reads returning the finished reply (api_status 200 is
+// only ever logged on its "done" path) about once a minute for 15 minutes.
+// Cause: once a thread has a real id, only an API read can say "done", and
+// the extension makes at most one API read per ~10s, so the 3s polls between
+// two API reads come back as api_waiting/api_checked:false -- which the
+// broker treated as "not done" and used to throw away the done candidate it
+// was waiting to confirm. Two consecutive polls could then never both be
+// done. These mocks replay that real sequence.
+function apiCadenceTab(name, { replyText = 'the finished answer', endTurn, between = () => ({ api_checked: false, api_status: null }) } = {}) {
+  let polls = 0;
+  const tab = fakeTab(name, {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') { state.thread = null; return reply({ ok: true }); }
+      if (msg.action === 'send_prompt') { state.thread = `${name}-thread`; return reply({ ok: true, thread_id: state.thread, dom_before: 0, messages_before: 0, send_confirmed: true, confirmed_by: 'composer_cleared' }); }
+      if (msg.action === 'get_reply') {
+        polls++;
+        tab.polls = polls;
+        // Every third poll is an actual API read (the extension's cooldown);
+        // the ones between are free local reads that learn nothing.
+        if (polls % 3 === 1) return reply({ ok: true, done: true, reply: replyText, thread_id: state.thread, message_count: 2, source: 'api', api_checked: true, api_status: 200, ...(endTurn === undefined ? {} : { end_turn: endTurn }) });
+        return reply({ ok: true, done: false, generating: false, thread_id: state.thread, message_count: 0, reply: null, source: 'api_waiting', ...between(polls) });
+      }
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  tab.polls = 0;
+  return tab;
+}
+
+test('a finished API reply is confirmed even though the polls between API reads learn nothing', async () => {
+  const agent = apiCadenceTab('api-cadence-agent');
+  await agent.open();
+  try {
+    const result = await askChatgpt({ text: 'reply is ready', timeout_seconds: 2, pollMs: 10 });
+    assert.equal(result.reply, 'the finished answer');
+    // confirmed by the second API read, not by waiting out the timeout
+    assert.ok(agent.polls <= 4, `expected confirmation on the next API read, took ${agent.polls} polls`);
+  } finally {
+    agent.ws.close();
+  }
+});
+
+test('rate-limited API reads (HTTP 429) between two finished reads do not discard the finished reply', async () => {
+  const agent = apiCadenceTab('api-429-agent', { between: () => ({ api_checked: true, api_status: 429 }) });
+  await agent.open();
+  try {
+    const result = await askChatgpt({ text: 'reply is ready, account throttled', timeout_seconds: 2, pollMs: 10 });
+    assert.equal(result.reply, 'the finished answer');
+    assert.ok(agent.polls <= 4, `took ${agent.polls} polls`);
+  } finally {
+    agent.ws.close();
+  }
+});
+
+test('a reply the backend marks end_turn is returned on the first API read, with no confirming read', async () => {
+  const agent = apiCadenceTab('api-endturn-agent', { endTurn: true });
+  await agent.open();
+  try {
+    const result = await askChatgpt({ text: 'single read', timeout_seconds: 2, pollMs: 10 });
+    assert.equal(result.reply, 'the finished answer');
+    assert.equal(agent.polls, 1);
+  } finally {
+    agent.ws.close();
+  }
+});
+
+test('an API read that says "not finished" still discards an earlier done candidate', async () => {
+  let polls = 0;
+  const seq = [
+    { done: true, reply: 'preamble only', source: 'api', api_checked: true, api_status: 200 },
+    { done: false, source: 'api_waiting', api_checked: false, api_status: null },
+    { done: false, source: 'api_waiting', api_checked: true, api_status: null }, // API: not finished yet
+    { done: true, reply: 'preamble only\n\nfull answer', source: 'api', api_checked: true, api_status: 200 },
+    { done: false, source: 'api_waiting', api_checked: false, api_status: null },
+    { done: true, reply: 'preamble only\n\nfull answer', source: 'api', api_checked: true, api_status: 200 },
+  ];
+  const agent = fakeTab('api-reset-agent', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') { state.thread = null; return reply({ ok: true }); }
+      if (msg.action === 'send_prompt') { state.thread = 'reset-thread'; return reply({ ok: true, thread_id: state.thread, dom_before: 0, messages_before: 0 }); }
+      if (msg.action === 'get_reply') return reply({ ok: true, generating: false, thread_id: state.thread, message_count: 0, ...seq[Math.min(polls++, seq.length - 1)] });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await agent.open();
+  try {
+    const result = await askChatgpt({ text: 'multi-part answer', timeout_seconds: 2, pollMs: 10 });
+    assert.equal(result.reply, 'preamble only\n\nfull answer');
+  } finally {
+    agent.ws.close();
+  }
+});
+
+test('get_reply is told the prompt so the extension can find our turn when its message baseline is unknown', async () => {
+  const seen = [];
+  const agent = fakeTab('expected-agent', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') { state.thread = null; return reply({ ok: true }); }
+      if (msg.action === 'send_prompt') { state.thread = 'expected-thread'; return reply({ ok: true, thread_id: state.thread, dom_before: 0, messages_before: null }); }
+      if (msg.action === 'get_reply') { seen.push(msg); return reply({ ok: true, done: true, reply: 'r', thread_id: state.thread, source: 'api', end_turn: true }); }
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await agent.open();
+  try {
+    await askChatgpt({ text: '  What is   the answer?  ', timeout_seconds: 2, pollMs: 10 });
+    assert.equal(seen[0].expected, 'What is   the answer?');
+    assert.equal(seen[0].messages_before, null);
+  } finally {
+    agent.ws.close();
+  }
+});
+
+test('an unconfirmed done candidate past the deadline is bounded, not polled forever', async () => {
+  let polls = 0;
+  const agent = fakeTab('grace-agent', {
+    agent: true,
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'navigate_home') { state.thread = null; return reply({ ok: true }); }
+      if (msg.action === 'send_prompt') { state.thread = 'grace-thread'; return reply({ ok: true, thread_id: state.thread, dom_before: 0, messages_before: 0 }); }
+      if (msg.action === 'get_reply') {
+        polls++;
+        if (polls === 1) return reply({ ok: true, done: true, reply: 'once', thread_id: state.thread, source: 'api', api_checked: true, api_status: 200 });
+        return reply({ ok: true, done: false, generating: false, thread_id: state.thread, source: 'api_waiting', api_checked: true, api_status: 429 });
+      }
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await agent.open();
+  try {
+    const started = Date.now();
+    const err = await askChatgpt({ text: 'throttled forever', timeout_seconds: 0.05, pollMs: 10, confirmGraceMs: 200 }).then(() => null, (e) => e);
+    assert.ok(err, 'expected a timeout');
+    assert.match(err.message, /prompt WAS sent/);
+    assert.ok(Date.now() - started < 2000, 'the confirmation grace must be bounded');
+  } finally {
+    agent.ws.close();
+  }
+});
