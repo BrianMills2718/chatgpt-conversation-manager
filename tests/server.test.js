@@ -22,6 +22,7 @@ let agentPacer;
 let requestTimingPath;
 let domActivityPath;
 let broadcastReloadTab;
+let getPacerEntry;
 
 before(async () => {
   process.env.PORT = '0';
@@ -42,6 +43,7 @@ before(async () => {
   requestTimingPath = mod.REQUEST_TIMING_PATH;
   domActivityPath = mod.DOM_ACTIVITY_PATH;
   broadcastReloadTab = mod.broadcastReloadTab;
+  getPacerEntry = mod.getPacerEntry;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
     server.listen(0, resolve);
@@ -217,7 +219,7 @@ function fakeTab(tab, { busy = false, thread = null, agent = false, onCommand })
       // carries tab/agent/incognito, so the fake tab does too by default
       // (a test can still override any of them via extra).
       const reply = (extra) => ws.send(JSON.stringify({ type: 'command_result', id: msg.id, tab, agent, incognito: false, ...extra }));
-      if (msg.action === 'get_tab') return reply({ ok: true, tab, agent, busy: state.busy, thread_id: state.thread });
+      if (msg.action === 'get_tab') return reply({ ok: true, tab, agent, busy: state.busy, thread_id: state.thread, ...(state.pageId ? { page_id: state.pageId } : {}) });
       if (state.busy && ['navigate_home', 'navigate_to_thread', 'send_prompt'].includes(msg.action)) {
         return reply({ ok: false, error: 'busy: a bulk archive is running in this tab' });
       }
@@ -1239,5 +1241,242 @@ test('an unconfirmed done candidate past the deadline is bounded, not polled for
     assert.ok(Date.now() - started < 2000, 'the confirmation grace must be bounded');
   } finally {
     agent.ws.close();
+  }
+});
+
+// 2026-09-27: two continuation asks failed with "no ChatGPT composer found"
+// on a page that had been loaded for ~2 minutes (the pacer's wait) and never
+// reloaded on its own. The extension throws that before typing anything, and
+// says so (nothing_sent + the page instance it looked at), so the broker
+// reloads that tab once and sends again on the fresh page.
+function noComposerTab(name, { thread, composerAfterReloads = 1, bannerVisible = false }) {
+  let reloads = 0;
+  const sends = [];
+  const tab = fakeTab(name, {
+    agent: true,
+    thread,
+    onCommand: async (msg, state, reply, reopen) => {
+      if (msg.action === 'reload_tab') {
+        reloads++;
+        reply({ ok: true, reloaded: true });
+        state.ws.close();
+        setTimeout(() => { state.pageId = `page-${reloads + 1}`; reopen(); }, 100);   // same tab token, new page instance
+        return;
+      }
+      if (msg.action === 'send_prompt') {
+        sends.push(state.pageId);
+        if (reloads < composerAfterReloads) {
+          return reply({ ok: false, error: 'no ChatGPT composer found (tried #prompt-textarea); nothing was typed or sent.',
+            stage: 'no_composer', nothing_sent: true, page_id: state.pageId, visible_error: bannerVisible ? 'too_many_requests' : null });
+        }
+        return reply({ ok: true, thread_id: state.thread, dom_before: 2, messages_before: 2, send_confirmed: true });
+      }
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'answer after reload', thread_id: state.thread, source: 'api', api_checked: true, api_status: 200, end_turn: true });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  tab.state = { get reloads() { return reloads; }, sends };
+  return tab;
+}
+
+test('a continuation whose page never shows a composer is reloaded once and sent on the fresh page', async () => {
+  const tab = noComposerTab('no-composer-once', { thread: 'cont-thread-1' });
+  tab.pageId = 'page-1';
+  await tab.open();
+  try {
+    const r = await askChatgpt({ text: 'continue please', thread_id: 'cont-thread-1', timeout_seconds: 5, pollMs: 10 });
+    assert.equal(r.reply, 'answer after reload');
+    assert.equal(tab.state.reloads, 1);
+    // one send on the stale page (nothing typed), one on the reloaded page
+    assert.deepEqual(tab.state.sends, ['page-1', 'page-2']);
+  } finally {
+    tab.ws.close();
+  }
+});
+
+test('a composer that is still missing after the one reload fails truthfully: bounded, and says nothing was sent', async () => {
+  const tab = noComposerTab('no-composer-twice', { thread: 'cont-thread-2', composerAfterReloads: 99 });
+  tab.pageId = 'page-1';
+  await tab.open();
+  try {
+    const err = await askChatgpt({ text: 'continue please', thread_id: 'cont-thread-2', timeout_seconds: 5, pollMs: 10 }).then(() => null, (e) => e);
+    assert.ok(err, 'expected a failure');
+    assert.match(err.message, /no ChatGPT composer found/);
+    assert.match(err.message, /reloaded the tab once/);
+    assert.match(err.message, /nothing was typed or sent/i);
+    assert.equal(tab.state.reloads, 1, 'recovery must be bounded to one reload');
+    assert.equal(tab.state.sends.length, 2);
+    assert.ok(!tab.received.includes('get_reply'), 'must not poll for a reply to a prompt that was never sent');
+  } finally {
+    tab.ws.close();
+  }
+});
+
+test('a missing composer with ChatGPT\'s rate-limit banner showing is not reloaded into the throttle', async () => {
+  const tab = noComposerTab('no-composer-banner', { thread: 'cont-thread-3', bannerVisible: true });
+  tab.pageId = 'page-1';
+  await tab.open();
+  try {
+    const err = await askChatgpt({ text: 'continue please', thread_id: 'cont-thread-3', timeout_seconds: 5, pollMs: 10 }).then(() => null, (e) => e);
+    assert.ok(err, 'expected a failure');
+    assert.match(err.message, /nothing was typed or sent/i);
+    assert.equal(tab.state.reloads, 0);
+    assert.equal(tab.state.sends.length, 1);
+  } finally {
+    tab.ws.close();
+  }
+});
+
+test('a send failure that does not prove nothing was typed is never retried (no duplicate prompt)', async () => {
+  const tab = fakeTab('no-proof-agent', {
+    agent: true,
+    thread: 'cont-thread-4',
+    onCommand: async (msg, state, reply) => {
+      // An older extension (no nothing_sent/page_id fields) reporting the same text.
+      if (msg.action === 'send_prompt') return reply({ ok: false, error: 'no ChatGPT composer found (tried #prompt-textarea); the page layout may have changed.' });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await tab.open();
+  try {
+    await assert.rejects(askChatgpt({ text: 'continue please', thread_id: 'cont-thread-4', timeout_seconds: 5, pollMs: 10 }), /no ChatGPT composer found/);
+    assert.deepEqual(tab.received.filter((a) => a !== 'get_tab'), ['send_prompt']);
+  } finally {
+    tab.ws.close();
+  }
+});
+
+// Both 2026-09-27 failures navigated 10-13s after ChatGPT answered HTTP 429,
+// then sat ~2 minutes in the pacer before sending. The page load is itself a
+// request for the conversation, so the pacer's wait belongs before it, and
+// the send then follows the fresh page without a second full wait.
+test('a continuation waits out the pacer gap before navigating, not between navigation and send', async () => {
+  const at = {};
+  const tab = fakeTab('pace-nav-agent', {
+    agent: true,
+    thread: 'somewhere-else',
+    onCommand: async (msg, state, reply, reopen) => {
+      at[msg.action] ??= Date.now();
+      if (msg.action === 'navigate_to_thread') {
+        reply({ ok: true, navigated: true });
+        state.ws.close();
+        state.thread = msg.thread_id;
+        setTimeout(() => reopen(), 50);
+        return;
+      }
+      if (msg.action === 'send_prompt') return reply({ ok: true, thread_id: state.thread, dom_before: 2, messages_before: 2, send_confirmed: true });
+      if (msg.action === 'get_reply') return reply({ ok: true, done: true, reply: 'paced', thread_id: state.thread, source: 'api', api_checked: true, api_status: 200, end_turn: true });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  await tab.open();
+  const entry = getPacerEntry('(default)');
+  entry.pacer.minMs = 1500;
+  entry.pacer.spacingMs = 1500;
+  entry.lastRequestAt = Date.now();
+  const started = Date.now();
+  try {
+    const r = await askChatgpt({ text: 'continue', thread_id: 'paced-thread', timeout_seconds: 5, pollMs: 10 });
+    assert.equal(r.reply, 'paced');
+    assert.ok(at.navigate_to_thread - started >= 1450, `navigated ${at.navigate_to_thread - started}ms after the last request; the pacer gap is 1500ms`);
+    // ~700ms is waitForTab's own poll interval; a second pacer wait would make it ~1500ms
+    assert.ok(at.send_prompt - at.navigate_to_thread < 1200, `send waited ${at.send_prompt - at.navigate_to_thread}ms after the page loaded`);
+  } finally {
+    tab.ws.close();
+  }
+});
+
+test('a reload that never brings the page back fails within its bound and still says nothing was sent', async () => {
+  const tab = fakeTab('no-composer-no-return', {
+    agent: true,
+    thread: 'cont-thread-5',
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'reload_tab') { reply({ ok: true, reloaded: true }); state.ws.close(); return; }   // never reconnects
+      if (msg.action === 'send_prompt') return reply({ ok: false, error: 'no ChatGPT composer found (tried #prompt-textarea); nothing was typed or sent.', stage: 'no_composer', nothing_sent: true, page_id: 'page-1' });
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  tab.pageId = 'page-1';
+  await tab.open();
+  try {
+    const err = await askChatgpt({ text: 'continue please', thread_id: 'cont-thread-5', timeout_seconds: 5, pollMs: 10 }).then(() => null, (e) => e);
+    assert.ok(err, 'expected a failure');
+    assert.match(err.message, /Reloading the tab to recover failed/);
+    assert.match(err.message, /Nothing was typed or sent/);
+    assert.deepEqual(tab.received.filter((a) => a !== 'get_tab'), ['send_prompt', 'reload_tab']);
+  } finally {
+    tab.ws.close();
+  }
+});
+
+// 2026-09-27: a continuation returned the previous answer followed by the new
+// one. The tab ran extension 0.7.2, whose failed (HTTP 429) pre-send read fell
+// back to the hidden tab's DOM count of 0. Now a continuation without that
+// count is not sent (nothing_sent, stage no_baseline) and is retried once
+// after the pacer gap the 429 widened.
+function noBaselineTab(name, { failures }) {
+  const sends = [];
+  const tab = fakeTab(name, {
+    agent: true,
+    thread: 'baseline-thread',
+    onCommand: async (msg, state, reply) => {
+      if (msg.action === 'send_prompt') {
+        sends.push(Date.now());
+        if (sends.length <= failures) {
+          return reply({ ok: false, error: 'could not read conversation baseline-thread before sending (backend-api conversation fetch failed: HTTP 429), so its reply could not be told apart from earlier ones; nothing was typed or sent.',
+            stage: 'no_baseline', nothing_sent: true, page_id: 'page-1', api_status: 429, api_retry_after_ms: null });
+        }
+        return reply({ ok: true, thread_id: state.thread, dom_before: 0, messages_before: 2, send_confirmed: true });
+      }
+      if (msg.action === 'get_reply') {
+        assert.equal(msg.messages_before, 2, 'the reply must be read against the known pre-send count');
+        return reply({ ok: true, done: true, reply: 'only the new answer', thread_id: state.thread, source: 'api', api_checked: true, api_status: 200, end_turn: true });
+      }
+      reply({ ok: false, error: `unexpected ${msg.action}` });
+    },
+  });
+  tab.sends = sends;
+  return tab;
+}
+
+test('a continuation refused for an unreadable baseline is resent once after the widened pacer gap, without a reload', async () => {
+  const tab = noBaselineTab('no-baseline-once', { failures: 1 });
+  await tab.open();
+  try {
+    const r = await askChatgpt({ text: 'round two', thread_id: 'baseline-thread', timeout_seconds: 5, pollMs: 10 });
+    assert.equal(r.reply, 'only the new answer');
+    assert.equal(tab.sends.length, 2);
+    assert.ok(tab.sends[1] - tab.sends[0] >= 900, `resent ${tab.sends[1] - tab.sends[0]}ms later; the 429 set a >=1000ms gap`);
+    assert.ok(!tab.received.includes('reload_tab'));
+  } finally {
+    tab.ws.close();
+  }
+});
+
+test('a continuation whose baseline stays unreadable fails truthfully after one retry, never polling for a reply', async () => {
+  const tab = noBaselineTab('no-baseline-twice', { failures: 99 });
+  await tab.open();
+  try {
+    const err = await askChatgpt({ text: 'round two', thread_id: 'baseline-thread', timeout_seconds: 5, pollMs: 10 }).then(() => null, (e) => e);
+    assert.ok(err, 'expected a failure');
+    assert.match(err.message, /retried once after the rate-limit gap/);
+    assert.match(err.message, /Nothing was typed or sent/);
+    assert.equal(tab.sends.length, 2);
+    assert.ok(!tab.received.includes('get_reply'));
+  } finally {
+    tab.ws.close();
+  }
+});
+
+test('each tab\'s running extension version is visible next to the version on disk', async () => {
+  const ws = new WebSocket(`${wsUrl}&tab=version-tab-0001&v=0.0.1-test`);
+  await new Promise((resolve) => ws.on('open', resolve));
+  try {
+    await new Promise((r) => setTimeout(r, 50));
+    const health = await (await fetch(`${baseUrl}/health`)).json();
+    assert.ok(health.extension_versions_running.includes('0.0.1-test'), JSON.stringify(health));
+    assert.notEqual(health.extension_version, '0.0.1-test');
+  } finally {
+    ws.close();
   }
 });
