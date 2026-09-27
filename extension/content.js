@@ -693,6 +693,11 @@ const AGENT_TAB = (() => {
 // that toggle, the content script never runs there at all and this is moot.
 const INCOGNITO = Boolean(chrome.extension && chrome.extension.inIncognitoContext);
 
+// Unlike TAB_TOKEN, new for every page load: lets the broker tell a reloaded
+// page from the one it replaced (both report the same tab and thread id).
+const PAGE_ID = crypto.randomUUID();
+const PAGE_STARTED_AT = Date.now();
+
 function showAgentTabBadge() {
   if (!AGENT_TAB || document.getElementById("ccm-agent-badge")) return;
   const badge = document.createElement("div");
@@ -738,28 +743,44 @@ async function sendPrompt(text) {
   refuseWhileArchiving("sending a prompt");
   const body = String(text || "");
   if (!body.trim()) throw new Error("text is required.");
+  // Failing here is before anything is typed, fetched, or clicked, and the
+  // error says so (nothing_sent) along with which page instance it was, so
+  // the broker can safely reload this tab and send once more. The page facts
+  // are what the 2026-09-27 failures lacked: those pages had been loaded ~2
+  // minutes, so "the layout may have changed" was not the explanation.
   const composer = await waitFor(() => findFirst(COMPOSER_SELECTORS, visible), 15000)
-    .catch(() => { throw new Error(`no ChatGPT composer found (tried ${COMPOSER_SELECTORS.join(", ")}); the page layout may have changed.`); });
+    .catch(() => {
+      const banner = visibleRateLimitError();
+      const page = `page ${location.pathname} loaded ${Math.round((Date.now() - PAGE_STARTED_AT) / 1000)}s ago, `
+        + `${document.visibilityState}, ${extractMessagesFromDom().length} messages rendered, `
+        + `rate-limit banner ${banner ? "showing" : "not showing"}`;
+      throw Object.assign(
+        new Error(`no ChatGPT composer found (tried ${COMPOSER_SELECTORS.join(", ")}) within 15s (${page}); nothing was typed or sent.`),
+        { reply: { stage: "no_composer", nothing_sent: true, page_id: PAGE_ID, visible_error: banner } },
+      );
+    });
   const threadBefore = realThreadId();
   // Counted on the page, not through the conversation API: that endpoint is
   // rate-limited for the whole account (HTTP 429) whenever archiving has run.
   const domBefore = extractMessagesFromDom().length;
-  // For a continued conversation the DOM may be virtualized, so its mounted
-  // message count is not a safe boundary for extracting only the new reply.
-  // One authoritative pre-send read gives getReply the exact full-tree count.
-  // Fall back to the DOM count if the private endpoint is unavailable or
-  // temporarily rate-limited; sending the prompt must not depend on capture.
-  // If that read fails, the count is unknown (null), never the DOM count: a
-  // hidden tab can mount 0 messages, and a 0 baseline on a continued thread
-  // made every earlier answer part of "the reply". getReply then locates our
-  // turn by the prompt text instead (lib/api-capture.js replyFromTree).
+  // For a continued conversation the DOM may be virtualized (a hidden tab
+  // mounts 0 messages), so only the conversation tree's message count marks
+  // where our reply starts. Without it there is no safe boundary: a 0
+  // baseline returned every earlier answer as "the reply" (2026-09-27,
+  // extension 0.7.2), and locating our turn by prompt text cannot tell it
+  // from an earlier turn of a templated prompt (the audit's prompts share
+  // 117+ leading characters). So a continuation is not sent without it; the
+  // error says nothing was sent, and the broker retries once after its
+  // rate-limit gap (server/index.js askChatgpt).
   let messagesBefore = domBefore;
   if (threadBefore) {
     try {
       messagesBefore = linearizeMapping(await fetchConversationTree(threadBefore)).length;
     } catch (err) {
-      messagesBefore = null;
-      await log("warn", "Could not read the pre-send conversation count; the reply will be located by the prompt text", err);
+      throw Object.assign(
+        new Error(`could not read conversation ${threadBefore} before sending (${err.message}), so its reply could not be told apart from earlier ones; nothing was typed or sent.`),
+        { reply: { stage: "no_baseline", nothing_sent: true, page_id: PAGE_ID, api_status: err.status ?? null, api_retry_after_ms: err.retryAfterMs ?? null } },
+      );
     }
   }
   // Right after a navigation the composer can be on the page before its editor
@@ -1080,7 +1101,7 @@ async function handleCommand(msg) {
     const page = await listConversationsPage({ offset: 0, limit });
     return { chats: page.items.map((c) => ({ id: c.id, title: c.title || "", update_time: c.update_time ?? null })), total: page.total ?? null };
   }
-  if (msg.action === "get_tab") return { tab: TAB_TOKEN, agent: AGENT_TAB, busy: bulkArchiving, thread_id: currentThreadId(), account: tabIdentity };
+  if (msg.action === "get_tab") return { tab: TAB_TOKEN, page_id: PAGE_ID, agent: AGENT_TAB, busy: bulkArchiving, thread_id: currentThreadId(), account: tabIdentity };
   if (msg.action === "list_project_chats") {
     const perProject = Math.min(Math.max(Number(msg.per_project) || 20, 1), 100);
     return { projects: await listProjectChats({ perProject }) };
@@ -1256,6 +1277,9 @@ async function connect() {
   url.searchParams.set("token", cfg.token || DEFAULTS.token);
   url.searchParams.set("tab", TAB_TOKEN);
   if (AGENT_TAB) url.searchParams.set("agent", "1");
+  // Lets the broker see which extension version each tab is really running
+  // (a merged change only runs once Chrome has reloaded the extension).
+  try { url.searchParams.set("v", chrome.runtime.getManifest().version); } catch {}
   socket = new WebSocket(url.toString());
   socket.onopen = () => {
     setStatus({ connected: true });
@@ -1298,7 +1322,7 @@ async function connect() {
         socket.close();
       }
     } catch (err) {
-      socket.send(JSON.stringify({ type: "command_result", id: msg.id, ok: false, ...requestContext, error: err.message }));
+      socket.send(JSON.stringify({ type: "command_result", id: msg.id, ok: false, ...requestContext, ...(err.reply || {}), error: err.message }));
       await log("error", `command ${msg.action} failed`, err);
     }
   };

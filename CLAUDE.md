@@ -35,16 +35,23 @@ straight in anything you write about this repo.
   `data/logs/server.log`. A restart drops any in-flight `ask_chatgpt`, so first wait until
   `data/observations/request-timing.jsonl` shows no `get_reply`/`send_prompt` for ~45s (an ask
   waiting on a reply logs an API-checked `get_reply` about every 10s).
-- An extension change reaches the browser **without Brian**, as long as you **bump `version` in
+- An extension change is meant to reach the browser **without Brian**, as long as you **bump `version` in
   `extension/manifest.json`** in the same change: the broker's `/health` reports the on-disk version,
   and `extension/background.js` checks it every minute, calls `chrome.runtime.reload()` when it
   differs, and on reload injects the new content script into every open chatgpt.com tab (Chrome
   otherwise leaves open tabs on old code until refreshed). The broker closes a tab's older socket
   (code 4001) when the same tab reconnects, so superseded code left in the page cannot act on
-  commands twice. Without a version bump nothing reloads. Verify a change landed with a real call
-  (e.g. `list_chatgpt_connections`), not by trusting the bump. The one exception is the first
-  install into a new browser/profile (Load unpacked + token), which only Brian can do; after that,
-  no refreshes.
+  commands twice. Without a version bump nothing reloads. **This auto-reload has failed at least
+  once:** 0.7.3 sat on disk for over an hour on 2026-09-27 while the tabs kept running 0.7.2 (its
+  fingerprint: reply-check API reads every ~10s through HTTP 429 streaks, which 0.7.3 backs off to
+  20s and more). The cause is not known yet; the service worker's console (chrome://extensions,
+  "service worker" link) was not inspected. So verify that a change landed: from 0.7.4 on, each tab
+  reports its running version, `GET /health` lists `extension_versions_running` next to the on-disk
+  `extension_version` (a broker-local check that costs no ChatGPT request), and the broker log warns
+  when a tab connects with a version that differs from the one on disk. If the new version isn't
+  running, Brian has to reload the extension by hand (chrome://extensions, reload "ChatGPT
+  Conversation Manager Bridge"). The first install into a new browser/profile (Load unpacked +
+  token) also needs Brian.
 - There's also a supervised Windows Task Scheduler launcher for this same broker
   (`remote-mcp/deploy/windows/chatgpt-bridge.ps1`, installed as task "ChatGPT Bridge (\<user\>)",
   restart-on-failure, "At logon" trigger) — an alternative to manually running `scripts/run-server.sh`.

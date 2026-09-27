@@ -154,7 +154,7 @@ function appendDomActivity(event) {
 
 function isRateLimitSignal(err, result) {
   if (result?.visible_error === 'too_many_requests' || result?.api_status === 429) return true;
-  if (err?.api_status === 429) return true;
+  if (err?.api_status === 429 || err?.visible_error === 'too_many_requests') return true;
   return RATE_LIMIT_TEXT.test(String(err?.message || result?.error || ''));
 }
 function retryAfterMsOf(err, result) {
@@ -239,7 +239,8 @@ wss.on("connection", (ws, req) => {
     const params = new URL(req.url, "http://localhost").searchParams;
     ws.tabToken = params.get("tab") || null;
     ws.agentTab = params.get("agent") === "1";
-  } catch { ws.tabToken = null; ws.agentTab = false; }
+    ws.extensionVersion = params.get("v") || null;
+  } catch { ws.tabToken = null; ws.agentTab = false; ws.extensionVersion = null; }
   // A tab keeps its token across reloads, so a new socket carrying a token that
   // is already connected means the old one belongs to superseded code (an
   // extension update leaves the previous content script alive in the page with
@@ -257,6 +258,12 @@ wss.on("connection", (ws, req) => {
   }
   extensionSockets.add(ws);
   logInfo(`[broker] extension connected (${extensionSockets.size} total)`);
+  // Extension fixes only run once Chrome reloads the extension; 0.7.3 sat on
+  // disk for over an hour (2026-09-27) while the tabs kept running 0.7.2.
+  const onDisk = extensionVersionOnDisk();
+  if (ws.extensionVersion !== onDisk) {
+    logWarn(`[broker] tab ${ws.tabToken?.slice(0, 8) ?? '?'} runs extension ${ws.extensionVersion || 'older than 0.7.4 (unreported)'} but ${onDisk} is on disk; its fixes are not live until Chrome reloads the extension (chrome://extensions, reload "ChatGPT Conversation Manager Bridge").`);
+  }
   ws.send(JSON.stringify({ type: "hello", message: "connected" }));
   ws.on("message", (buf) => {
     let msg; try { msg = JSON.parse(buf.toString()); } catch { return; }
@@ -339,6 +346,7 @@ function listConnections() {
   return [...extensionSockets].filter((ws) => ws.readyState === ws.OPEN).map((ws) => ({
     tab: ws.tabToken ? ws.tabToken.slice(0, 8) : null, agent: Boolean(ws.agentTab),
     account: accountKey(ws.account), account_name: ws.account?.name || null, plan: ws.account?.plan || null,
+    extension_version: ws.extensionVersion || null,
   }));
 }
 // One open socket per distinct account (unknown-account tabs grouped together),
@@ -408,6 +416,10 @@ function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { singl
         lastError = Object.assign(new Error(msg.error || "browser action failed"), {
           tab: msg.tab, agent: msg.agent, incognito: msg.incognito,
           api_status: msg.api_status, api_retry_after_ms: msg.api_retry_after_ms,
+          // send_prompt's pre-typing failures (content.js sendPrompt): which
+          // step failed, that nothing was typed, which page instance it was,
+          // and whether ChatGPT's rate-limit banner was showing.
+          stage: msg.stage, nothing_sent: msg.nothing_sent, page_id: msg.page_id, visible_error: msg.visible_error,
         });
         remaining--;
         if (remaining <= 0) {
@@ -450,15 +462,19 @@ function broadcastReloadTab() {
 // request and is paced unconditionally.
 const ALWAYS_REAL_ACTIONS = new Set(['send_prompt', 'list_recent_chats', 'capture_current_chat']);
 
+// Waits out the account's current pacer gap without recording a request.
+async function waitForPacerGap(account) {
+  const entry = getPacerEntry(normalizePacerKey(account));
+  const waitMs = entry.pacer.spacingMs - (Date.now() - entry.lastRequestAt);
+  if (waitMs > 0) await sleep(waitMs);
+}
+
 async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts = {}) {
   const tracked = BACKEND_TOUCHING_ACTIONS.has(command.action);
   const alwaysReal = ALWAYS_REAL_ACTIONS.has(command.action);
   const pacerKey = normalizePacerKey(opts.account);
   const entry = getPacerEntry(pacerKey);
-  if (alwaysReal) {
-    const waitMs = entry.pacer.spacingMs - (Date.now() - entry.lastRequestAt);
-    if (waitMs > 0) await sleep(waitMs);
-  }
+  if (alwaysReal) await waitForPacerGap(opts.account);
   if (tracked) agentRequestsInFlight++;
   const startedMs = Date.now();
   try {
@@ -761,6 +777,14 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       if (thread_title) resolvedThreadId = await resolveThreadTitle(thread_title, account);
       const { tab, thread_id: current } = await pickIdleTab({ openWaitMs, forceNew: fresh_tab, account });
       claimedTab = tab;
+      const onTargetPage = (i) => (resolvedThreadId ? i.thread_id === resolvedThreadId : !i.thread_id);
+      // Loading a conversation page makes ChatGPT fetch that conversation --
+      // a real request on the account -- so the pacer's gap is waited out
+      // BEFORE navigating, not between the page load and the send. Both
+      // 2026-09-27 "no composer" failures navigated 10-13s after an HTTP 429
+      // and then sat ~2 min in the pacer on a page that never showed a
+      // composer. The send below then needs no second wait.
+      if (current !== resolvedThreadId) await waitForPacerGap(account);
       if (resolvedThreadId && current !== resolvedThreadId) {
         await dispatchToExtension({ action: "navigate_to_thread", thread_id: resolvedThreadId }, COMMAND_TIMEOUT_MS, { tab });
         await waitForTab(tab, (i) => i.thread_id === resolvedThreadId, 20000, `opened conversation ${resolvedThreadId}`);
@@ -768,13 +792,56 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         await dispatchToExtension({ action: "navigate_home" }, COMMAND_TIMEOUT_MS, { tab });
         await waitForTab(tab, (i) => !i.thread_id, 20000, "opened a new chat");
       }
+      const sendPrompt = () => dispatchToExtension(
+        { action: "send_prompt", text: body },
+        sendTimeoutMs ?? promptDispatchTimeoutMs(timeout_seconds),
+        { tab, account },
+      );
       let sent;
       try {
-        sent = await dispatchToExtension(
-          { action: "send_prompt", text: body },
-          sendTimeoutMs ?? promptDispatchTimeoutMs(timeout_seconds),
-          { tab, account },
-        );
+        try {
+          sent = await sendPrompt();
+        } catch (err) {
+          // The composer never appeared on this page (observed 2026-09-27 on
+          // continuation pages that had been loaded for ~2 minutes; they do
+          // not recover by themselves). The extension throws that before
+          // typing anything and says so (nothing_sent, content.js
+          // sendPrompt), so one reload of that tab and one more send cannot
+          // duplicate the prompt. Only that explicit, per-page report is
+          // retried -- never a timeout or a failure after typing began -- and
+          // not when ChatGPT's rate-limit banner is up (a reload would be one
+          // more request into the throttle).
+          //
+          // A continuation whose pre-send conversation read failed (usually
+          // HTTP 429) is refused the same way (stage no_baseline): without
+          // that count the reply cannot be told apart from earlier turns. It
+          // is retried once after the pacer gap, which that 429 has widened;
+          // no reload is needed.
+          const recoverable = err.nothing_sent === true && err.page_id && (err.stage === 'no_composer' || err.stage === 'no_baseline');
+          if (!recoverable) throw err;
+          const nothingSent = 'Nothing was typed or sent, so the ask can be retried safely later.';
+          if (err.stage === 'no_composer' && err.visible_error === 'too_many_requests') {
+            throw new Error(`${err.message} ChatGPT is showing its rate-limit banner ("making requests too quickly") in that tab, so it was not reloaded. ${nothingSent}`);
+          }
+          await waitForPacerGap(account);
+          if (err.stage === 'no_composer') {
+            appendRequestTiming({ action: 'reload_for_composer', ok: true, tab: tab.slice(0, 8), page_id: err.page_id, ...recordAndCountWindow(Date.now()) });
+            // Not awaited: the page may unload before its reply crosses the
+            // socket. The new page instance reporting in is the real signal.
+            dispatchToExtension({ action: "reload_tab" }, 5000, { tab }).catch(() => {});
+            await waitForTab(tab, (i) => Boolean(i.page_id) && i.page_id !== err.page_id && onTargetPage(i), 20000, "reloaded the conversation page")
+              .catch((reloadErr) => { throw new Error(`${err.message} Reloading the tab to recover failed: ${reloadErr.message} ${nothingSent}`); });
+          }
+          try {
+            sent = await sendPrompt();
+          } catch (retryErr) {
+            if (retryErr.nothing_sent === true && (retryErr.stage === 'no_composer' || retryErr.stage === 'no_baseline')) {
+              const tried = err.stage === 'no_composer' ? 'reloaded the tab once' : 'retried once after the rate-limit gap';
+              throw new Error(`${retryErr.message} The broker ${tried} and it failed again. ${nothingSent}`);
+            }
+            throw retryErr;
+          }
+        }
       } catch (err) {
         // Submitting the first message can navigate the new-chat page and tear
         // down its content script before the command result crosses the socket.
@@ -853,7 +920,10 @@ app.post("/api/ask", async (req, res) => {
   catch (err) { res.status(503).json({ error: err.message }); }
 });
 
-app.get("/health", (_req, res) => res.json({ ok: true, extension_connections: extensionSockets.size, archive_dir: ARCHIVE_DIR, extension_version: extensionVersionOnDisk() }));
+app.get("/health", (_req, res) => res.json({ ok: true, extension_connections: extensionSockets.size, archive_dir: ARCHIVE_DIR, extension_version: extensionVersionOnDisk(),
+  // What the connected tabs actually run (null: older than 0.7.4). Differs
+  // from extension_version until Chrome reloads the extension.
+  extension_versions_running: [...new Set([...extensionSockets].filter((ws) => ws.readyState === ws.OPEN).map((ws) => ws.extensionVersion || null))] }));
 app.post('/api/capture', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   try { const result = await dispatchToExtension({ action: 'capture_current_chat' }); res.json(result); }
@@ -1041,7 +1111,7 @@ function createMcpServer() {
 
   mcp.tool('list_chatgpt_connections', 'List every ChatGPT browser tab currently connected to the bridge, with the ChatGPT account each is signed into and whether it is an agent tab. Use it to see which accounts you can read from or send to. A chat started anywhere (another browser, the desktop app, a phone) is readable through any connected tab signed into the same account.', {}, async () => {
     const rows = listConnections();
-    const text = rows.length ? rows.map((r) => `tab ${r.tab}  ${r.agent ? 'agent' : 'human'}  account ${r.account || '(not reported yet)'}${r.plan ? `  [${r.plan}]` : ''}`).join('\n') : 'No ChatGPT tabs are connected. Open https://chatgpt.com in a browser profile with the bridge extension installed.';
+    const text = rows.length ? rows.map((r) => `tab ${r.tab}  ${r.agent ? 'agent' : 'human'}  account ${r.account || '(not reported yet)'}${r.plan ? `  [${r.plan}]` : ''}  extension ${r.extension_version || 'older than 0.7.4'}${r.extension_version === extensionVersionOnDisk() ? '' : ` (on disk: ${extensionVersionOnDisk()}; not reloaded yet)`}`).join('\n') : 'No ChatGPT tabs are connected. Open https://chatgpt.com in a browser profile with the bridge extension installed.';
     return { content: [{ type: 'text', text }] };
   });
 
