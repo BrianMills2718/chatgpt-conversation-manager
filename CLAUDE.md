@@ -36,22 +36,34 @@ straight in anything you write about this repo.
   `data/observations/request-timing.jsonl` shows no `get_reply`/`send_prompt` for ~45s (an ask
   waiting on a reply logs an API-checked `get_reply` about every 10s).
 - An extension change is meant to reach the browser **without Brian**, as long as you **bump `version` in
-  `extension/manifest.json`** in the same change: the broker's `/health` reports the on-disk version,
-  and `extension/background.js` checks it every minute, calls `chrome.runtime.reload()` when it
-  differs, and on reload injects the new content script into every open chatgpt.com tab (Chrome
-  otherwise leaves open tabs on old code until refreshed). The broker closes a tab's older socket
-  (code 4001) when the same tab reconnects, so superseded code left in the page cannot act on
-  commands twice. Without a version bump nothing reloads. **This auto-reload has failed at least
-  once:** 0.7.3 sat on disk for over an hour on 2026-09-27 while the tabs kept running 0.7.2 (its
-  fingerprint: reply-check API reads every ~10s through HTTP 429 streaks, which 0.7.3 backs off to
-  20s and more). The cause is not known yet; the service worker's console (chrome://extensions,
-  "service worker" link) was not inspected. So verify that a change landed: from 0.7.4 on, each tab
-  reports its running version, `GET /health` lists `extension_versions_running` next to the on-disk
-  `extension_version` (a broker-local check that costs no ChatGPT request), and the broker log warns
-  when a tab connects with a version that differs from the one on disk. If the new version isn't
-  running, Brian has to reload the extension by hand (chrome://extensions, reload "ChatGPT
-  Conversation Manager Bridge"). The first install into a new browser/profile (Load unpacked +
-  token) also needs Brian.
+  `extension/manifest.json`** in the same change. Without a version bump nothing reloads. How it works:
+  the broker's `/health` reports the on-disk version, and the extension's background service worker
+  (`extension/background.js`) compares it with its own version. If they differ, it calls
+  `chrome.runtime.reload()`, and on reload injects the new content script into every open chatgpt.com
+  tab (Chrome otherwise leaves open tabs on old code until refreshed). The worker checks on four
+  triggers: a `chrome.alarms` alarm every minute (created only when missing), browser startup,
+  install/update, and a ping that each ChatGPT tab sends when it connects to the broker (0.7.6+).
+  It does not reload again within 5 minutes of its own reload, so a mismatch a reload cannot fix
+  does not loop. The broker closes a tab's older socket (code 4001) when the same tab reconnects,
+  so superseded code left in the page cannot act on commands twice.
+  - **This only works while the worker exists, and it has been lost once.** Brian's Chrome profile
+    on disk shows what happened. The first real self-reload (2026-09-26 21:21Z) left the extension
+    loaded but with **no registered service worker**: Chrome deleted the old registration, never
+    wrote a new one, and cleared the alarm. So 0.7.2 through 0.7.5 each sat on disk unloaded. Why
+    Chrome skipped the registration is not known. The same code self-reloads correctly in a
+    throwaway profile of Brian's Chrome build from the same `\\wsl.localhost` path. No extension
+    code can recover from a missing worker; a manual reload of the extension is the known fix.
+  - **A fixed auto-reloader cannot install itself.** When the running copy's worker is gone,
+    or the running copy predates a fix to `background.js`, Brian has to reload the extension by hand
+    once: chrome://extensions, reload "ChatGPT Conversation Manager Bridge". That applied to 0.7.6.
+    The first install into a new browser/profile (Load unpacked + token) also needs Brian.
+  - **Verify that a change landed; don't assume.** `GET /health` (broker-local, costs no ChatGPT
+    request) lists `extension_versions_running` next to the on-disk `extension_version`, and from
+    0.7.6 `extension_background_ok` (`false` = a tab's ping found no worker, so nothing will
+    auto-reload; `null` = tab older than 0.7.6). The broker log warns when a tab connects with a
+    version different from disk, and when a tab reports no worker. The extension's Errors panel in
+    chrome://extensions was not inspected during the 2026-09-26 loss; check it before the manual
+    reload if it happens again, because it is where Chrome's reason would be.
 - There's also a supervised Windows Task Scheduler launcher for this same broker
   (`remote-mcp/deploy/windows/chatgpt-bridge.ps1`, installed as task "ChatGPT Bridge (\<user\>)",
   restart-on-failure, "At logon" trigger) — an alternative to manually running `scripts/run-server.sh`.

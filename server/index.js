@@ -272,6 +272,14 @@ wss.on("connection", (ws, req) => {
       logInfo(`[broker] tab ${ws.tabToken?.slice(0, 8) ?? '?'} is signed into ${ws.account?.email || ws.account?.user_id || 'no readable account'}`);
       return;
     }
+    if (msg?.type === 'background_status') {
+      // The tab pinged the extension's background worker (from 0.7.6). Without
+      // a worker nothing reloads the extension onto a new on-disk version; that
+      // went unnoticed 2026-09-26/27 while 0.7.2-0.7.5 sat on disk.
+      ws.backgroundOk = msg.ok === true;
+      if (!ws.backgroundOk) logWarn(`[broker] tab ${ws.tabToken?.slice(0, 8) ?? '?'}: the extension's background worker did not answer (${msg.error || 'no reason given'}), so the extension cannot reload itself onto new versions. Reload it by hand: chrome://extensions, reload "ChatGPT Conversation Manager Bridge".`);
+      return;
+    }
     if (msg?.type === 'dom_activity') {
       // Purely local signal the extension already computed from the DOM
       // (thread id, message-count/role/length key, whether a capture was
@@ -923,7 +931,11 @@ app.post("/api/ask", async (req, res) => {
 app.get("/health", (_req, res) => res.json({ ok: true, extension_connections: extensionSockets.size, archive_dir: ARCHIVE_DIR, extension_version: extensionVersionOnDisk(),
   // What the connected tabs actually run (null: older than 0.7.4). Differs
   // from extension_version until Chrome reloads the extension.
-  extension_versions_running: [...new Set([...extensionSockets].filter((ws) => ws.readyState === ws.OPEN).map((ws) => ws.extensionVersion || null))] }));
+  extension_versions_running: [...new Set([...extensionSockets].filter((ws) => ws.readyState === ws.OPEN).map((ws) => ws.extensionVersion || null))],
+  // Whether each tab's ping reached the extension's background worker, the
+  // only thing that can reload the extension (false: it cannot auto-update
+  // until reloaded by hand; null: not reported, tab older than 0.7.6).
+  extension_background_ok: [...new Set([...extensionSockets].filter((ws) => ws.readyState === ws.OPEN).map((ws) => ws.backgroundOk ?? null))] }));
 app.post('/api/capture', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   try { const result = await dispatchToExtension({ action: 'capture_current_chat' }); res.json(result); }

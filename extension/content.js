@@ -9,6 +9,7 @@ const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
 const { sendEvidence, sendEvidenceFromCounts } = await import(chrome.runtime.getURL("lib/send-confirm.js"));
 const { waitFor: waitForLib } = await import(chrome.runtime.getURL("lib/wait-for.js"));
+const { pingBackground } = await import(chrome.runtime.getURL("lib/background-ping.js"));
 const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats, nextReplyCheckGapMs, REPLY_CHECK_MIN_GAP_MS } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
@@ -1255,6 +1256,15 @@ async function reportIdentity() {
   try { socket?.send(JSON.stringify({ type: "identity", account: tabIdentity })); } catch {}
 }
 
+// Wakes the background worker so it checks for a new extension version now
+// (not only on its minute alarm), and tells the broker whether it answered:
+// without a worker the extension cannot reload itself, and nothing else notices.
+async function reportBackground() {
+  const status = await pingBackground((msg) => chrome.runtime.sendMessage(msg));
+  if (!status.ok && handlePossibleContextInvalidation(status.error)) return;
+  try { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "background_status", ...status })); } catch {}
+}
+
 async function connect() {
   if (contextInvalidated) return;
   clearTimeout(reconnectTimer);
@@ -1284,6 +1294,7 @@ async function connect() {
     log("info", "broker connected");
     scheduleArchive();
     reportIdentity();
+    reportBackground();
   };
   socket.onmessage = async (event) => {
     let msg;
