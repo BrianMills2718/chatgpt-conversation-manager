@@ -8,6 +8,7 @@
 const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import(chrome.runtime.getURL("lib/title.js"));
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
 const { sendEvidence, sendEvidenceFromCounts } = await import(chrome.runtime.getURL("lib/send-confirm.js"));
+const { waitFor: waitForLib } = await import(chrome.runtime.getURL("lib/wait-for.js"));
 const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats, nextReplyCheckGapMs, REPLY_CHECK_MIN_GAP_MS } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
@@ -203,14 +204,10 @@ function visible(el) {
 function normalizedText(el) {
   return (el?.innerText || el?.textContent || "").replace(/\s+/g, " ").trim();
 }
-async function waitFor(predicate, timeout = 5000, interval = 80) {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    const value = predicate();
-    if (value) return value;
-    await sleep(interval);
-  }
-  throw new Error("Timed out waiting for ChatGPT UI.");
+// lib/wait-for.js: also checks once after the deadline, since a hidden tab's
+// throttled timer can overshoot the whole window in one sleep.
+function waitFor(predicate, timeout = 5000, interval = 80) {
+  return waitForLib(predicate, timeout, interval);
 }
 
 // apiTitle (from the same-origin conversation-tree response, when available) is
@@ -749,11 +746,12 @@ async function sendPrompt(text) {
   // are what the 2026-09-27 failures lacked: those pages had been loaded ~2
   // minutes, so "the layout may have changed" was not the explanation.
   const composer = await waitFor(() => findFirst(COMPOSER_SELECTORS, visible), 15000)
-    .catch(() => {
+    .catch((waitErr) => {
       const banner = visibleRateLimitError();
       const page = `page ${location.pathname} loaded ${Math.round((Date.now() - PAGE_STARTED_AT) / 1000)}s ago, `
         + `${document.visibilityState}, ${extractMessagesFromDom().length} messages rendered, `
-        + `rate-limit banner ${banner ? "showing" : "not showing"}`;
+        + `rate-limit banner ${banner ? "showing" : "not showing"}, `
+        + `checked ${waitErr.checks ?? "?"} times over ${Math.round((waitErr.waited_ms ?? 0) / 1000)}s`;
       throw Object.assign(
         new Error(`no ChatGPT composer found (tried ${COMPOSER_SELECTORS.join(", ")}) within 15s (${page}); nothing was typed or sent.`),
         { reply: { stage: "no_composer", nothing_sent: true, page_id: PAGE_ID, visible_error: banner } },

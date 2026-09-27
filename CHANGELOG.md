@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.7.5 (2026-09-27)
+
+### Fixed: the composer wait could give up without looking at the page it waited for
+
+- A 02:16:02 no-composer failure took 73.7s against a 15s window, and earlier ones took 49-51s. The wait loop (`while (elapsed < timeout) { check; sleep }`) had no check after its last sleep. In a hidden tab Chrome can throttle timers to about one wake-up a minute, so one sleep overshot the whole window: the loop checked once at t=0, woke about 60s later, and reported "no composer found" without looking again. `waitFor` now lives in `extension/lib/wait-for.js` (unit tested with a throttled fake clock), always checks once after the deadline, and reports how many checks ran. The no-composer error includes that count, so a future failure shows whether throttling was involved.
+- This does not explain the failures that took 16-24s (about 15 checks at ~1s each with no composer). Those are still unexplained, and v0.7.4's diagnostics and one-reload recovery remain the answer for them.
+- Extension manifest 0.7.4 -> 0.7.5.
+
 ## v0.7.4 (2026-09-27)
 
 ### Fixed — continuation asks failing with "no ChatGPT composer found"
