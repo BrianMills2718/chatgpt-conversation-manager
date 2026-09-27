@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations, captureWithRecovery, AdaptivePacer, parseRetryAfter, replyFromTree, resolveFileDownloadUrl } from '../extension/lib/api-capture.js';
+import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations, captureWithRecovery, AdaptivePacer, parseRetryAfter, replyFromTree, resolveFileDownloadUrl, nextReplyCheckGapMs } from '../extension/lib/api-capture.js';
 
 test('parseRemoteTime accepts epoch seconds, epoch ms, numeric strings and ISO strings', () => {
   assert.equal(parseRemoteTime(1757900000.5), 1757900000500);
@@ -447,4 +447,43 @@ test('parseProjectSidebar reads project chats and fails loudly on an unrecognize
   assert.deepEqual(projects[0].chats[0], { id: 'c1', title: 'Tabs', update_time: '2026-09-24T01:00:00Z', project_id: 'g-p-1', project_name: 'DoDAF' });
   assert.throws(() => parseProjectSidebar({ projects: [] }), /no items array/);
   assert.throws(() => parseProjectSidebar({ items: [{ conversations: { items: [] } }] }), /no project id/);
+});
+
+// 2026-09-26/27: continued threads in a hidden tab can mount 0 messages, so
+// when the pre-send tree read failed (429) the old DOM-count fallback made
+// the baseline 0 and every earlier answer in the thread part of "the reply".
+test('replyFromTree with an unknown baseline returns only the answer after our own prompt', () => {
+  const u1 = userMsg('u1', 'earlier question', 1).message;
+  const a1 = { ...assistantMsg('a1', 'earlier answer', 2).message, status: 'finished_successfully' };
+  const u2 = userMsg('u2', 'our   new question about X', 3).message;
+  const a2 = { ...assistantMsg('a2', 'the new answer', 4).message, status: 'finished_successfully', end_turn: true };
+  const r = replyFromTree(treeOf([{ id: 'u1', message: u1 }, { id: 'a1', message: a1 }, { id: 'u2', message: u2 }, { id: 'a2', message: a2 }]), null, { expected: 'our new question about X' });
+  assert.equal(r.done, true);
+  assert.equal(r.reply, 'the new answer');
+  assert.equal(r.end_turn, true);
+});
+
+test('replyFromTree with an unknown baseline does not return the previous answer before our turn is saved', () => {
+  const u1 = userMsg('u1', 'earlier question', 1).message;
+  const a1 = { ...assistantMsg('a1', 'earlier answer', 2).message, status: 'finished_successfully' };
+  const r = replyFromTree(treeOf([{ id: 'u1', message: u1 }, { id: 'a1', message: a1 }]), null, { expected: 'our new question' });
+  assert.equal(r.done, false);
+  assert.equal(r.status, 'prompt_not_in_tree');
+});
+
+test('replyFromTree reports end_turn false when the backend did not mark the turn over', () => {
+  const a1 = { ...assistantMsg('a1', 'text', 1).message, status: 'finished_successfully' };
+  const r = replyFromTree(treeOf([{ id: 'a1', message: a1 }]), 0);
+  assert.equal(r.done, true);
+  assert.equal(r.end_turn, false);
+});
+
+test('nextReplyCheckGapMs backs off only on 429 and honours Retry-After', () => {
+  assert.equal(nextReplyCheckGapMs(10000, { status: 429 }), 20000);
+  assert.equal(nextReplyCheckGapMs(40000, { status: 429 }), 60000);
+  assert.equal(nextReplyCheckGapMs(60000, { status: 429 }), 60000);
+  assert.equal(nextReplyCheckGapMs(10000, { status: 429, retryAfterMs: 90000 }), 90000);
+  assert.equal(nextReplyCheckGapMs(60000, { status: 200 }), 10000);
+  assert.equal(nextReplyCheckGapMs(60000, { status: null }), 10000);
+  assert.equal(nextReplyCheckGapMs(60000, { status: 500 }), 10000);
 });
