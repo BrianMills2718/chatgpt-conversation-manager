@@ -1276,13 +1276,22 @@ async function handleCommand(msg) {
     // find why ChatGPT stores some prompts markdown-escaped.
     const c = findFirst(COMPOSER_SELECTORS, visible);
     if (!c) throw new Error("no composer");
-    setComposerText(c.el, String(msg.text || ""));
+    if (msg.mode === "paste") {
+      setComposerText(c.el, "");
+      c.el.focus();
+      const dt = new DataTransfer();
+      dt.setData("text/plain", String(msg.text || ""));
+      c.el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    } else {
+      setComposerText(c.el, String(msg.text || ""));
+    }
     await sleep(Number(msg.wait_ms) || 1500);
     const el = findFirst(COMPOSER_SELECTORS, visible)?.el || c.el;
     const counts = {};
     for (const sel of ["a", "code", "pre", "strong", "em", "h1", "h2", "h3", "ul", "ol", "li", "p", "br", "span", "blockquote", "hr"]) counts[sel] = el.querySelectorAll(sel).length;
     const markSamples = [...el.querySelectorAll("a, code, pre, strong, em, h1, h2, h3, li")].slice(0, 8).map((n) => `${n.tagName}:${(n.textContent || "").slice(0, 40)}`);
-    const out = { tag: el.tagName, cls: String(el.className).slice(0, 120), selector: c.selector, counts, markSamples,
+    const attachments = [...document.querySelectorAll('form [data-testid*="attachment"], form [class*="attachment"], form [aria-label*="Remove file"], form [aria-label*="Remove"]')].length;
+    const out = { mode: msg.mode || "insertText", attachments, tag: el.tagName, cls: String(el.className).slice(0, 120), selector: c.selector, counts, markSamples,
       same_text: samePrompt(el.value ?? el.innerText ?? "", msg.text), html_head: el.innerHTML.slice(0, Number(msg.html_chars) || 800) };
     // What ChatGPT's editor serializes the content to: a synthetic copy event
     // with our own DataTransfer, which ProseMirror fills from its serializers.
