@@ -544,3 +544,43 @@ test('with no tab of the account connected, the error says to open the agent tab
     return true;
   });
 });
+
+test('a continuation page that stays empty because ChatGPT refused its conversation load waits out the account limit, then reloads', async () => {
+  let sends = 0, reloads = 0, pageId = 'pl-1';
+  const t = await goneTab('refused-load-tab', 'rl@example.com', (m, reply, tab) => {
+    if (m.action === 'get_tab') return reply({ ok: true, tab: 'refused-load-tab', agent: true, busy: false, thread_id: 'conv-rl', page_id: pageId, account: { email: 'rl@example.com' } });
+    if (m.action === 'send_prompt') {
+      sends++;
+      if (sends === 1) return reply({ ok: false, error: 'no ChatGPT composer found; nothing was typed or sent.', stage: 'no_composer', nothing_sent: true, page_id: pageId, rendered_messages: 0, conversation_fetch: { status: 429, attempts: 1 } });
+      return reply({ ok: true, thread_id: 'conv-rl', dom_before: 0, messages_before: null, send_confirmed: true });
+    }
+    if (m.action === 'reload_tab') { reloads++; pageId = 'pl-2'; return reply({ ok: true }); }
+    if (m.action === 'get_reply') return reply({ ok: true, done: true, source: 'api', end_turn: true, reply: 'loaded after the wait', thread_id: 'conv-rl' });
+    reply({ ok: false, error: `unhandled ${m.action}` });
+  });
+  try {
+    const r = await mod.askChatgpt({ text: 'continue after limit', thread_id: 'conv-rl', timeout_seconds: 120, pollMs: 20, account: 'rl@example.com' });
+    assert.equal(r.reply, 'loaded after the wait');
+    assert.equal(reloads, 1);
+    const w = fs.readFileSync(mod.REQUEST_TIMING_PATH, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.action === 'wait_for_conversation_load').at(-1);
+    assert.equal(w.conversation_fetch.status, 429);
+    assert.ok(w.wait_ms >= 1000);
+  } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
+});
+
+test('a refused conversation load with too little time left fails at once with sent=no and kind rate_limited', async () => {
+  const t = await goneTab('refused-short-tab', 'rs@example.com', (m, reply) => {
+    if (m.action === 'get_tab') return reply({ ok: true, tab: 'refused-short-tab', agent: true, busy: false, thread_id: 'conv-rs', page_id: 'ps', account: { email: 'rs@example.com' } });
+    if (m.action === 'send_prompt') return reply({ ok: false, error: 'no ChatGPT composer found; nothing was typed or sent.', stage: 'no_composer', nothing_sent: true, page_id: 'ps', rendered_messages: 0, conversation_fetch: { status: 429 } });
+    reply({ ok: false, error: `unhandled ${m.action}` });
+  });
+  try {
+    await assert.rejects(mod.askChatgpt({ text: 'short budget', thread_id: 'conv-rs', timeout_seconds: 30, pollMs: 20, account: 'rs@example.com' }), (err) => {
+      assert.match(err.message, /did not load this conversation for the page \(HTTP 429\)/);
+      assert.equal(err.sent, false);
+      return true;
+    });
+    const ev = fs.readFileSync(mod.BRIDGE_OBSERVATIONS_PATH, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).at(-1);
+    assert.equal(ev.failure_kind, 'rate_limited');
+  } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
+});
