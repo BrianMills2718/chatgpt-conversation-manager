@@ -246,3 +246,18 @@ non_gating_utility_review:
   account -- blocked on Brian; see "Need anything from human" in this
   session's closeout message. Every other acceptance check (C1, C2, C5) is
   done and verified.
+- **2026-09-29 update (share-readiness owner).**
+  - **Root cause of #27 and #28, fixed.** Bridge v0.8.0 to v0.8.2 (PRs #30 to #34, all merged and deployed; details in CHANGELOG):
+    - Every misattributed reply in the 2026-09-27/28 audit was a failed send's prompt left in the composer and then sent by the next ask.
+    - Most failed sends were very large prompts whose Send click ChatGPT drops.
+    - The bridge now retypes every prompt, verifies attribution against the exact prompt, and re-clicks only after checking ChatGPT's server.
+    - Every failure reports `sent=yes/no/unknown`.
+    - Asks are paced and logged under their tab's account.
+  - **Live checks, one account (therakorski), on 0.8.1:**
+    - a new chat with formatting;
+    - a continuation, logged under the tab's account;
+    - a 73k-character prompt in a hidden tab, with one prompt in the chat and the right reply.
+
+    The server-gated re-click path is covered by unit tests only.
+  - **Shared client bug found and fixed.** In `weekly-plans`, `chatgpt_dispatch_client.sent_thread_id` had matched only the pre-v0.7.2 wording "The message was sent". SentWithoutReply recovery therefore never fired from 2026-09-26 until weekly-plans PR #178 (merged `204bd73`), which reads the structured `sent`/`thread_id` fields.
+  - **C3/C4 still open.** A second account (brianmills2718@gmail.com) was being connected on 2026-09-29, but `list_chatgpt_connections` still showed only therakorski at 05:20Z. Once it appears, run `weekly-plans/scripts/verify_multi_account_dispatch.py`.
