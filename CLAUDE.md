@@ -68,7 +68,8 @@ Several sections below describe **Brian's own deployment**, not the product: the
     version different from disk, and when a tab reports no worker. The extension's Errors panel in
     chrome://extensions was not inspected during the 2026-09-26 loss; check it before the manual
     reload if it happens again, because it is where Chrome's reason would be.
-- There's also a supervised Windows Task Scheduler launcher for this same broker
+- **Only one supervisor may run the broker.** On 2026-09-29 the Windows task below relaunched the broker during a systemd restart gap. It then held the port with old code while systemd crash-looped on `EADDRINUSE`, and merged fixes silently did not take effect. That task is now **disabled**. After any restart, check `systemctl --user status chatgpt-bridge` shows `active (running)`, and that `ss -tlnp | grep 8787` shows systemd's main PID, before trusting that new code is live.
+- There's also a supervised Windows Task Scheduler launcher for this same broker (disabled 2026-09-29, see above)
   (`remote-mcp/deploy/windows/chatgpt-bridge.ps1`, installed as task "ChatGPT Bridge (\<user\>)",
   restart-on-failure, "At logon" trigger) — an alternative to manually running `scripts/run-server.sh`.
   Check `schtasks /query` (via `cmd.exe`) before assuming a manual restart is the only supervision in
