@@ -175,3 +175,25 @@ test('an unconfirmed new-chat send found server-side is followed to its reply', 
     assert.ok(gets.at(-1).exclude_threads.includes('conv-found'), 'no other ask may claim this conversation');
   } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
 });
+
+test('a new agent tab whose account arrives after it connects still paces and logs under that account', async () => {
+  const token = 'late-identity-tab';
+  const ws = new WebSocket(`${wsUrl}&tab=${token}&agent=1`);
+  sockets.push(ws);
+  await new Promise((r) => ws.on('open', r));
+  ws.on('message', (buf) => {
+    const m = JSON.parse(buf.toString());
+    if (m.type !== 'command') return;
+    const reply = (extra) => ws.send(JSON.stringify({ type: 'command_result', id: m.id, tab: token, agent: true, ...extra }));
+    // get_tab carries no account yet, like a tab that has not read its session.
+    if (m.action === 'get_tab') return reply({ ok: true, tab: token, agent: true, busy: false, thread_id: null, account: null });
+    if (m.action === 'send_prompt') return reply({ ok: true, thread_id: 'conv-late', dom_before: 0, messages_before: 0, send_confirmed: true });
+    if (m.action === 'get_reply') return reply({ ok: true, done: true, source: 'api', end_turn: true, reply: 'ok', thread_id: 'conv-late' });
+    reply({ ok: false, error: `unhandled ${m.action}` });
+  });
+  setTimeout(() => ws.send(JSON.stringify({ type: 'identity', account: { email: 'late@example.com' } })), 300);
+  try {
+    const r = await mod.askChatgpt({ text: 'late identity', timeout_seconds: 10, pollMs: 20 });
+    assert.equal(r.account, 'late@example.com');
+  } finally { ws.close(); await new Promise((r) => setTimeout(r, 50)); }
+});

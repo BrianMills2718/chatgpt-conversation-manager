@@ -681,6 +681,20 @@ let openAgentTab = async () => {
 };
 function setAgentTabOpener(fn) { openAgentTab = fn; }
 
+// The account a tab reports on connecting. A freshly opened tab reports it a
+// moment after it connects (content.js reportIdentity reads /api/auth/session),
+// so wait briefly for it: the 2026-09-29 live check showed a new agent tab's
+// first ask still logged account:null without this wait.
+async function accountOfTab(tab, waitMs = 5000) {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const ws = [...extensionSockets].find((w) => w.tabToken === tab && w.readyState === w.OPEN);
+    const key = accountKey(ws?.account);
+    if (key || Date.now() >= deadline) return key || null;
+    await sleep(200);
+  }
+}
+
 async function findIdleAgentTab(seen, excludeTokens = new Set(), account = null) {
   const tokens = [...new Set([...extensionSockets]
     .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab && !excludeTokens.has(ws.tabToken) && (!account || accountMatches(ws.account, account)))
@@ -804,7 +818,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       // Pace and log under the account the tab is actually signed into, even
       // when the caller named none (issue #28: every audit send was logged
       // account:null and shared the default pacer bucket).
-      if (!account && picked.account) account = picked.account;
+      if (!account) account = picked.account || await accountOfTab(tab);
       usedAccount = account;
       const onTargetPage = (i) => (resolvedThreadId ? i.thread_id === resolvedThreadId : !i.thread_id);
       // Loading a conversation page makes ChatGPT fetch that conversation --
