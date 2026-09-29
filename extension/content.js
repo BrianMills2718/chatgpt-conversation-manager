@@ -793,20 +793,29 @@ async function sendPrompt(text, excludeThreads = []) {
   // first insert, so this retries for a few seconds.
   let el = composer.el;
   const composerText = () => el.value ?? el.innerText ?? "";
-  // Plain-text mode stays on for the page's composer after a send (the
-  // controller lives as long as the page), and typing into it is what froze
-  // the tab: v0.9.3 moved the switch after typing, but the previous send had
-  // left it on, so an 80k prompt still froze the tab (2026-09-29 07:11Z).
-  // So turn it off before typing, every time.
-  const plainOff = await requestPlainTextMode(false);
-  if (!plainOff?.ok) await log("warn", `could not switch the composer out of plain-text mode before typing: ${plainOff?.reason}`);
+  // Fill the composer in one editor transaction from the page's own world,
+  // already in plain-text mode (lib/plain-text-mode.js): typing through
+  // execCommand("insertText") cost ChatGPT's editor 1.5-3 ms per character in
+  // a background tab and froze it for 5+ minutes at 50-80k characters
+  // (2026-09-29). If that path is unavailable (ChatGPT changed its page), fall
+  // back to typing, then switch to plain-text mode before Send.
   const typingStarted = Date.now();
-  const typedOk = await waitFor(() => {
-    el = findFirst(COMPOSER_SELECTORS, visible)?.el || el;
-    if (samePrompt(composerText(), body)) return true;
-    setComposerText(el, body);
-    return samePrompt(composerText(), body) ? true : null;
-  }, 8000, 400).catch(() => false);
+  let fillMode = "transaction";
+  let plainMode = await composerMainWorldRequest({ op: "fill", text: body, plain: true });
+  let typedOk = Boolean(plainMode?.ok) && samePrompt(composerText(), body);
+  if (!typedOk) {
+    if (plainMode?.ok) await log("warn", `one-transaction fill did not leave exactly the prompt in the composer (${composerText().length} vs ${body.length} characters); typing instead`);
+    else await log("warn", `one-transaction fill unavailable (${plainMode?.reason}); typing instead`);
+    fillMode = `typed (${plainMode?.ok ? "fill mismatch" : plainMode?.reason})`;
+    await requestPlainTextMode(false);
+    typedOk = await waitFor(() => {
+      el = findFirst(COMPOSER_SELECTORS, visible)?.el || el;
+      if (samePrompt(composerText(), body)) return true;
+      setComposerText(el, body);
+      return samePrompt(composerText(), body) ? true : null;
+    }, 8000, 400).catch(() => false);
+    plainMode = typedOk ? await requestPlainTextMode(true) : plainMode;
+  }
   if (!typedOk) {
     const heldChars = composerText().length;
     clearComposer(el);
@@ -815,31 +824,11 @@ async function sendPrompt(text, excludeThreads = []) {
       { reply: { stage: "not_typed", nothing_sent: true, page_id: PAGE_ID } },
     );
   }
-  // After typing, before clicking: switch this tab's composer to ChatGPT's
-  // plain-text mode, so the draft is sent verbatim. Otherwise a link or other
-  // formatting in it makes ChatGPT send the whole draft as escaped Markdown
-  // (lib/plain-text-mode.js). The switch must come AFTER typing: in v0.9.1/0.9.2
-  // it came before, and typing into a plain-text-mode composer is so slow that
-  // an 18k-character prompt took 46s and 50-72k prompts froze the tab for over
-  // five minutes (2026-09-29 06:46-06:58Z). Typing in the normal mode takes
-  // seconds, and getText() only consults the mode when Send is clicked.
-  // Not fatal if it fails -- the send goes ahead, the model reads the escaped
-  // form -- but the result says so (plain_text_mode), and the broker tells the
-  // caller.
   const typingMs = Date.now() - typingStarted;
-  const plainStarted = Date.now();
-  const plainMode = await requestPlainTextMode(true);
-  const plainMs = Date.now() - plainStarted;
+  // Not fatal if plain-text mode is unavailable -- the send goes ahead and the
+  // model reads the escaped form -- but the result says so (plain_text_mode),
+  // and the broker tells the caller.
   if (!plainMode?.ok) await log("warn", `could not switch the composer to plain-text mode: ${plainMode?.reason}`);
-  else if (!samePrompt(composerText(), body)) {
-    // The switch must not have changed what will be sent.
-    const heldChars = composerText().length;
-    clearComposer(el);
-    throw Object.assign(
-      new Error(`switching the composer to plain-text mode changed the draft (it now holds ${heldChars} characters, the prompt has ${body.length}); the composer was cleared and nothing was sent.`),
-      { reply: { stage: "plain_mode_changed_draft", nothing_sent: true, page_id: PAGE_ID } },
-    );
-  }
   const button = await waitFor(() => findFirst(SEND_BUTTON_SELECTORS, (b) => visible(b) && !b.disabled), 8000)
     .catch(() => null);
   if (!button) {
@@ -895,7 +884,7 @@ async function sendPrompt(text, excludeThreads = []) {
   const threadId = threadBefore || serverThreadId || (confirmedBy ? await waitFor(() => realThreadId(), 60000, 250).catch(() => null) : realThreadId());
   return { thread_id: threadId, dom_before: domBefore, messages_before: messagesBefore,
            send_confirmed: Boolean(confirmedBy), confirmed_by: confirmedBy,
-           plain_text_mode: plainMode?.ok ? true : (plainMode?.reason || "failed"), plain_mode_ms: plainMs, typing_ms: typingMs,
+           plain_text_mode: plainMode?.ok ? true : (plainMode?.reason || "failed"), typing_ms: typingMs, fill_mode: fillMode,
            server_check_error: serverCheckError,
            visibility: document.visibilityState, has_focus: document.hasFocus(),
            composer_selector: composer.selector, send_selector: button.selector };
@@ -929,7 +918,10 @@ async function retrySendClick(expected, threadBefore, messagesBefore, excludeThr
 // plain-text mode, so the prompt is sent verbatim rather than serialized as
 // escaped Markdown (lib/plain-text-mode.js explains why).
 async function requestPlainTextMode(on = true) {
-  try { return await chrome.runtime.sendMessage({ type: "ccm-plain-text-mode", on }); }
+  return composerMainWorldRequest({ op: "plain", on });
+}
+async function composerMainWorldRequest(req) {
+  try { return await chrome.runtime.sendMessage({ type: "ccm-composer-main", req }); }
   catch (err) { return { ok: false, reason: String(err?.message || err) }; }
 }
 
@@ -946,7 +938,11 @@ function setComposerText(el, text) {
 }
 
 function clearComposer(el) {
-  try { setComposerText(el, ""); } catch (err) { log("warn", "Could not clear the composer", err); }
+  // Emptying a large draft through execCommand is slow in a background tab,
+  // so use the page's editor directly when possible.
+  composerMainWorldRequest({ op: "fill", text: "", plain: false }).then((r) => {
+    if (!r?.ok) { try { setComposerText(el, ""); } catch (err) { log("warn", "Could not clear the composer", err); } }
+  });
 }
 
 // Newest chats first; a chat counts only if its first user message is exactly
@@ -1317,9 +1313,11 @@ async function handleCommand(msg) {
     // plain-text mode WITHOUT sending, then empty it.
     const c = findFirst(COMPOSER_SELECTORS, visible);
     if (!c) throw new Error("no composer");
-    const mode = await requestPlainTextMode(Boolean(msg.plain));
+    const mode = msg.fill ? { ok: true } : await requestPlainTextMode(Boolean(msg.plain));
     const t0 = performance.now();
-    setComposerText(c.el, String(msg.text || ""));
+    let fill = null;
+    if (msg.fill) fill = await composerMainWorldRequest({ op: "fill", text: String(msg.text || ""), plain: Boolean(msg.plain) });
+    else setComposerText(c.el, String(msg.text || ""));
     const typeMs = Math.round(performance.now() - t0);
     const el = findFirst(COMPOSER_SELECTORS, visible)?.el || c.el;
     const t1 = performance.now();
@@ -1327,10 +1325,10 @@ async function handleCommand(msg) {
     const readMs = Math.round(performance.now() - t1);
     const links = el.querySelectorAll("[text-link-href], a").length;
     const t2 = performance.now();
-    setComposerText(el, "");
+    if (msg.fill) await composerMainWorldRequest({ op: "fill", text: "", plain: false }); else setComposerText(el, "");
     const clearMs = Math.round(performance.now() - t2);
     await requestPlainTextMode(false);
-    return { mode_ok: mode?.ok ?? false, plain: Boolean(msg.plain), chars: String(msg.text || "").length, typeMs, readMs, clearMs, same, links, visibility: document.visibilityState };
+    return { fill, mode_ok: mode?.ok ?? false, plain: Boolean(msg.plain), chars: String(msg.text || "").length, typeMs, readMs, clearMs, same, links, visibility: document.visibilityState };
   }
   if (msg.action === "retry_send_click") return retrySendClick(String(msg.expected || ""), msg.thread_before || null, msg.messages_before ?? null, msg.exclude_threads || []);
   if (msg.action === "send_prompt") return sendPrompt(msg.text, msg.exclude_threads || []);
