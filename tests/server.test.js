@@ -379,12 +379,14 @@ test('broadcastReloadTab reaches every connected tab, human and agent alike, unl
 // idle agent tabs open. Each concurrent call must claim its own tab and run
 // in parallel, with neither prompt landing on the other's tab.
 test('ask_chatgpt runs two concurrent asks in parallel, one per idle agent tab', async () => {
+  const sendTimes = [];
   function slowIdleTab(tab, expectedText, replyText, threadId) {
     return fakeTab(tab, {
       agent: true,
       onCommand: async (msg, state, reply) => {
         if (msg.action === 'navigate_home') return reply({ ok: true, navigated: true });
         if (msg.action === 'send_prompt') {
+          sendTimes.push(performance.now());
           assert.equal(msg.text, expectedText, `${tab} received the wrong prompt`);
           state.thread = threadId;
           return reply({ ok: true, thread_id: threadId, dom_before: 0, messages_before: 0 });
@@ -416,16 +418,20 @@ test('ask_chatgpt runs two concurrent asks in parallel, one per idle agent tab',
   agentPacer.spacingMs = 5;
   try {
     const startedAt = performance.now();
+    const doneTimes = [];
     const [resultA, resultB] = await Promise.all([
-      askChatgpt({ text: 'question for A', timeout_seconds: 10, pollMs: 20 }),
-      askChatgpt({ text: 'question for B', timeout_seconds: 10, pollMs: 20 }),
+      askChatgpt({ text: 'question for A', timeout_seconds: 10, pollMs: 20 }).then((r) => { doneTimes.push(performance.now()); return r; }),
+      askChatgpt({ text: 'question for B', timeout_seconds: 10, pollMs: 20 }).then((r) => { doneTimes.push(performance.now()); return r; }),
     ]);
     const elapsedMs = performance.now() - startedAt;
     assert.equal(resultA.reply, 'reply for A');
     assert.equal(resultB.reply, 'reply for B');
     assert.notEqual(resultA.thread_id, resultB.thread_id, 'both calls landed on the same tab/thread');
-    // Serialized, this would take at least 2x the per-call reply delay.
-    assert.ok(elapsedMs < 400, `expected the two calls to overlap, took ${elapsedMs}ms`);
+    // Structural, not a stopwatch (a wall-time bound failed on a loaded
+    // machine): both prompts were handed to their tabs before either ask
+    // finished, so neither waited for the other.
+    assert.equal(sendTimes.length, 2);
+    assert.ok(Math.max(...sendTimes) < Math.min(...doneTimes), 'the second ask did not start until the first finished');
     assert.equal(tabA.received.filter((a) => a === 'send_prompt').length, 1);
     assert.equal(tabB.received.filter((a) => a === 'send_prompt').length, 1);
   } finally {

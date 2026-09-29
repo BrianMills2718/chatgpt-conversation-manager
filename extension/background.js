@@ -99,6 +99,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
+// Open a background agent tab in THIS browser profile (asked by a tab of this
+// profile on the broker's behalf; see server/index.js openAgentTabViaExtension).
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type !== "ccm-open-agent-tab") return;
+  const url = String(msg.url || "");
+  if (!/^https:\/\/chatgpt\.com\/\?ccm_agent=1$/.test(url)) { sendResponse({ ok: false, reason: "refusing a non-agent URL" }); return; }
+  chrome.tabs.create({ url, active: false, windowId: sender.tab?.windowId })
+    .then((t) => sendResponse({ ok: true, chrome_tab_id: t.id }))
+    .catch((err) => sendResponse({ ok: false, reason: String(err?.message || err) }));
+  return true;
+});
+
 // Exempt the asking agent tab from automatic discarding (Memory Saver).
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type !== "ccm-agent-tab-keepalive" || !sender.tab?.id) return;
