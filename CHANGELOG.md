@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.8.1 (2026-09-29)
+
+### Fixed: very large prompts whose Send click ChatGPT drops
+
+- **Reproduced live.** After v0.8.0 was deployed, a 73k-character prompt sent from the hidden agent tab (`/api/ask`, 05:02Z) was unconfirmed. After 600s no chat existed on ChatGPT's server (`list_chatgpt_chats`), so the click had been dropped.
+- **History.** From 2026-09-26 on, sends at 60k characters or more went unconfirmed 32 of 135 times in hidden tabs and 2 of 12 in visible ones. Under 60k it was 4 of 160. In the 26 misattribution cases the dropped prompt was sent exactly once, by a later click, after as long as 15 minutes. So ChatGPT drops such a click; it does not queue it.
+- **Fix.** While a send stays unconfirmed, the broker asks the tab to try again at 30s, 75s and 135s (`RETRY_CLICK_AFTER_MS`). Each try works like this:
+  - It first asks ChatGPT's server whether the prompt arrived (the continuation's message count, or a new chat starting with exactly this prompt). If it did, the ask follows that chat and nothing is clicked.
+  - Otherwise it clicks Send again, but only if the composer still holds exactly this prompt, Send is enabled, and ChatGPT is not generating.
+  - Each try is logged in `bridge-events.jsonl` as `retry_clicks`.
+- **Truthful outcome.** An unconfirmed send that never shows up is now reported as `sent=unknown`. v0.8.0 wrongly reported `sent=false`, which tells callers that retrying is safe.
+- Extension manifest 0.8.0 -> 0.8.1.
+
 ## v0.8.0 (2026-09-29)
 
 ### Fixed: replies attributed to the wrong prompt (#27), and sends logged without an account (#28)

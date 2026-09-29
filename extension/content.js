@@ -852,13 +852,11 @@ async function sendPrompt(text, excludeThreads = []) {
     if (server?.by) { confirmedBy = server.by; serverThreadId = server.thread_id; }
     else if (server?.error) serverCheckError = server.error;
   }
-  // No second click and no "not sent" verdict after a click: ChatGPT can
-  // process a queued click seconds later, so the server not having the turn
-  // yet does not prove it never will (review of this change, 2026-09-29).
-  // The prompt stays in the composer untouched -- clearing it could interfere
-  // with a queued submit -- and the next ask cannot send it by accident,
-  // because every ask now empties the composer and types its own prompt.
-  // The broker keeps watching; getReply looks for the new chat server-side.
+  // Not confirmed yet: the prompt stays in the composer untouched, and the
+  // broker keeps watching. getReply looks for the new chat server-side, and
+  // the broker may ask for another click (retrySendClick) once the server
+  // has shown for a while that nothing arrived. The next ask cannot send the
+  // leftover text by accident: every ask empties the composer first.
   // A new chat first shows a temporary id ("WEB:<uuid>") in the URL and swaps in
   // the real conversation id once the server has created it.
   const threadId = threadBefore || serverThreadId || (confirmedBy ? await waitFor(() => realThreadId(), 60000, 250).catch(() => null) : realThreadId());
@@ -867,6 +865,30 @@ async function sendPrompt(text, excludeThreads = []) {
            server_check_error: serverCheckError,
            visibility: document.visibilityState, has_focus: document.hasFocus(),
            composer_selector: composer.selector, send_selector: button.selector };
+}
+
+// Click Send again for an ask whose earlier click showed no effect -- but
+// only after ChatGPT's server confirms the prompt has not arrived, and only
+// if the composer still holds exactly that prompt and ChatGPT is not
+// generating. Evidence (2026-09-27/28 audit): a click on a very large prompt
+// in a hidden tab was dropped, not queued. In 26 cases the prompt stayed
+// unsent for up to 15 minutes, until a later click sent it exactly once.
+async function retrySendClick(expected, threadBefore, messagesBefore, excludeThreads = []) {
+  if (threadBefore) {
+    const count = linearizeMapping(await fetchConversationTree(threadBefore)).length;
+    if (sendEvidenceFromCounts(count, messagesBefore)) return { clicked: false, confirmed_by: "server_turn", thread_id: threadBefore };
+  } else {
+    const id = await findNewChatWithPrompt(expected, excludeThreads);
+    if (id) return { clicked: false, confirmed_by: "server_new_chat", thread_id: id };
+    if (realThreadId()) return { clicked: false, reason: "page_has_conversation", thread_id: realThreadId() };
+  }
+  if (findFirst(STOP_BUTTON_SELECTORS, visible)) return { clicked: false, reason: "generating" };
+  const composer = findFirst(COMPOSER_SELECTORS, visible);
+  if (!composer || !samePrompt(composer.el.value ?? composer.el.innerText ?? "", expected)) return { clicked: false, reason: "composer_no_longer_holds_prompt" };
+  const button = findFirst(SEND_BUTTON_SELECTORS, (b) => visible(b) && !b.disabled);
+  if (!button) return { clicked: false, reason: "no_enabled_send_button" };
+  button.el.click();
+  return { clicked: true, visibility: document.visibilityState };
 }
 
 function setComposerText(el, text) {
@@ -1248,6 +1270,7 @@ async function handleCommand(msg) {
     location.href = "https://chatgpt.com/";
     return { navigated: true };
   }
+  if (msg.action === "retry_send_click") return retrySendClick(String(msg.expected || ""), msg.thread_before || null, msg.messages_before ?? null, msg.exclude_threads || []);
   if (msg.action === "send_prompt") return sendPrompt(msg.text, msg.exclude_threads || []);
   if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before, msg.expected ?? null, msg.exclude_threads || [], msg.thread_hint || null);
   if (msg.action === "navigate_to_thread") {
