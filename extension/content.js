@@ -1270,6 +1270,14 @@ async function handleCommand(msg) {
     location.href = "https://chatgpt.com/";
     return { navigated: true };
   }
+  if (msg.action === "debug_storage_keys") {
+    // Temporary (2026-09-29): list this origin's localStorage/sessionStorage
+    // keys matching a pattern, with short values. Read-only.
+    const re = new RegExp(String(msg.pattern || "."), "i");
+    const dump = (st) => Object.keys(st).filter((k) => re.test(k) || re.test(String(st.getItem(k)).slice(0, 2000))).slice(0, 40)
+      .map((k) => ({ key: k, value: String(st.getItem(k)).slice(0, Number(msg.value_chars) || 300) }));
+    return { local: dump(localStorage), session: dump(sessionStorage), cookies: document.cookie.split(";").map((c) => c.split("=")[0].trim()).filter((k) => re.test(k)) };
+  }
   if (msg.action === "debug_bundle_search") {
     // Temporary (2026-09-29): search ChatGPT's own loaded JS for a string,
     // returning short surrounding snippets. Read-only.

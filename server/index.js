@@ -1069,6 +1069,17 @@ app.post("/api/rename", async (req, res) => {
 // Temporary, read-only reconnaissance endpoint for adding thinking-level
 // control -- see the matching debug_inspect_toolbar action in content.js.
 // Not documented, not an MCP tool; remove once the real picker is found.
+app.post('/api/debug/storage-keys', async (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  let tab = null;
+  try {
+    const seen = []; const found = await findIdleAgentTab(seen);
+    if (!found) throw new Error(`no idle agent tab (${JSON.stringify(seen)})`);
+    tab = found.tab;
+    res.json(await dispatchToExtension({ action: 'debug_storage_keys', pattern: req.body?.pattern, value_chars: req.body?.value_chars }, 30000, { tab }));
+  } catch (err) { res.status(503).json({ error: err.message }); }
+  finally { if (tab) claimedTabs.delete(tab); }
+});
 // Temporary (2026-09-29): search ChatGPT's loaded JS; sends nothing.
 app.post('/api/debug/bundle-search', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
