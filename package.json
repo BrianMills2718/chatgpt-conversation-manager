@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-conversation-manager",
-  "version": "0.9.4",
+  "version": "0.9.7",
   "private": true,
   "type": "module",
   "scripts": {

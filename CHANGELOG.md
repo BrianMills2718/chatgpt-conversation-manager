@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.9.7 (2026-09-29)
+
+### Fixed at the root: large prompts froze the agent tab
+
+- **Root cause (measured on the live agent tab, without sending).** Typing a prompt with `document.execCommand("insertText")` made ChatGPT's editor process it at about 1.5-3 ms per character in a background tab, in either composer mode: 7-15 s for 5,000 characters, and 20,000 did not finish within 180 s. At 50-80k characters the page's main thread was busy for many minutes, so the tab stopped answering the broker and the ask failed after about 5.5 minutes. This hit ats4, wz7 and ao4 on 2026-09-29. v0.9.1-v0.9.4 blamed plain-text mode; that was wrong, and those releases only moved the switch around. (v0.8.1's 73k send typed quickly only because its page was fresh.)
+- **Fix (0.9.6).** The extension fills the draft from the page's own world in ONE editor transaction: one paragraph per line, the same structure typing makes, already in plain-text mode (`composerMainWorld` in `extension/lib/plain-text-mode.js`). 80,261 characters now take 0.55 s in a hidden tab. If that path is unavailable, it falls back to typing. `fill_mode` and `typing_ms` are logged per send.
+- **Verified live on 0.9.6, both new chat and continuation:**
+  - an 80,261-character fresh-chat prompt answered in 15 s (`send_prompt` 3.8 s, fill 0.52 s);
+  - a 60,199-character continuation in the same conversation (`6abb7399`) answered in 12 s.
+
+  Both prompts were full of code fences, `###` headers, indentation, tabs, bare URLs, `<tag>`, `&` and backslashes. Each is stored exactly as sent except for the trailing blank line, which ChatGPT trims. Each conversation has exactly one user turn per send, and both replies came back with `prompt_verbatim: true`.
+- **Why some deploys did not take effect.** A second supervisor on Brian's machine, the Windows scheduled task "ChatGPT Bridge (thela)", relaunched the broker during a `systemctl --user restart` gap at 07:35Z. From then on it held the port with older code, and systemd crash-looped on `EADDRINUSE`. The task has been stopped and **disabled**, not deleted: `Enable-ScheduledTask -TaskName 'ChatGPT Bridge (thela)'` undoes it. systemd is the only supervisor again (see CLAUDE.md).
+- Removed the temporary typing probe. Extension manifest -> 0.9.7.
+
 ## v0.9.4 (2026-09-29)
 
 ### Fixed: v0.9.3 still froze on large prompts, because plain-text mode stayed on

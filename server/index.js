@@ -1081,20 +1081,6 @@ app.post("/api/rename", async (req, res) => {
 // Temporary, read-only reconnaissance endpoint for adding thinking-level
 // control -- see the matching debug_inspect_toolbar action in content.js.
 // Not documented, not an MCP tool; remove once the real picker is found.
-// Temporary (2026-09-29): typing-time probe on an idle agent tab; sends nothing.
-app.post('/api/debug/type-timing', async (req, res) => {
-  if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
-  let tab = null;
-  try {
-    const wanted = req.body?.tab ? [...extensionSockets].find((ws) => ws.tabToken?.startsWith(req.body.tab) && ws.readyState === ws.OPEN) : null;
-    const seen = []; const found = wanted ? { tab: wanted.tabToken } : await findIdleAgentTab(seen);
-    if (!found) throw new Error(`no idle agent tab (${JSON.stringify(seen)})`);
-    tab = found.tab;
-    if (wanted) { if (claimedTabs.has(tab)) throw new Error('tab busy'); claimedTabs.add(tab); }
-    res.json(await dispatchToExtension({ action: 'debug_type_timing', text: req.body?.text, plain: req.body?.plain, fill: req.body?.fill }, 180000, { tab }));
-  } catch (err) { res.status(503).json({ error: err.message }); }
-  finally { if (tab) claimedTabs.delete(tab); }
-});
 app.post('/api/debug/inspect-toolbar', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   try { res.json(await dispatchToExtension({ action: 'debug_inspect_toolbar' }, COMMAND_TIMEOUT_MS, { single: true })); }
@@ -1222,7 +1208,7 @@ app.post('/api/undo', async (req, res) => {
 });
 
 function createMcpServer() {
-  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.4" });
+  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.7" });
 
   mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),
