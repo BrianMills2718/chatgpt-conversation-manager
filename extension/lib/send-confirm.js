@@ -35,3 +35,18 @@ export function sendEvidence({ composerText, threadRawBefore = null, threadRawNo
 export function sendEvidenceFromCounts(countNow, countBefore) {
   return Number.isInteger(countNow) && Number.isInteger(countBefore) && countNow > countBefore ? "server_turn" : null;
 }
+
+// Whether two texts are the same prompt once whitespace is normalized. Used
+// both for "does the composer hold exactly our prompt" and "is this user
+// turn our prompt". A prefix check is not enough: callers send templated
+// prompts that share thousands of leading characters, and on 2026-09-27/28 a
+// 40-character prefix check let a new ask skip typing and click Send on the
+// previous ask's leftover text (28 of ~195 audit replies were another
+// prompt's answer).
+export function samePrompt(a, b) {
+  const x = norm(a);
+  return x !== "" && x === norm(b);
+}
+
+// First differing position after normalization, for error messages.
+export function promptHead(s, n = 80) { return norm(s).slice(0, n); }
