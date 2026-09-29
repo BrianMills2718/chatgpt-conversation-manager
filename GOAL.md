@@ -214,24 +214,28 @@ non_gating_utility_review:
   pile-up. Explicit-account requests stay pinned; thread-targeted asks retain
   their existing behavior. Route decisions are logged with candidate estimates
   and linked to ask outcomes by `route_id`.
-- `npm test` passed 207 tests, including a synthetic 429 on account A followed
-  by an unpinned ask routed to B, plus parallel asks spread across A and B.
-  This proves the scheduler's code path, not a real ChatGPT quota limit or a
-  maximum useful throughput.
+- `npm test` passed 208 tests, including a synthetic 429 on account A followed
+  by an unpinned ask routed to B, parallel asks spread across A and B, and a
+  mixed pinned/automatic queue regression. This proves the scheduler's code
+  path, not a real ChatGPT quota limit or a maximum useful throughput.
 - PR #67 adds per-account broker-action and same-origin API telemetry, including
   status, endpoint class, and timing, plus routing decisions linked to ask
   outcomes. Once running, it will not observe ChatGPT native apps or activity
   in unconnected browser profiles, and it does not expose all quota counters or
   limits. Real usable rates remain an empirical estimate from activity this
-  broker can observe.
+  broker can observe. Resource Timing observations are measurement-only: the
+  adaptive pacer currently reacts to 429s returned through broker operations,
+  not throttles seen only in ordinary page activity.
 - PR #67 on branch `fix/per-account-pacing` is still open and unmerged, so the
-  new router and telemetry are not live. The broker is stopped after Brian
-  reported current throttling and said “stop.” No live ChatGPT requests were
-  made for this increment. Do not restart it or make live calls until Brian
-  explicitly authorizes resuming that check.
-- **Still outstanding before calling the usage goal complete:** verify the
-  account switch under real browser traffic and use captured per-account
-  request/429 data to estimate useful rates. This requires fresh authorization
-  to start the stopped broker; its normal startup also triggers background
-  synchronization traffic. Do not describe the scheduler as a proven maximum
-  throughput or share that claim before this live evidence exists.
+  new router and telemetry are not live. Brian renewed authorization on
+  2026-09-29 for one bounded live validation. For that smoke, disable the
+  scheduled first-run sync so it does not add a second ChatGPT operation; send
+  no more than one unpinned ask and do not retry it if it times out or is
+  rate-limited.
+- **Still outstanding before calling the usage goal complete:** capture the
+  bounded live route and ask outcome, then use attributable per-account traffic
+  and 429 observations to estimate useful rates. Existing same-day logs show
+  reply-poll 429s alongside completed asks, so those events alone do not
+  establish a prompt-level throttle rate. Do not describe the scheduler as a
+  proven maximum throughput or share that claim before the evidence supports
+  it.

@@ -104,6 +104,10 @@ selected account and `route_id` can be joined to the ask result in
 `data/observations/bridge-events.jsonl`. This supports later tuning from real
 traffic. It does not expose ChatGPT's full quota counters or activity outside
 connected browser pages, so it cannot prove a global throughput maximum.
+Adaptive pacing reacts to 429s returned through broker operations. Resource
+Timing observations from connected pages are measurement-only today: a 429
+seen in ordinary page activity is logged but does not itself change the pacer
+or trigger account selection.
 
 - **Reading.** One connected tab per account is enough to *read* any of that account's chats, including ones started in the ChatGPT desktop app.
 - **Updates.** The extension reloads itself within about a minute when a newer version is on disk. Bump `version` in `extension/manifest.json` with every extension change.

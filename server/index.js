@@ -884,9 +884,10 @@ async function resolveThreadTitle(title, account = null) {
 // ask, checked and set synchronously (no await in between) so two concurrent
 // pickIdleTab() calls can never both claim the same tab.
 const claimedTabs = new Set();
-// Unpinned new asks reserve an account before probing browser tabs. This keeps
-// simultaneous asks from all seeing the same idle account and piling onto it
-// while its paced lane is already occupied.
+// Unpinned new asks reserve an account before probing browser tabs. This map
+// counts only those not yet claimed; after a tab is claimed, claimedTabs owns
+// the in-flight count. Keeping the sets disjoint lets the router add both
+// queued automatic assignments and active pinned asks without undercounting.
 const pendingAutoRoutes = new Map();
 
 // Agents only ever type into a tab opened for them (https://chatgpt.com/?ccm_agent=1),
@@ -1004,7 +1005,10 @@ function rankConnectedAgentAccounts(now = monoNow()) {
     const inFlightAsks = [...extensionSockets].filter((candidate) => candidate.readyState === candidate.OPEN
       && candidate.agentTab && candidate.tabToken && claimedTabs.has(candidate.tabToken)
       && normalizePacerKey(accountKey(candidate.account)) === account).length;
-    const estimatedAheadAsks = Math.max(pendingAutoAsks, inFlightAsks);
+    // pendingAutoAsks contains only unclaimed auto assignments; inFlightAsks
+    // contains every claimed ask, pinned or automatic. These are disjoint
+    // queues, so add them rather than taking the max.
+    const estimatedAheadAsks = pendingAutoAsks + inFlightAsks;
     const nextEligibleAt = Math.max(now, entry.lastRequestAt + spacingMs);
     const projectedStartAt = nextEligibleAt + estimatedAheadAsks * spacingMs;
     return {
@@ -1023,15 +1027,22 @@ function reserveAutoRoute(account) {
   const key = normalizePacerKey(account);
   pendingAutoRoutes.set(key, (pendingAutoRoutes.get(key) || 0) + 1);
   let released = false;
+  let pending = true;
+  const leavePending = () => {
+    if (!pending) return;
+    pending = false;
+    const count = pendingAutoRoutes.get(key) || 0;
+    if (count <= 1) pendingAutoRoutes.delete(key);
+    else pendingAutoRoutes.set(key, count - 1);
+  };
   return {
     account: key,
     routeId: crypto.randomUUID(),
+    markClaimed() { leavePending(); },
     release() {
       if (released) return;
       released = true;
-      const pending = pendingAutoRoutes.get(key) || 0;
-      if (pending <= 1) pendingAutoRoutes.delete(key);
-      else pendingAutoRoutes.set(key, pending - 1);
+      leavePending();
     },
   };
 }
@@ -1061,6 +1072,9 @@ async function findRoutedIdleAgentTab(seen, excludeTokens = new Set()) {
       reservation.release();
       continue;
     }
+    // The ask now appears in claimedTabs/inFlightAsks. Remove it from the
+    // pending count before another route can rank this account.
+    reservation.markClaimed();
     try {
       appendRequestTiming({
         schema_version: 2,
@@ -1071,6 +1085,7 @@ async function findRoutedIdleAgentTab(seen, excludeTokens = new Set()) {
         candidates,
       });
     } catch (err) {
+      claimedTabs.delete(found.tab);
       reservation.release();
       throw err;
     }

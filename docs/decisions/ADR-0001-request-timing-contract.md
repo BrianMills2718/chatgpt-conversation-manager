@@ -46,7 +46,10 @@ global maximum. Resource Timing does not expose response headers or bodies; it
 may report a null status when the browser does not expose one. Offline
 observation buffering is bounded and reports a gap on overflow. The observer
 does not see requests outside the ChatGPT page's same-origin `/api/*` and
-`/backend-api/*` paths.
+`/backend-api/*` paths. Resource Timing observations are measurement-only;
+only 429s surfaced through broker operations currently update the adaptive
+pacer. This avoids counting one broker request twice, but means a throttle
+seen only in ordinary page activity does not steer the router.
 
 ## Wrong-when condition
 

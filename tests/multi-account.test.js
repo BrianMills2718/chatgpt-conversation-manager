@@ -144,6 +144,99 @@ test('an observed 429 routes the next unpinned new ask to the account with the e
   }
 });
 
+test('routing counts a pinned active ask and an unclaimed automatic assignment separately', async () => {
+  const accountA = 'mixed-a@example.com';
+  const accountB = 'mixed-b@example.com';
+  const entryA = mod.getPacerEntry(accountA);
+  const entryB = mod.getPacerEntry(accountB);
+  const savedA = { minMs: entryA.pacer.minMs, maxMs: entryA.pacer.maxMs, spacingMs: entryA.pacer.spacingMs,
+    rateLimited: entryA.pacer.rateLimited, successes: entryA.pacer.successes, lastRequestAt: entryA.lastRequestAt };
+  const savedB = { minMs: entryB.pacer.minMs, maxMs: entryB.pacer.maxMs, spacingMs: entryB.pacer.spacingMs,
+    rateLimited: entryB.pacer.rateLimited, successes: entryB.pacer.successes, lastRequestAt: entryB.lastRequestAt };
+  entryA.pacer.minMs = entryB.pacer.minMs = 0;
+  entryA.pacer.maxMs = entryB.pacer.maxMs = 120000;
+  entryA.pacer.spacingMs = 40;
+  entryB.pacer.spacingMs = 100;
+  entryA.pacer.rateLimited = entryB.pacer.rateLimited = 0;
+  entryA.pacer.successes = entryB.pacer.successes = 0;
+  entryA.lastRequestAt = entryB.lastRequestAt = -Infinity;
+
+  let notePinnedPoll;
+  let releaseAProbe;
+  let noteAProbe;
+  let noteBProbe;
+  let pinnedFinished = false;
+  const pinnedPollStarted = new Promise((resolve) => { notePinnedPoll = resolve; });
+  const aProbeGate = new Promise((resolve) => { releaseAProbe = resolve; });
+  const aProbeStarted = new Promise((resolve) => { noteAProbe = resolve; });
+  const bProbeStarted = new Promise((resolve) => { noteBProbe = resolve; });
+  let pinnedAsk;
+  let queuedAutoAsk;
+  let nextAutoAsk;
+
+  const pinned = await tab('mix-a-pinned', accountA, { agent: true, handlers: {
+    get_tab: () => ({ busy: false, thread_id: null }),
+    navigate_home: () => ({ navigated: true }),
+    send_prompt: () => ({ thread_id: 'mixed-pinned-thread', dom_before: 0, messages_before: 0 }),
+    get_reply: () => {
+      notePinnedPoll();
+      return pinnedFinished
+        ? { done: true, reply: 'pinned reply', thread_id: 'mixed-pinned-thread', source: 'api', end_turn: true, api_checked: false }
+        : { done: false, generating: false, thread_id: 'mixed-pinned-thread', source: 'api_waiting', api_checked: false };
+    },
+  } });
+  const aIdle = await tab('mix-a-idle', accountA, { agent: true, handlers: {
+    get_tab: async () => { noteAProbe(); await aProbeGate; return { busy: false, thread_id: null }; },
+    navigate_home: () => ({ navigated: true }),
+    send_prompt: () => ({ thread_id: 'mixed-auto-a-thread', dom_before: 0, messages_before: 0 }),
+    get_reply: () => ({ done: true, reply: 'A reply', thread_id: 'mixed-auto-a-thread', source: 'api', end_turn: true, api_checked: false }),
+  } });
+  const bIdle = await tab('mix-b-idle', accountB, { agent: true, handlers: {
+    get_tab: () => { noteBProbe(); return { busy: false, thread_id: null }; },
+    navigate_home: () => ({ navigated: true }),
+    send_prompt: () => ({ thread_id: 'mixed-auto-b-thread', dom_before: 0, messages_before: 0 }),
+    get_reply: () => ({ done: true, reply: 'B reply', thread_id: 'mixed-auto-b-thread', source: 'api', end_turn: true, api_checked: false }),
+  } });
+
+  try {
+    pinnedAsk = mod.askChatgpt({ text: 'keep pinned ask active', account: accountA, timeout_seconds: 5, pollMs: 5 });
+    await pinnedPollStarted;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // The pinned ask has an active tab, but its send gap has elapsed. B is
+    // projected slightly later, so the first automatic assignment reserves A.
+    entryA.pacer.spacingMs = 40;
+    entryB.pacer.spacingMs = 100;
+    entryB.lastRequestAt = performance.now() - 25;
+
+    queuedAutoAsk = mod.askChatgpt({ text: 'reserve A while its tab is being checked', timeout_seconds: 5, pollMs: 5 });
+    await aProbeStarted;
+    nextAutoAsk = mod.askChatgpt({ text: 'account for both asks ahead', timeout_seconds: 5, pollMs: 5 });
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('the second automatic ask did not probe account B')), 1000);
+      bProbeStarted.then(() => { clearTimeout(timer); resolve(); });
+    });
+
+    const routedToB = await nextAutoAsk;
+    assert.equal(routedToB.account, accountB);
+    releaseAProbe();
+    const routedToA = await queuedAutoAsk;
+    assert.equal(routedToA.account, accountA);
+    pinnedFinished = true;
+    assert.equal((await pinnedAsk).reply, 'pinned reply');
+  } finally {
+    releaseAProbe();
+    pinnedFinished = true;
+    await Promise.allSettled([pinnedAsk, queuedAutoAsk, nextAutoAsk].filter(Boolean));
+    Object.assign(entryA.pacer, { minMs: savedA.minMs, maxMs: savedA.maxMs, spacingMs: savedA.spacingMs,
+      rateLimited: savedA.rateLimited, successes: savedA.successes });
+    entryA.lastRequestAt = savedA.lastRequestAt;
+    Object.assign(entryB.pacer, { minMs: savedB.minMs, maxMs: savedB.maxMs, spacingMs: savedB.spacingMs,
+      rateLimited: savedB.rateLimited, successes: savedB.successes });
+    entryB.lastRequestAt = savedB.lastRequestAt;
+    pinned.ws.close(); aIdle.ws.close(); bIdle.ws.close();
+  }
+});
+
 test('connections report the account each tab is signed into', async () => {
   await tab('aaaaaaaa-1', 'work@example.com', { agent: true });
   await tab('bbbbbbbb-1', 'personal@example.com');
