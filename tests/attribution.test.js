@@ -322,3 +322,17 @@ test('a prompt ChatGPT stored wrapped whole in a longer code fence still counts 
   // A fence no longer than an inner run is content, not a wrapper.
   assert.equal(samePrompt('```\n' + prompt + '\n```', prompt), false);
 });
+
+test('the fail-closed gate passes only the exact prompt (trailing whitespace aside)', async () => {
+  const { verbatimMismatch } = await import('../extension/lib/send-confirm.js');
+  const prompt = 'Audit.\n\n### FILE: a.py\n```\n    x = 1\n```\nsee https://e.com/a?b=1&c=2\n\n';
+  assert.equal(verbatimMismatch(prompt.trimEnd(), prompt), null);
+  // cm3 shape: a truncated prompt wrapped in a fence must not be sent.
+  const cm3 = verbatimMismatch('```\n' + prompt.slice(0, 20) + '\n```', prompt);
+  assert.ok(cm3 && cm3.first_diff === 0 && cm3.prompt_chars === prompt.trimEnd().length);
+  // Escaped or whitespace-changed copies are refused too.
+  assert.ok(verbatimMismatch(prompt.replace('### FILE', '\\### FILE'), prompt));
+  assert.ok(verbatimMismatch(prompt.replace('    x', ' x'), prompt));
+  assert.ok(verbatimMismatch('', prompt));
+  assert.match(verbatimMismatch(null, prompt, 'no controller').reason, /no controller/);
+});

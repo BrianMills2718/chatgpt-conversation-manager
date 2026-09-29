@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.9.9 (2026-09-29)
+
+### Fail closed: Send is clicked only if ChatGPT would submit the prompt verbatim
+
+- **What happened (cm3, 08:32-08:37Z, v0.9.8).** Both one-step fills reported 0 characters in the composer, so the extension fell back to typing, which took 279 s. It then clicked Send, and about 240 of 58,204 characters reached ChatGPT, wrapped in a ``` fence (chat `6abb78ab`). The attribution check correctly refused the answer, but the damage was done: a partial prompt cost quota and got an answer to the wrong question.
+- **Gate.** Before clicking Send, the extension reads what ChatGPT itself would submit: the composer controller's own `getText()`, from the page. It clicks only if that equals the prompt exactly, apart from trailing whitespace, which ChatGPT trims. There is no normalization and no unescaping. Otherwise it clears the composer and fails with `refusing to click Send: ChatGPT would not send this prompt verbatim`. The diagnostic gives the first differing position with text from both sides, and the result is `sent=no`. If `getText()` cannot be read, it also refuses.
+- **The fill is judged the same way.** It used to be judged by reading the DOM, which on cm3 said 0 characters while something else was sent.
+- **Typed fallback removed.** It was slow, and on cm3 it produced the partial send. If the one-step fill fails twice, nothing is sent and the error carries the diagnostic.
+- Extension manifest -> 0.9.9.
+
 ## v0.9.8 (2026-09-29)
 
 ### Fixed: a false refusal, and a prompt delivered wrapped whole in a code fence

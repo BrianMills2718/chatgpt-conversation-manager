@@ -55,7 +55,7 @@ function bridgeFailureKind(error, last) {
   if (/^Refusing to return a reply/.test(String(error?.message || ''))) return 'attribution_mismatch';
   if (/No finished reply within|Timed out waiting/i.test(String(error?.message || ''))) return 'timeout';
   // Send-step failures the extension raises before anything was sent.
-  if (/no ChatGPT composer found|no enabled send button found|prompt text did not appear in the composer|composer did not end up holding exactly this prompt/i.test(String(error?.message || ''))) return 'browser_ui';
+  if (/no ChatGPT composer found|no enabled send button found|prompt text did not appear in the composer|composer did not end up holding exactly this prompt|refusing to click Send|could not put the prompt into ChatGPT's composer/i.test(String(error?.message || ''))) return 'browser_ui';
   if (/No browser extension|not connected|No idle agent ChatGPT tab/i.test(String(error?.message || ''))) return 'broker';
   return 'unknown';
 }
@@ -1208,7 +1208,7 @@ app.post('/api/undo', async (req, res) => {
 });
 
 function createMcpServer() {
-  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.8" });
+  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.9" });
 
   mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),
