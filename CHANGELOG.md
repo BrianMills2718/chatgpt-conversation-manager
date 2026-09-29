@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.9.11 (2026-09-29)
+
+### Fixed: flaky timing tests, and pacing and timeouts shortened by wall-clock steps
+
+- **Root cause.** On Brian's WSL machine the wall clock steps forward about 3.6 s every ~30 s. It is correcting drift: measured 2026-09-29, a 180 s run of `Date.now()` against `performance.now()` showed six 3.58 s steps, 21.5 s in total. Every duration in the broker used `Date.now()`, so did the timing tests. A step during a test turned a 700 ms wait into about 4.3 s. The pacer/navigation test ("send waited 3634ms after the page loaded") failed about 1 run in 6: the test's own monotonic duration was 2.2 s while its `Date.now()` span was 5.8 s. The same steps cut pacer gaps, ask timeouts and reply deadlines short in production.
+- **Fix.** All broker durations, deadlines and pacer gaps use a monotonic clock (`performance.now()`). Timestamps written to logs still use the wall clock. The timing tests measure with `performance.now()`. Checked by running `tests/server.test.js` repeatedly with no failure, plus the full suite.
+
 ## v0.9.10 (2026-09-29)
 
 ### Root cause of the empty fill: acting on the composer before React hydrates it

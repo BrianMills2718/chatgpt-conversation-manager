@@ -415,12 +415,12 @@ test('ask_chatgpt runs two concurrent asks in parallel, one per idle agent tab',
   agentPacer.minMs = 5;
   agentPacer.spacingMs = 5;
   try {
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     const [resultA, resultB] = await Promise.all([
       askChatgpt({ text: 'question for A', timeout_seconds: 10, pollMs: 20 }),
       askChatgpt({ text: 'question for B', timeout_seconds: 10, pollMs: 20 }),
     ]);
-    const elapsedMs = Date.now() - startedAt;
+    const elapsedMs = performance.now() - startedAt;
     assert.equal(resultA.reply, 'reply for A');
     assert.equal(resultB.reply, 'reply for B');
     assert.notEqual(resultA.thread_id, resultB.thread_id, 'both calls landed on the same tab/thread');
@@ -1236,11 +1236,11 @@ test('an unconfirmed done candidate past the deadline is bounded, not polled for
   });
   await agent.open();
   try {
-    const started = Date.now();
+    const started = performance.now();
     const err = await askChatgpt({ text: 'throttled forever', timeout_seconds: 0.05, pollMs: 10, confirmGraceMs: 200 }).then(() => null, (e) => e);
     assert.ok(err, 'expected a timeout');
     assert.match(err.message, /prompt WAS sent/);
-    assert.ok(Date.now() - started < 2000, 'the confirmation grace must be bounded');
+    assert.ok(performance.now() - started < 2000, 'the confirmation grace must be bounded');
   } finally {
     agent.ws.close();
   }
@@ -1353,12 +1353,14 @@ test('a send failure that does not prove nothing was typed is never retried (no 
 // request for the conversation, so the pacer's wait belongs before it, and
 // the send then follows the fresh page without a second full wait.
 test('a continuation waits out the pacer gap before navigating, not between navigation and send', async () => {
+  // Monotonic time: the wall clock on WSL steps ~3.6s every ~30s, which made
+  // this test fail about 1 run in 6 when it measured with Date.now().
   const at = {};
   const tab = fakeTab('pace-nav-agent', {
     agent: true,
     thread: 'somewhere-else',
     onCommand: async (msg, state, reply, reopen) => {
-      at[msg.action] ??= Date.now();
+      at[msg.action] ??= performance.now();
       if (msg.action === 'navigate_to_thread') {
         reply({ ok: true, navigated: true });
         state.ws.close();
@@ -1375,8 +1377,8 @@ test('a continuation waits out the pacer gap before navigating, not between navi
   const entry = getPacerEntry('(default)');
   entry.pacer.minMs = 1500;
   entry.pacer.spacingMs = 1500;
-  entry.lastRequestAt = Date.now();
-  const started = Date.now();
+  entry.lastRequestAt = performance.now();
+  const started = performance.now();
   try {
     const r = await askChatgpt({ text: 'continue', thread_id: 'paced-thread', timeout_seconds: 5, pollMs: 10 });
     assert.equal(r.reply, 'paced');
@@ -1423,7 +1425,7 @@ function noBaselineTab(name, { failures }) {
     thread: 'baseline-thread',
     onCommand: async (msg, state, reply) => {
       if (msg.action === 'send_prompt') {
-        sends.push(Date.now());
+        sends.push(performance.now());
         if (sends.length <= failures) {
           return reply({ ok: false, error: 'could not read conversation baseline-thread before sending (backend-api conversation fetch failed: HTTP 429), so its reply could not be told apart from earlier ones; nothing was typed or sent.',
             stage: 'no_baseline', nothing_sent: true, page_id: 'page-1', api_status: 429, api_retry_after_ms: null });
