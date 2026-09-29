@@ -9,7 +9,17 @@ if (!fs.existsSync(file)) {
   process.exit(0);
 }
 
-const events = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line));
+// A machine crash mid-append leaves NUL padding or a torn line (three WSL
+// crashes on 2026-09-28 did). Skip such lines but report them, rather than
+// aborting the whole report on the first one.
+const events = [];
+const damagedLines = [];
+fs.readFileSync(file, 'utf8').split('\n').forEach((raw, i) => {
+  const line = raw.replace(/\0/g, '').trim();
+  if (!line) { if (raw.length) damagedLines.push(i + 1); return; }
+  try { events.push(JSON.parse(line)); } catch { damagedLines.push(i + 1); }
+});
+if (damagedLines.length) console.error(`warning: skipped ${damagedLines.length} damaged line(s) in ${file}: ${damagedLines.slice(0, 20).join(', ')}${damagedLines.length > 20 ? ', ...' : ''}`);
 const countBy = (key) => Object.fromEntries(Object.entries(events.reduce((counts, event) => {
   const value = event[key] ?? 'null';
   counts[value] = (counts[value] || 0) + 1;
@@ -18,6 +28,7 @@ const countBy = (key) => Object.fromEntries(Object.entries(events.reduce((counts
 const durations = events.map((event) => event.duration_ms).filter(Number.isFinite).sort((a, b) => a - b);
 const percentile = (p) => durations.length ? durations[Math.min(durations.length - 1, Math.floor((durations.length - 1) * p))] : null;
 console.log(JSON.stringify({
+  damaged_lines_skipped: damagedLines.length,
   events: events.length,
   by_outcome: countBy('outcome'),
   by_failure_kind: countBy('failure_kind'),
