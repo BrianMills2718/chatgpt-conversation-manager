@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.9.14 (2026-09-29)
+
+### An agent tab that does not come back after a page load is set aside; the ask moves on
+
+- **What the v0.9.13 navigation log showed (nb2, 12:03Z).** The ask claimed agent tab `82e7de0a`, which answered normally, and sent it to a new chat (a full page load). The tab's page never reconnected: no socket at all for 60 s, 17 checks, all "not connected". This is the tab that froze earlier today, and it is probably a frozen or Chrome-discarded background tab. A longer wait cannot help, and the old code gave up the whole ask instead of trying another tab.
+- **Fix.**
+  - **Give up on the tab, not the ask.** If a tab has neither answered nor reconnected `NAV_DEAD_MS` (20 s) after the page load, the ask releases it and sets it aside, logged as `tab_set_aside`. It then claims another idle agent tab, or opens a fresh one, and navigates again. At most three tabs are tried, one ask per tab as before, and nothing is sent meanwhile.
+  - **Skip set-aside tabs.** Later asks skip a set-aside tab until it reconnects. Its reconnection shows the page is alive again.
+  - **Closing frozen tabs.** The broker cannot close browser tabs itself, because it has no browser tab ids. A frozen tab is therefore ignored, not closed; closing it by hand is harmless.
+- The "tab … is not connected" errors on sends are the same condition, a tab mid-reload. Sends already wait up to 20 s for their tab to reconnect (v0.8.3).
+
 ## v0.9.13 (2026-09-29)
 
 ### New-chat navigation: logged, waited out properly, and diagnosable

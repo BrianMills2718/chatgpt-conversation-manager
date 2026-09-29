@@ -68,6 +68,7 @@ before(async () => {
   process.env.ARCHIVE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-attr-'));
   process.env.RETRY_CLICK_AFTER_MS = '60,120';
   process.env.NAV_WAIT_MS = '4000';
+  process.env.NAV_DEAD_MS = '1500';
   mod = await import('../server/index.js');
   server = mod.server;
   await new Promise((resolve) => (server.listening ? resolve() : server.listen(0, resolve)));
@@ -391,4 +392,29 @@ test('a tab that never reaches the new chat fails with sent=no, kind navigation,
     const ev = fs.readFileSync(mod.BRIDGE_OBSERVATIONS_PATH, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).at(-1);
     assert.equal(ev.failure_kind, 'navigation');
   } finally { stuck.close(); await new Promise((r) => setTimeout(r, 50)); }
+});
+
+test('an agent tab that never comes back after the page load is set aside and the ask moves to another tab', async () => {
+  // Dead tab: answers get_tab while on an old conversation, then vanishes on navigate_home.
+  const dead = await agentTab('dead-nav-tab', 'd@example.com', {});
+  dead.ws.removeAllListeners('message');
+  dead.ws.on('message', (buf) => {
+    const m = JSON.parse(buf.toString());
+    if (m.type !== 'command') return;
+    const reply = (extra) => dead.ws.send(JSON.stringify({ type: 'command_result', id: m.id, tab: 'dead-nav-tab', agent: true, ...extra }));
+    if (m.action === 'get_tab') return reply({ ok: true, tab: 'dead-nav-tab', agent: true, busy: false, thread_id: 'old-conv', account: { email: 'd@example.com' } });
+    if (m.action === 'navigate_home') { reply({ ok: true, navigated: true }); setTimeout(() => dead.ws.close(), 5); return; }
+    reply({ ok: false, error: `unhandled ${m.action}` });
+  });
+  const good = await agentTab('good-nav-tab', 'd@example.com', {
+    send_prompt: () => ({ thread_id: 'conv-good', dom_before: 0, messages_before: 0, send_confirmed: true }),
+    get_reply: () => ({ done: true, source: 'api', end_turn: true, reply: 'from the good tab', thread_id: 'conv-good' }),
+  });
+  try {
+    const r = await mod.askChatgpt({ text: 'move me', timeout_seconds: 10, pollMs: 20, account: 'd@example.com' });
+    assert.equal(r.reply, 'from the good tab');
+    const aside = fs.readFileSync(mod.REQUEST_TIMING_PATH, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.action === 'tab_set_aside').at(-1);
+    assert.equal(aside.tab, 'dead-nav');
+    assert.equal(good.received.filter((m) => m.action === 'send_prompt').length, 1);
+  } finally { good.close(); await new Promise((r) => setTimeout(r, 50)); }
 });
