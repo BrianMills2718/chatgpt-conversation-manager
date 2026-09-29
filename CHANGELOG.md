@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.9.18 (2026-09-29), extension 0.9.14
+
+### "No composer" on continuations: the page's own conversation load was refused by ChatGPT's rate limit
+
+- **Evidence (rph5, 16:44-16:48Z, therakorski, agent tab `aa9bfb28`).**
+  - **Not discarded or frozen.** v0.9.16's lifecycle record for both failed sends shows `was_discarded: false`, `freezes: 0`, `autoDiscardable: false`, and `discarded: false, frozen: false` from Chrome.
+  - **Account throttled at that moment.** The tab loaded continuation `6abba875` at 16:44:28. The same account's reply reads on another tab were refused with HTTP 429 at 16:45:11 and 16:45:29, and its pacer gap had widened to 28-112 s. The page sat hidden with 0 messages and no composer.
+  - **The reload hit the same limit.** It came at 16:45:37, still inside the throttled window, and failed the same way.
+  - **Which pages break.** New-chat pages, which load no conversation, kept working hidden throughout, and so did continuations when the account was not throttled (gw3). kw3 and sbl3 (14:37-14:39Z) also fell next to a 429 on that account (14:41:33Z).
+  - **Conclusion.** A conversation page renders no messages and no composer until its own `GET /backend-api/conversation/<id>` returns. When ChatGPT refuses that load, the page stays empty. The page being hidden is not what breaks it. Waiting on a rate-limited fetch fits the evidence; hidden-tab rendering and freezing do not.
+- **Fix.**
+  - **Evidence at failure time.** The no-composer error now reports the page's own load of the conversation from the browser's resource timing (`conversation_fetch`: HTTP status, how long ago, attempts), plus `rendered_messages`. These are logged in `request-timing.jsonl`.
+  - **Wait out the limit before reloading.** If a continuation page rendered nothing and its load was refused (or never answered), the broker counts it as the account's rate limit. It widens that account's pacer and waits the gap before reloading, logged as `wait_for_conversation_load`.
+  - **Fail fast when there isn't time.** If waiting would exceed the ask's timeout, the ask fails at once: `sent=no`, failure kind `rate_limited`, with the reason stated.
+  - Nothing is sent in either case.
+- **Not changed, and why.** The alternatives (keeping agent tabs visible or focused, a dedicated window, Chrome flags) would address hidden-tab rendering, which the evidence does not implicate. They would also steal focus from colleagues or need Chrome flags. The next occurrence's `conversation_fetch.status` shows whether the load was refused (429) or never came back.
+
 ## v0.9.17 (2026-09-29), extension 0.9.13
 
 ### Agent tabs are opened in the right account's browser profile; setup steps use Chrome's exact wording

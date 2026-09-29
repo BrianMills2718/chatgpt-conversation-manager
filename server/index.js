@@ -57,6 +57,7 @@ function appendBridgeObservation(event) {
 
 function bridgeFailureKind(error, last) {
   if (last?.visible_error === 'too_many_requests' || RATE_LIMIT_TEXT.test(String(error?.message || ''))) return 'rate_limited';
+  if (error?.rate_limited_load) return 'rate_limited';
   if (/^Could not confirm the prompt was sent/.test(String(error?.message || ''))) return 'send_unconfirmed';
   if (/^Refusing to return a reply/.test(String(error?.message || ''))) return 'attribution_mismatch';
   if (/No finished reply within|Timed out waiting/i.test(String(error?.message || ''))) return 'timeout';
@@ -442,7 +443,7 @@ function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { singl
           // send_prompt's pre-typing failures (content.js sendPrompt): which
           // step failed, that nothing was typed, which page instance it was,
           // and whether ChatGPT's rate-limit banner was showing.
-          stage: msg.stage, nothing_sent: msg.nothing_sent, page_id: msg.page_id, visible_error: msg.visible_error, lifecycle: msg.lifecycle, fill_detail: msg.fill_detail,
+          stage: msg.stage, nothing_sent: msg.nothing_sent, page_id: msg.page_id, visible_error: msg.visible_error, lifecycle: msg.lifecycle, fill_detail: msg.fill_detail, rendered_messages: msg.rendered_messages, conversation_fetch: msg.conversation_fetch,
         });
         remaining--;
         if (remaining <= 0) {
@@ -543,7 +544,7 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
         action: command.action, ok: false, duration_ms: Math.round(monoNow() - startedMs), rate_limited: rateLimited, error: err.message, spacing_ms: entry.pacer.spacingMs,
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: err?.tab?.slice(0, 8) ?? null, agent_tab: err?.agent ?? null, incognito: err?.incognito ?? null,
-        api_status: err?.api_status ?? null, ...(err?.api_limit_detail ? { api_limit_detail: err.api_limit_detail } : {}), ...(err?.stage ? { stage: err.stage } : {}), ...(err?.lifecycle ? { lifecycle: err.lifecycle } : {}), ...(err?.fill_detail ? { fill_detail: err.fill_detail } : {}), in_flight: agentRequestsInFlight, ...recordAndCountWindow(monoNow()),
+        api_status: err?.api_status ?? null, ...(err?.api_limit_detail ? { api_limit_detail: err.api_limit_detail } : {}), ...(err?.stage ? { stage: err.stage } : {}), ...(err?.conversation_fetch ? { conversation_fetch: err.conversation_fetch, rendered_messages: err.rendered_messages } : {}), ...(err?.lifecycle ? { lifecycle: err.lifecycle } : {}), ...(err?.fill_detail ? { fill_detail: err.fill_detail } : {}), in_flight: agentRequestsInFlight, ...recordAndCountWindow(monoNow()),
       });
     }
     throw err;
@@ -1020,6 +1021,24 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
           if (err.stage === 'no_composer' && err.visible_error === 'too_many_requests') {
             throw Object.assign(new Error(`${err.message} ChatGPT is showing its rate-limit banner ("making requests too quickly") in that tab, so it was not reloaded. ${nothingSent}`), { nothing_sent: true });
           }
+          // A continuation page that rendered no messages is waiting on its own
+          // load of the conversation; when ChatGPT refused that load (HTTP 429)
+          // the page stays empty, and reloading straight away hits the same
+          // limit (rph5, 16:44-16:48Z: the reload 28s later failed the same
+          // way while the account's reads were still being refused). Treat
+          // it as the account's rate limit: widen that account's pacer and
+          // wait it out before reloading, as far as the caller's time allows.
+          const loadRefused = err.stage === 'no_composer' && resolvedThreadId
+            && (err.conversation_fetch?.status === 429 || (err.rendered_messages === 0 && !err.conversation_fetch?.status));
+          if (loadRefused) {
+            applyRateLimit(null, normalizePacerKey(account));
+            const spacing = getPacerEntry(normalizePacerKey(account)).pacer.spacingMs;
+            const remaining = timeout_seconds * 1000 - (monoNow() - startedMs);
+            if (spacing > remaining - 60000) {
+              throw Object.assign(new Error(`${err.message} ChatGPT did not load this conversation for the page${err.conversation_fetch?.status ? ` (HTTP ${err.conversation_fetch.status})` : ''}, which happens while it rate-limits the account; waiting ${Math.round(spacing / 1000)}s before a reload would exceed this ask's timeout. ${nothingSent}`), { nothing_sent: true, rate_limited_load: true });
+            }
+            appendRequestTiming({ action: 'wait_for_conversation_load', tab: tab.slice(0, 8), account: account || null, wait_ms: Math.round(spacing), conversation_fetch: err.conversation_fetch || null, rendered_messages: err.rendered_messages ?? null });
+          }
           await waitForPacerGap(account);
           if (err.stage === 'no_composer') {
             appendRequestTiming({ action: 'reload_for_composer', ok: true, tab: tab.slice(0, 8), page_id: err.page_id, ...recordAndCountWindow(monoNow()) });
@@ -1376,7 +1395,7 @@ app.post('/api/undo', async (req, res) => {
 });
 
 function createMcpServer() {
-  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.17" });
+  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.18" });
 
   mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),

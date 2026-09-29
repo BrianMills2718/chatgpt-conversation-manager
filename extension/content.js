@@ -756,13 +756,16 @@ async function sendPrompt(text, excludeThreads = [], messagesBeforeHint = null) 
   const composer = await waitFor(() => findFirst(COMPOSER_SELECTORS, visible), 15000)
     .catch((waitErr) => {
       const banner = visibleRateLimitError();
+      const convFetch = pageConversationFetch();
+      const rendered = extractMessagesFromDom().length;
       const page = `page ${location.pathname} loaded ${Math.round((Date.now() - PAGE_STARTED_AT) / 1000)}s ago, `
         + `${document.visibilityState}, ${extractMessagesFromDom().length} messages rendered, `
         + `rate-limit banner ${banner ? "showing" : "not showing"}, `
-        + `checked ${waitErr.checks ?? "?"} times over ${Math.round((waitErr.waited_ms ?? 0) / 1000)}s`;
+        + `checked ${waitErr.checks ?? "?"} times over ${Math.round((waitErr.waited_ms ?? 0) / 1000)}s`
+        + (convFetch ? `, the page's own load of this conversation ${convFetch.status ? `got HTTP ${convFetch.status}` : convFetch.none ? 'was not seen' : 'has no status'}` : '');
       throw Object.assign(
         new Error(`no ChatGPT composer found (tried ${COMPOSER_SELECTORS.join(", ")}) within 15s (${page}); nothing was typed or sent.`),
-        { reply: { stage: "no_composer", nothing_sent: true, page_id: PAGE_ID, visible_error: banner, lifecycle } },
+        { reply: { stage: "no_composer", nothing_sent: true, page_id: PAGE_ID, visible_error: banner, lifecycle, rendered_messages: rendered, conversation_fetch: convFetch } },
       );
     });
   const threadBefore = realThreadId();
@@ -990,6 +993,21 @@ async function findNewChatWithPrompt(body, excludeThreads = []) {
     if (firstUser && samePrompt(firstUser.text, body)) return c.id;
   }
   return null;
+}
+
+// The page's own request for this conversation's data, from the browser's
+// resource timing (responseStatus, Chrome 109+). A conversation page shows no
+// messages and no composer until that data arrives, so a refused load (HTTP
+// 429 while the account is rate-limited) leaves exactly the "0 messages
+// rendered, no composer" page seen on 2026-09-29 (kw3, sbl3, rph5).
+try { performance.setResourceTimingBufferSize(5000); } catch {}
+function pageConversationFetch() {
+  const id = realThreadId();
+  if (!id) return null;
+  const entries = performance.getEntriesByType("resource").filter((e) => e.name.includes(`/backend-api/conversation/${id}`) && !e.name.includes("/stream"));
+  const e = entries.at(-1);
+  if (!e) return { none: true };
+  return { status: e.responseStatus || null, duration_ms: Math.round(e.duration), seconds_ago: Math.round((performance.now() - e.startTime) / 1000), attempts: entries.length };
 }
 
 function realThreadId() {
