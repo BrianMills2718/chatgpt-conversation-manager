@@ -1075,7 +1075,7 @@ app.post('/api/debug/composer-probe', async (req, res) => {
   let tab = null;
   try {
     ({ tab } = await pickIdleTab({ openWaitMs: 1000 }));
-    res.json(await dispatchToExtension({ action: 'debug_composer_probe', text: req.body?.text, wait_ms: req.body?.wait_ms, html_chars: req.body?.html_chars, keep: req.body?.keep }, 60000, { tab }));
+    res.json(await dispatchToExtension({ action: 'debug_composer_probe', text: req.body?.text, mode: req.body?.mode, wait_ms: req.body?.wait_ms, html_chars: req.body?.html_chars, keep: req.body?.keep }, 60000, { tab }));
   } catch (err) { res.status(503).json({ error: err.message }); }
   finally { if (tab) claimedTabs.delete(tab); }
 });
