@@ -764,14 +764,17 @@ async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = nul
   throw new Error(`No idle agent ChatGPT tab${where} (${JSON.stringify(seen)}); opened ${AGENT_TAB_URL} but no matching tab connected within ${Math.round(openWaitMs / 1000)}s (is the browser signed in and the extension enabled?).`);
 }
 
-async function waitForTab(tab, predicate, timeoutMs, what, { onPoll = null } = {}) {
+async function waitForTab(tab, predicate, timeoutMs, what, { onPoll = null, since = null } = {}) {
   const startedAt = monoNow();
+  // Reconnects are measured from `since` (when the navigation was sent): the
+  // new page can connect before this wait starts.
+  const reference = since ?? startedAt;
   const deadline = startedAt + timeoutMs;
   const diag = { polls: 0, last_thread_id: undefined, last_page_id: null, last_error: null, reconnected_after_ms: null };
   while (monoNow() < deadline) {
     await sleep(700);
     const ws = [...extensionSockets].find((w) => w.tabToken === tab && w.readyState === w.OPEN);
-    if (ws && ws.connectedAtMono > startedAt && diag.reconnected_after_ms === null) diag.reconnected_after_ms = Math.round(ws.connectedAtMono - startedAt);
+    if (ws && ws.connectedAtMono > reference && diag.reconnected_after_ms === null) diag.reconnected_after_ms = Math.round(ws.connectedAtMono - reference);
     diag.polls++;
     try {
       const info = await dispatchToExtension({ action: "get_tab" }, 3000, { tab });
@@ -803,6 +806,7 @@ async function navigateAndWait(tab, { threadId = null, account = null }) {
   try {
     await dispatchToExtension(command, COMMAND_TIMEOUT_MS, { tab });
     const { diag } = await waitForTab(tab, predicate, NAV_WAIT_MS, what, {
+      since: startedMs,
       onPoll: async (d, elapsed) => {
         // Back on a page, but not the target: the navigation was lost.
         if (!reissued && elapsed > NAV_WAIT_MS / 2 && d.last_error === null && d.last_thread_id !== undefined) {
