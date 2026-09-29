@@ -764,6 +764,13 @@ async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = nul
   throw new Error(`No idle agent ChatGPT tab${where} (${JSON.stringify(seen)}); opened ${AGENT_TAB_URL} but no matching tab connected within ${Math.round(openWaitMs / 1000)}s (is the browser signed in and the extension enabled?).`);
 }
 
+// Every socket the broker has held for this tab since `reference`, with when
+// it connected (ms after reference; negative = before) and its state.
+function tabSocketsDiag(tab, reference) {
+  return [...extensionSockets].filter((w) => w.tabToken === tab)
+    .map((w) => ({ connected_ms: Math.round((w.connectedAtMono ?? NaN) - reference), state: w.readyState }));
+}
+
 async function waitForTab(tab, predicate, timeoutMs, what, { onPoll = null, since = null } = {}) {
   const startedAt = monoNow();
   // Reconnects are measured from `since` (when the navigation was sent): the
@@ -773,17 +780,18 @@ async function waitForTab(tab, predicate, timeoutMs, what, { onPoll = null, sinc
   const diag = { polls: 0, last_thread_id: undefined, last_page_id: null, last_error: null, reconnected_after_ms: null };
   while (monoNow() < deadline) {
     await sleep(700);
-    const ws = [...extensionSockets].find((w) => w.tabToken === tab && w.readyState === w.OPEN);
-    if (ws && ws.connectedAtMono > reference && diag.reconnected_after_ms === null) diag.reconnected_after_ms = Math.round(ws.connectedAtMono - reference);
+    const newest = [...extensionSockets].filter((w) => w.tabToken === tab && w.readyState === w.OPEN).sort((a, b) => b.connectedAtMono - a.connectedAtMono)[0];
+    if (newest && newest.connectedAtMono > reference && diag.reconnected_after_ms === null) diag.reconnected_after_ms = Math.round(newest.connectedAtMono - reference);
     diag.polls++;
     try {
       const info = await dispatchToExtension({ action: "get_tab" }, 3000, { tab });
       diag.last_thread_id = info.thread_id ?? null; diag.last_page_id = info.page_id ?? null; diag.last_error = null;
-      if (predicate(info)) return { info, diag: { ...diag, elapsed_ms: Math.round(monoNow() - startedAt) } };
+      if (predicate(info)) return { info, diag: { ...diag, elapsed_ms: Math.round(monoNow() - startedAt), sockets: tabSocketsDiag(tab, reference) } };
     } catch (err) { diag.last_error = err.message; /* reconnecting after navigation */ }
     if (onPoll) await onPoll(diag, monoNow() - startedAt);
   }
   diag.elapsed_ms = Math.round(monoNow() - startedAt);
+  diag.sockets = tabSocketsDiag(tab, reference);
   const where = diag.last_thread_id === undefined ? 'never answered' : `still showed ${diag.last_thread_id ? `conversation ${diag.last_thread_id}` : 'no conversation'}`;
   const reload = diag.reconnected_after_ms === null ? 'no page reload was seen' : `it reconnected after ${diag.reconnected_after_ms}ms`;
   const seen = `the tab ${where} (${reload}; ${diag.polls} checks${diag.last_error ? `; last error: ${diag.last_error}` : ''})`;
