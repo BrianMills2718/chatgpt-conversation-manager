@@ -1270,6 +1270,23 @@ async function handleCommand(msg) {
     location.href = "https://chatgpt.com/";
     return { navigated: true };
   }
+  if (msg.action === "debug_composer_probe") {
+    // Temporary reconnaissance (2026-09-29): put text in the composer WITHOUT
+    // sending, report what the editor turned it into, then empty it. Used to
+    // find why ChatGPT stores some prompts markdown-escaped.
+    const c = findFirst(COMPOSER_SELECTORS, visible);
+    if (!c) throw new Error("no composer");
+    setComposerText(c.el, String(msg.text || ""));
+    await sleep(Number(msg.wait_ms) || 1500);
+    const el = findFirst(COMPOSER_SELECTORS, visible)?.el || c.el;
+    const counts = {};
+    for (const sel of ["a", "code", "pre", "strong", "em", "h1", "h2", "h3", "ul", "ol", "li", "p", "br", "span", "blockquote", "hr"]) counts[sel] = el.querySelectorAll(sel).length;
+    const markSamples = [...el.querySelectorAll("a, code, pre, strong, em, h1, h2, h3, li")].slice(0, 8).map((n) => `${n.tagName}:${(n.textContent || "").slice(0, 40)}`);
+    const out = { tag: el.tagName, cls: String(el.className).slice(0, 120), selector: c.selector, counts, markSamples,
+      same_text: samePrompt(el.value ?? el.innerText ?? "", msg.text), html_head: el.innerHTML.slice(0, Number(msg.html_chars) || 800) };
+    if (!msg.keep) setComposerText(el, "");
+    return out;
+  }
   if (msg.action === "retry_send_click") return retrySendClick(String(msg.expected || ""), msg.thread_before || null, msg.messages_before ?? null, msg.exclude_threads || []);
   if (msg.action === "send_prompt") return sendPrompt(msg.text, msg.exclude_threads || []);
   if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before, msg.expected ?? null, msg.exclude_threads || [], msg.thread_hint || null);

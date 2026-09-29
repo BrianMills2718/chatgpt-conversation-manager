@@ -1069,6 +1069,16 @@ app.post("/api/rename", async (req, res) => {
 // Temporary, read-only reconnaissance endpoint for adding thinking-level
 // control -- see the matching debug_inspect_toolbar action in content.js.
 // Not documented, not an MCP tool; remove once the real picker is found.
+// Temporary (2026-09-29): composer probe on an idle agent tab; sends nothing.
+app.post('/api/debug/composer-probe', async (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  let tab = null;
+  try {
+    ({ tab } = await pickIdleTab({ openWaitMs: 1000 }));
+    res.json(await dispatchToExtension({ action: 'debug_composer_probe', text: req.body?.text, wait_ms: req.body?.wait_ms, html_chars: req.body?.html_chars, keep: req.body?.keep }, 60000, { tab }));
+  } catch (err) { res.status(503).json({ error: err.message }); }
+  finally { if (tab) claimedTabs.delete(tab); }
+});
 app.post('/api/debug/inspect-toolbar', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   try { res.json(await dispatchToExtension({ action: 'debug_inspect_toolbar' }, COMMAND_TIMEOUT_MS, { single: true })); }
