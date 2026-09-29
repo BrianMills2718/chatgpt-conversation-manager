@@ -66,6 +66,7 @@ before(async () => {
   process.env.PORT = '0';
   process.env.RENAMER_TOKEN = TOKEN;
   process.env.ARCHIVE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-attr-'));
+  process.env.RETRY_CLICK_AFTER_MS = '60,120';
   mod = await import('../server/index.js');
   server = mod.server;
   await new Promise((resolve) => (server.listening ? resolve() : server.listen(0, resolve)));
@@ -196,4 +197,41 @@ test('a new agent tab whose account arrives after it connects still paces and lo
     const r = await mod.askChatgpt({ text: 'late identity', timeout_seconds: 10, pollMs: 20 });
     assert.equal(r.account, 'late@example.com');
   } finally { ws.close(); await new Promise((r) => setTimeout(r, 50)); }
+});
+
+test('an unconfirmed click is retried only through the server-checked retry, and followed once it lands', async () => {
+  const retries = [];
+  const t = await agentTab('retry-tab-1', 'r@example.com', {
+    send_prompt: () => ({ thread_id: null, dom_before: 0, messages_before: 0, send_confirmed: false, confirmed_by: null }),
+    retry_send_click: (m) => {
+      retries.push(m);
+      return retries.length === 1 ? { clicked: true } : { clicked: false, confirmed_by: 'server_new_chat', thread_id: 'conv-r' };
+    },
+    get_reply: (m) => (m.thread_hint === 'conv-r'
+      ? { done: true, source: 'api', end_turn: true, reply: 'answer after re-click', thread_id: 'conv-r' }
+      : { done: false, source: 'dom', thread_id: null }),
+  });
+  try {
+    const r = await mod.askChatgpt({ text: 'big prompt', timeout_seconds: 10, pollMs: 20 });
+    assert.equal(r.reply, 'answer after re-click');
+    assert.equal(retries.length, 2);
+    assert.equal(retries[0].expected, 'big prompt');
+    const events = fs.readFileSync(mod.BRIDGE_OBSERVATIONS_PATH, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepEqual(events.at(-1).retry_clicks.map((x) => x.clicked), [true, false]);
+  } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
+});
+
+test('an unconfirmed send that never shows up times out as sent=unknown, not sent=false', async () => {
+  const t = await agentTab('never-tab-1', 'n@example.com', {
+    send_prompt: () => ({ thread_id: null, dom_before: 0, messages_before: 0, send_confirmed: false, confirmed_by: null }),
+    retry_send_click: () => ({ clicked: false, reason: 'composer_no_longer_holds_prompt' }),
+    get_reply: () => ({ done: false, source: 'dom', thread_id: null }),
+  });
+  try {
+    await assert.rejects(mod.askChatgpt({ text: 'lost prompt', timeout_seconds: 1, pollMs: 20 }), (err) => {
+      assert.match(err.message, /Could not confirm/);
+      assert.equal(err.sent, null);
+      return true;
+    });
+  } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
 });

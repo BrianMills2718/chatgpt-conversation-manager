@@ -73,7 +73,7 @@ const REQUEST_TIMING_PATH = path.join(ARCHIVE_DIR, 'observations', 'request-timi
 const AGENT_PACER_STATE_PATH = path.join(ARCHIVE_DIR, 'observations', 'agent-pacer-state.json');
 // Actions that make a real request against ChatGPT's backend (not a pure
 // local DOM/status read like get_tab or navigate_home).
-const BACKEND_TOUCHING_ACTIONS = new Set(['send_prompt', 'get_reply', 'list_recent_chats', 'capture_current_chat']);
+const BACKEND_TOUCHING_ACTIONS = new Set(['send_prompt', 'get_reply', 'retry_send_click', 'list_recent_chats', 'capture_current_chat']);
 
 // One pacer per ChatGPT account, not one global pacer, so a rate-limit signal
 // on one account's quota does not throttle every other connected account too
@@ -469,7 +469,7 @@ function broadcastReloadTab() {
 // actually checked the API (api_checked) or actually failed trying to
 // (err.api_status set) -- everything else in this set always makes a real
 // request and is paced unconditionally.
-const ALWAYS_REAL_ACTIONS = new Set(['send_prompt', 'list_recent_chats', 'capture_current_chat']);
+const ALWAYS_REAL_ACTIONS = new Set(['send_prompt', 'retry_send_click', 'list_recent_chats', 'capture_current_chat']);
 
 // Waits out the account's current pacer gap without recording a request.
 async function waitForPacerGap(account) {
@@ -785,6 +785,11 @@ function pollLearnedNothing(poll) {
   return poll.source === "api_waiting" && !poll.generating && (!poll.api_checked || poll.api_status != null);
 }
 
+// When an unconfirmed send still shows nothing, ask the tab to check the
+// server and, if the prompt has not arrived, click Send again. Spaced out
+// because a hidden tab's own timers can be throttled to about once a minute.
+const RETRY_CLICK_AFTER_MS = (process.env.RETRY_CLICK_AFTER_MS || '30000,75000,135000').split(',').map(Number).filter((n) => n > 0);
+
 // Conversations already handed to an ask (in flight or answered). The
 // extension's server-side search for an unconfirmed new chat skips these, so
 // two asks with identical text never claim the same conversation. Bounded.
@@ -810,6 +815,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
     let usedAccount = account;
     let sendSeen = null;
     let sentThreadId = null;
+    const retryClicks = [];
     try {
       if (thread_id) resolvedThreadId = threadIdFromInput(thread_id);
       if (thread_title) resolvedThreadId = await resolveThreadTitle(thread_title, account);
@@ -914,6 +920,8 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
           || (Number.isInteger(poll.message_count) && poll.message_count > (Number(sent.dom_before) || 0))) sendSeen = true;
       };
       const deadline = Date.now() + timeout_seconds * 1000;
+      const sentAtMs = Date.now();
+      const retryClickAfterMs = [...RETRY_CLICK_AFTER_MS];
       let previousDoneText = null;
       // A finished reply needs two agreeing reads to rule out a mid-stream
       // pause or an intermediate message -- unless ChatGPT's own conversation
@@ -928,6 +936,18 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         await sleep(pollMs);
         try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before, expected: body, thread_hint: sentThreadId, exclude_threads: [...attributedThreads] }, 30000, { tab, account }); }
         catch (err) { last = { done: false, error: err.message }; continue; }
+        if (!sendSeen && !last.discovered_thread_id && retryClickAfterMs.length && Date.now() - sentAtMs >= retryClickAfterMs[0]) {
+          retryClickAfterMs.shift();
+          try {
+            const retry = await dispatchToExtension({ action: "retry_send_click", expected: body, thread_before: conversationMode === 'new' ? null : resolvedThreadId,
+              messages_before: sent.messages_before, exclude_threads: [...attributedThreads] }, 60000, { tab, account });
+            retryClicks.push({ after_ms: Date.now() - sentAtMs, clicked: Boolean(retry.clicked), confirmed_by: retry.confirmed_by || null, reason: retry.reason || null });
+            if (retry.confirmed_by) {
+              sendSeen = true;
+              if (retry.thread_id && !sentThreadId) { sentThreadId = retry.thread_id; noteAttributedThread(sentThreadId); }
+            }
+          } catch (err) { retryClicks.push({ after_ms: Date.now() - sentAtMs, error: err.message }); }
+        }
         if (last.discovered_thread_id && !sentThreadId) {
           // Found server-side: the send landed although the page never showed it.
           sentThreadId = last.discovered_thread_id;
@@ -961,15 +981,18 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         }
         const threadId = last.thread_id || sentThreadId || resolvedThreadId || null;
         noteAttributedThread(threadId);
-        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'success', account: usedAccount || null, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'success', account: usedAccount || null, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
         return { thread_id: threadId, url: threadId ? `https://chatgpt.com/c/${threadId}` : null, reply: last.reply, images: last.images, account: usedAccount || null };
       }
       throw new Error(askTimeoutMessage({ timeout_seconds, sendSeen, threadId: last?.thread_id || sent.thread_id || resolvedThreadId || null, last, sent }));
     } catch (err) {
-      err.sent = err.sent_unknown ? null : err.nothing_sent ? false : sendSeen;
+      // After a click nothing proves "not sent", so an unconfirmed click is
+      // unknown, never false (the 2026-09-29 live check returned sent:false
+      // for an unconfirmed large prompt).
+      err.sent = err.sent_unknown ? null : err.nothing_sent ? false : sendSeen ? true : null;
       err.thread_id = last?.thread_id || sentThreadId || resolvedThreadId || null;
       err.account = usedAccount || null;
-      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'failed', account: usedAccount || null, sent: err.sent, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'failed', account: usedAccount || null, sent: err.sent, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
       throw err;
     } finally {
       if (claimedTab) claimedTabs.delete(claimedTab);
