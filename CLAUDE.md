@@ -1,4 +1,4 @@
-# chatgpt-conversation-manager-v0.2
+# chatgpt-conversation-manager (Brian's checkout: chatgpt-conversation-manager-v0.2)
 
 Read this before touching the repo. It complements `README.md` (setup, MCP tools, architecture)
 with what an agent needs to not repeat mistakes made here before.
@@ -22,6 +22,11 @@ straight in anything you write about this repo.
 ## Whose machine this describes
 
 Several sections below describe **Brian's own deployment**, not the product: the `chmod 555` main checkout, the `chatgpt-bridge.service` systemd user unit, the Windows Task Scheduler launcher, and his Chrome profile. None of these ship in this repo. On anyone else's machine, the broker is started with `npm start` (see README "Install"), and a restart means stopping and re-running that command.
+
+Brian-only details that used to be in the README:
+- `~/.bashrc` exports `CHATGPT_BRIDGE_TOKEN` from `~/.local/state/chatgpt-bridge/token`, which holds the same value as `RENAMER_TOKEN`.
+- The reverse direction (ChatGPT reaching this machine) is `~/code/remote-mcp` (`https://rmcp.brianmills.dev`, the self-hosted "Desktop Commander" replacement). Its `deploy/windows/chatgpt-bridge.ps1` can also start this broker, but that is the second starter that fought systemd on 2026-09-29, and it is disabled.
+- Brian's Python dispatch helpers (`chatgpt_dispatch_client.py`, the weekly supervisor) live in his private `weekly-plans` repo.
 
 ## Working in this repo
 

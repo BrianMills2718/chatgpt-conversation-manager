@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.9.12 (2026-09-29)
+
+### A colleague's cold install, fixed from a fresh-clone walkthrough
+
+A fresh clone, followed literally through README "Install" in a clean directory with a new token and no `data/` or `.env`, found these; each is fixed:
+- **Node 20.** `npm test` never exited on Node 20.6: every test passed, but the process hung. The minimum is now Node 22 (`engines` in `package.json`, and the README). Node 20 is past end of life.
+- **Lockfile.** `package-lock.json` still said 0.3.0, so every install rewrote it. It is regenerated, and `npm audit fix` clears 4 vulnerabilities (1 high). Tests still pass.
+- **Port.** Changing the port was only hinted at. Install now says how, and that 8787 below means your port.
+- **Second broker.** A second broker on the same port died with a raw `EADDRINUSE` stack trace. It now says the port is in use, that another broker is probably running, and to see "Keeping the broker running".
+- **Backup default.** Backup was on by default in `.env.example`. A newcomer's first run downloads every chat for hours on the shared rate limit. The default is now off, with the reason stated. Install also mentions that the extension auto-archives chats you open.
+- **Keeping the broker running.** New README section with one supported way (`npm start` in a terminal) and the rule that only one thing may start the broker, with the 2026-09-29 incident as the reason. The README no longer offers remote-mcp's Task Scheduler launcher, which was the second starter in that incident.
+- **run-server.sh.** It failed silently when run by hand. It now also prints to the terminal when interactive.
+- **Brian-only details moved.** `~/.bashrc` token file, `remote-mcp`, and the private `weekly-plans` repo are now in CLAUDE.md's "Whose machine this describes". Stale version text is fixed. Step 5 has a copy-paste line for Codex's token.
+- **Not changed:** `install-windows-startup.sh` still has no uninstall command; its header says which file to delete.
+
 ## v0.9.11 (2026-09-29)
 
 ### Fixed: flaky timing tests, and pacing and timeouts shortened by wall-clock steps

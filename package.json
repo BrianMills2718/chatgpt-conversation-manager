@@ -1,7 +1,10 @@
 {
   "name": "chatgpt-conversation-manager",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "type": "module",
   "scripts": {
     "start": "node --env-file=.env server/index.js",
