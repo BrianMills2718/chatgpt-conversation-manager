@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.9.13 (2026-09-29)
+
+### New-chat navigation: logged, waited out properly, and diagnosable
+
+- **What happened.** About 1 in 20 new-chat asks failed with "ChatGPT tab never opened a new chat within 20s": a_goodwill at 09:53:39Z and a_webvowl at 10:02:33Z. Nothing was sent. `bridge-events.jsonl` recorded them only as `failure_kind: "unknown"`, with no detail. The 20 s bound was already on the steady clock (v0.9.11 was live from 09:49Z), so the clock steps were not the cause. `navigate_home` is a full page load (`location.href = "https://chatgpt.com/"`), and in a background tab that load, followed by the new page's extension reconnecting, sometimes takes longer than 20 s.
+- **Fix.**
+  - **Longer bound.** New-chat and continuation navigations now wait up to `NAV_WAIT_MS` (60 s).
+  - **One retry.** If the tab is answering again but still on the wrong page halfway through, the navigation is issued once more.
+  - **Logging.** Every navigation is logged in `request-timing.jsonl` as `action: "navigate"`, with target, `duration_ms` and `reconnected_after_ms` on the steady clock, number of checks, the last conversation id the tab reported, any last error, and whether it was re-issued.
+  - **Failures.** A failure is `failure_kind: "navigation"`, `sent=no`. The message says whether the tab never answered or was still on the old page, and whether a page reload was seen.
+- The next occurrence will show whether the page load is just slow, which the longer bound absorbs, or the navigation is being lost, which the re-issue addresses.
+
 ## v0.9.12 (2026-09-29)
 
 ### A colleague's cold install, fixed from a fresh-clone walkthrough

@@ -67,6 +67,7 @@ before(async () => {
   process.env.RENAMER_TOKEN = TOKEN;
   process.env.ARCHIVE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-attr-'));
   process.env.RETRY_CLICK_AFTER_MS = '60,120';
+  process.env.NAV_WAIT_MS = '4000';
   mod = await import('../server/index.js');
   server = mod.server;
   await new Promise((resolve) => (server.listening ? resolve() : server.listen(0, resolve)));
@@ -335,4 +336,59 @@ test('the fail-closed gate passes only the exact prompt (trailing whitespace asi
   assert.ok(verbatimMismatch(prompt.replace('    x', ' x'), prompt));
   assert.ok(verbatimMismatch('', prompt));
   assert.match(verbatimMismatch(null, prompt, 'no controller').reason, /no controller/);
+});
+
+test('a slow page load is waited for and logged; a tab that never comes back fails with sent=no and diagnostics', async () => {
+  // Slow: the new page reports a new chat only after ~1.5s.
+  let navAt = 0;
+  const slow = await agentTab('slow-nav-tab', 'n1@example.com', {
+    navigate_home: () => { navAt = performance.now(); return { navigated: true }; },
+    send_prompt: () => ({ thread_id: 'conv-slow', dom_before: 0, messages_before: 0, send_confirmed: true }),
+    get_reply: () => ({ done: true, source: 'api', end_turn: true, reply: 'slow ok', thread_id: 'conv-slow' }),
+  });
+  // get_tab: on an old conversation until 1.5s after navigate_home.
+  slow.ws.removeAllListeners('message');
+  slow.ws.on('message', (buf) => {
+    const m = JSON.parse(buf.toString());
+    if (m.type !== 'command') return;
+    const reply = (extra) => slow.ws.send(JSON.stringify({ type: 'command_result', id: m.id, tab: 'slow-nav-tab', agent: true, ...extra }));
+    const thread = navAt && performance.now() - navAt > 1500 ? null : 'old-conv';
+    if (m.action === 'get_tab') return reply({ ok: true, tab: 'slow-nav-tab', agent: true, busy: false, thread_id: thread, account: { email: 'n1@example.com' } });
+    if (m.action === 'navigate_home') { navAt = navAt || performance.now(); return reply({ ok: true, navigated: true }); }
+    if (m.action === 'send_prompt') return reply({ ok: true, thread_id: 'conv-slow', dom_before: 0, messages_before: 0, send_confirmed: true });
+    if (m.action === 'get_reply') return reply({ ok: true, done: true, source: 'api', end_turn: true, reply: 'slow ok', thread_id: 'conv-slow' });
+    reply({ ok: false, error: `unhandled ${m.action}` });
+  });
+  try {
+    const r = await mod.askChatgpt({ text: 'after a slow load', timeout_seconds: 10, pollMs: 20 });
+    assert.equal(r.reply, 'slow ok');
+    const nav = fs.readFileSync(mod.REQUEST_TIMING_PATH, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.action === 'navigate').at(-1);
+    assert.equal(nav.ok, true);
+    assert.ok(nav.duration_ms >= 1400, `navigation logged ${nav.duration_ms}ms`);
+    assert.equal(nav.target, 'new_chat');
+  } finally { slow.close(); await new Promise((r) => setTimeout(r, 50)); }
+});
+
+test('a tab that never reaches the new chat fails with sent=no, kind navigation, and diagnostics', async () => {
+  const stuck = await agentTab('stuck-nav-tab', 'n2@example.com', {});
+  stuck.ws.removeAllListeners('message');
+  let navigations = 0;
+  stuck.ws.on('message', (buf) => {
+    const m = JSON.parse(buf.toString());
+    if (m.type !== 'command') return;
+    const reply = (extra) => stuck.ws.send(JSON.stringify({ type: 'command_result', id: m.id, tab: 'stuck-nav-tab', agent: true, ...extra }));
+    if (m.action === 'get_tab') return reply({ ok: true, tab: 'stuck-nav-tab', agent: true, busy: false, thread_id: 'old-conv', account: { email: 'n2@example.com' } });
+    if (m.action === 'navigate_home') { navigations++; return reply({ ok: true, navigated: true }); }
+    reply({ ok: false, error: `unhandled ${m.action}` });
+  });
+  try {
+    await assert.rejects(mod.askChatgpt({ text: 'never', timeout_seconds: 10, pollMs: 20 }), (err) => {
+      assert.match(err.message, /never opened a new chat within 4s: the tab still showed conversation old-conv \(no page reload was seen; \d+ checks\)\. Nothing was sent\./);
+      assert.equal(err.sent, false);
+      return true;
+    });
+    assert.equal(navigations, 2, 'the lost navigation is re-issued once');
+    const ev = fs.readFileSync(mod.BRIDGE_OBSERVATIONS_PATH, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).at(-1);
+    assert.equal(ev.failure_kind, 'navigation');
+  } finally { stuck.close(); await new Promise((r) => setTimeout(r, 50)); }
 });
