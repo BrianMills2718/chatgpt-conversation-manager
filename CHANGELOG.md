@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.9.10 (2026-09-29)
+
+### Root cause of the empty fill: acting on the composer before React hydrates it
+
+- **Evidence.** The live cm3 resend on 0.9.9 (08:41Z, chat `6abb79c7`) arrived verbatim, first click, `prompt_verbatim: true`. On the way, its first fill attempt failed with "no React fiber above the composer", and the retry one second later succeeded. Right after a page load or navigation, the composer element is on the page before React has hydrated it, so a fill in that window acts on nothing. cm3's first attempts (08:32Z) hit that window: 0 characters, then the typed fallback that 0.9.9 removed.
+- **Both truncated sends were typed, not filled.** su5 (08:38-08:40Z, 41,495 characters, stored as 273 characters in a ``` fence) and cm3 (08:32-08:37Z) were both logged `fill_mode: "typed"` on 0.9.8. In each, the fill found no live composer and the fallback typed the prompt into the rich composer. There, a typed ``` line starts a code block, and what was submitted ended at the first fence. The `send_prompt` at 08:41:45Z logged `fill_mode: "transaction"` is the cm3 resend. It arrived verbatim (`6abb79c7`), so `fill_mode: "transaction"` has not yet been seen with a truncated result. As a principle, though, `fill_mode` is not proof of a verbatim send. The gate is: since 0.9.9, Send is clicked only if ChatGPT's own `getText()`, the exact submission, equals the prompt.
+- **Fix.** The extension waits up to 20 s for the composer to be live. Each attempt re-finds, and re-marks, the element in case hydration replaced it, and two genuine fill mismatches are still allowed. `fill_detail` records any recovered failures. The 0.9.9 gate still refuses to click unless ChatGPT's own `getText()` is the prompt.
+
 ## v0.9.9 (2026-09-29)
 
 ### Fail closed: Send is clicked only if ChatGPT would submit the prompt verbatim
