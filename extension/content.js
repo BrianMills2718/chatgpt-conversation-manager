@@ -1275,6 +1275,7 @@ async function handleCommand(msg) {
     // returning short surrounding snippets. Read-only.
     const needle = String(msg.needle || "");
     const urls = [...new Set([...document.scripts].map((x) => x.src).filter(Boolean)
+      .concat([...document.querySelectorAll('link[rel="modulepreload"], link[rel="preload"][as="script"]')].map((l) => l.href))
       .concat(performance.getEntriesByType("resource").map((e) => e.name).filter((n) => /\.js(\?|$)/.test(n))))];
     const hits = [];
     for (const u of urls) {
@@ -1286,7 +1287,7 @@ async function handleCommand(msg) {
         i = body.indexOf(needle, i + needle.length);
       }
     }
-    return { scanned: urls.length, hits };
+    return { scanned: urls.length, hits, sample_urls: urls.slice(0, 5).map((u) => u.slice(-50)) };
   }
   if (msg.action === "debug_composer_probe") {
     // Temporary reconnaissance (2026-09-29): put text in the composer WITHOUT
