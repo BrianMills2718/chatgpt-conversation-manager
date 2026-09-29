@@ -115,7 +115,7 @@ test('an ask with no account is paced and logged under the tab\'s own account, a
   } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
 });
 
-test('a reply whose conversation holds a different prompt fails at once and says the prompt was sent', async () => {
+test('a reply whose conversation holds a different prompt fails at once without claiming the prompt was sent', async () => {
   const t = await agentTab('mismatch-tab-1', 'a@example.com', {
     send_prompt: () => ({ thread_id: null, dom_before: 0, messages_before: 0, send_confirmed: true, confirmed_by: 'composer_cleared' }),
     get_reply: () => ({ done: false, source: 'api', prompt_mismatch: true, thread_id: 'conv-x', found_prompt_head: 'Correctness-only bug audit ... never-absolute', found_prompt_chars: 65781 }),
@@ -124,7 +124,7 @@ test('a reply whose conversation holds a different prompt fails at once and says
     const started = Date.now();
     await assert.rejects(mod.askChatgpt({ text: PF2, timeout_seconds: 30, pollMs: 20 }), (err) => {
       assert.match(err.message, /Refusing to return a reply/);
-      assert.equal(err.sent, true);
+      assert.equal(err.sent, null, 'a mismatch says nothing about whether our prompt landed');
       assert.equal(err.thread_id, 'conv-x');
       return true;
     });
@@ -132,7 +132,7 @@ test('a reply whose conversation holds a different prompt fails at once and says
   } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
 });
 
-test('an ask the extension verified was not sent reports sent=false over REST', async () => {
+test('an ask that failed before clicking Send reports sent=false over REST', async () => {
   const t = await agentTab('notsent-tab-1', 'b@example.com', {});
   // Replace the handler: send_prompt fails with the extension's verified-not-sent report.
   t.ws.removeAllListeners('message');
@@ -141,7 +141,7 @@ test('an ask the extension verified was not sent reports sent=false over REST', 
     if (m.type !== 'command') return;
     const reply = (extra) => t.ws.send(JSON.stringify({ type: 'command_result', id: m.id, tab: 'notsent-tab-1', agent: true, ...extra }));
     if (m.action === 'get_tab') return reply({ ok: true, tab: 'notsent-tab-1', agent: true, busy: false, thread_id: null, account: { email: 'b@example.com' } });
-    if (m.action === 'send_prompt') return reply({ ok: false, error: 'ChatGPT did not accept the prompt: ... It was not sent; retrying is safe.', stage: 'send_not_accepted', nothing_sent: false, verified_not_sent: true });
+    if (m.action === 'send_prompt') return reply({ ok: false, error: 'no enabled send button found within 8s (...); the composer was cleared and nothing was sent.', stage: 'no_send_button', nothing_sent: true });
     reply({ ok: false, error: `unhandled ${m.action}` });
   });
   try {
@@ -153,6 +153,25 @@ test('an ask the extension verified was not sent reports sent=false over REST', 
     assert.equal(res.status, 503);
     assert.equal(body.sent, false);
     assert.equal(body.account, 'b@example.com');
-    assert.match(body.error, /not accept/);
+    assert.match(body.error, /nothing was sent/);
   } finally { t.close(); }
+});
+
+test('an unconfirmed new-chat send found server-side is followed to its reply', async () => {
+  const gets = [];
+  const t = await agentTab('discover-tab-1', 'c@example.com', {
+    send_prompt: () => ({ thread_id: null, dom_before: 0, messages_before: 0, send_confirmed: false, confirmed_by: null }),
+    get_reply: (m) => {
+      gets.push(m);
+      if (!m.thread_hint) return { done: false, source: 'server_discovery', thread_id: 'conv-found', discovered_thread_id: 'conv-found' };
+      return { done: true, source: 'api', end_turn: true, reply: 'late but ours', thread_id: 'conv-found' };
+    },
+  });
+  try {
+    const r = await mod.askChatgpt({ text: 'discover me', timeout_seconds: 10, pollMs: 20 });
+    assert.equal(r.reply, 'late but ours');
+    assert.equal(r.thread_id, 'conv-found');
+    assert.equal(gets.at(-1).thread_hint, 'conv-found', 'later polls must follow the discovered conversation');
+    assert.ok(gets.at(-1).exclude_threads.includes('conv-found'), 'no other ask may claim this conversation');
+  } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
 });

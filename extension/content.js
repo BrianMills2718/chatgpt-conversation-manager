@@ -737,7 +737,7 @@ function refuseWhileArchiving(action) {
   if (bulkArchiving) throw new Error(`busy: a bulk archive is running in this tab, so ${action} would stop it; use another ChatGPT tab.`);
 }
 
-async function sendPrompt(text) {
+async function sendPrompt(text, excludeThreads = []) {
   refuseWhileArchiving("sending a prompt");
   const body = String(text || "");
   if (!body.trim()) throw new Error("text is required.");
@@ -832,7 +832,7 @@ async function sendPrompt(text) {
         const by = sendEvidenceFromCounts(linearizeMapping(await fetchConversationTree(threadBefore)).length, messagesBefore);
         return by ? { by, thread_id: threadBefore } : null;
       }
-      const id = await findNewChatWithPrompt(body);
+      const id = await findNewChatWithPrompt(body, excludeThreads);
       return id ? { by: "server_new_chat", thread_id: id } : null;
     } catch (err) {
       await log("warn", "Could not check ChatGPT's server for the sent prompt", err);
@@ -847,46 +847,23 @@ async function sendPrompt(text) {
   let confirmedBy = await waitFor(pageEvidence, 10000, 250).catch(() => null);
   let serverThreadId = null;
   let serverCheckError = null;
-  let clicks = 1;
   if (!confirmedBy) {
     const server = await serverEvidence();
     if (server?.by) { confirmedBy = server.by; serverThreadId = server.thread_id; }
     else if (server?.error) serverCheckError = server.error;
   }
-  // The page shows no consequence, ChatGPT's server has no such turn, and the
-  // composer still holds exactly our prompt: the click was not accepted
-  // (seen mostly with prompts over ~60k characters, 2026-09-27). Click once
-  // more; a second click cannot duplicate a send the server has not seen.
-  if (!confirmedBy && !serverCheckError && samePrompt(composerText(), body)) {
-    const again = findFirst(SEND_BUTTON_SELECTORS, (b) => visible(b) && !b.disabled);
-    if (again) {
-      again.el.click();
-      clicks = 2;
-      confirmedBy = await waitFor(pageEvidence, 15000, 250).catch(() => null);
-      if (!confirmedBy) {
-        const server = await serverEvidence();
-        if (server?.by) { confirmedBy = server.by; serverThreadId = server.thread_id; }
-        else if (server?.error) serverCheckError = server.error;
-      }
-    }
-  }
-  if (!confirmedBy) {
-    // Never leave an unconfirmed prompt in the composer: a later ask's click
-    // would send it and receive its answer.
-    const stillHeld = samePrompt(composerText(), body);
-    clearComposer(el);
-    if (stillHeld && !serverCheckError) {
-      throw Object.assign(
-        new Error(`ChatGPT did not accept the prompt: after ${clicks} click(s) on Send the page showed no new turn, the composer still held the prompt, and ChatGPT's server has no ${threadBefore ? `new turn in conversation ${threadBefore}` : "new chat containing it"}. The composer was cleared, so it cannot be sent later by accident. It was not sent; retrying is safe.`),
-        { reply: { stage: "send_not_accepted", nothing_sent: false, verified_not_sent: true, page_id: PAGE_ID, prompt_chars: body.length } },
-      );
-    }
-  }
+  // No second click and no "not sent" verdict after a click: ChatGPT can
+  // process a queued click seconds later, so the server not having the turn
+  // yet does not prove it never will (review of this change, 2026-09-29).
+  // The prompt stays in the composer untouched -- clearing it could interfere
+  // with a queued submit -- and the next ask cannot send it by accident,
+  // because every ask now empties the composer and types its own prompt.
+  // The broker keeps watching; getReply looks for the new chat server-side.
   // A new chat first shows a temporary id ("WEB:<uuid>") in the URL and swaps in
   // the real conversation id once the server has created it.
   const threadId = threadBefore || serverThreadId || (confirmedBy ? await waitFor(() => realThreadId(), 60000, 250).catch(() => null) : realThreadId());
   return { thread_id: threadId, dom_before: domBefore, messages_before: messagesBefore,
-           send_confirmed: Boolean(confirmedBy), confirmed_by: confirmedBy, clicks,
+           send_confirmed: Boolean(confirmedBy), confirmed_by: confirmedBy,
            server_check_error: serverCheckError,
            visibility: document.visibilityState, has_focus: document.hasFocus(),
            composer_selector: composer.selector, send_selector: button.selector };
@@ -909,11 +886,16 @@ function clearComposer(el) {
 }
 
 // Newest chats first; a chat counts only if its first user message is exactly
-// this prompt. Chats not updated in the last 15 minutes (browser clock, so
-// generous) are skipped without reading them.
-async function findNewChatWithPrompt(body) {
-  const page = await listConversationsPage({ offset: 0, limit: 3 });
+// this prompt and the broker has not already given it to another ask
+// (excludeThreads). Chats not updated in the last 15 minutes (browser clock,
+// so generous) are skipped without reading them. An identical prompt sent
+// earlier in that window whose chat nobody claimed can match; its answer is
+// then an answer to the identical text.
+async function findNewChatWithPrompt(body, excludeThreads = []) {
+  const skip = new Set(excludeThreads);
+  const page = await listConversationsPage({ offset: 0, limit: 5 });
   for (const c of page.items || []) {
+    if (skip.has(c.id)) continue;
     const updated = parseRemoteTime(c.update_time);
     if (updated != null && Date.now() - updated > 15 * 60000) continue;
     const firstUser = linearizeMapping(await fetchConversationTree(c.id)).find((m) => m.role === "user");
@@ -985,14 +967,16 @@ async function resolveReplyImages(images) {
 // two done reads with no "not finished" read between them (reads that learn
 // nothing, like a skipped or throttled API check, do not count), unless the
 // backend marks the reply end_turn -- so a pause mid-stream is not "done".
-async function getReply(domBefore, messagesBefore = domBefore, expected = null) {
+async function getReply(domBefore, messagesBefore = domBefore, expected = null, excludeThreads = [], threadHint = null) {
   const generating = Boolean(findFirst(STOP_BUTTON_SELECTORS, visible));
   const messages = extractMessagesFromDom();
   const added = messages.slice(Number(domBefore) || 0);
   const last = messages[messages.length - 1];
   const replies = added.filter((m) => m.role === "assistant");
   const done = !generating && replies.length > 0 && last?.role === "assistant";
-  const threadId = realThreadId();
+  // threadHint: a conversation the broker already located for this ask (a
+  // server-side discovery) while this page still shows no id.
+  const threadId = realThreadId() || threadHint || null;
   // Tool-heavy/reasoning chats can leave the mounted DOM with only the user
   // messages even after the authoritative conversation tree contains the
   // completed assistant answer. When generation is not visibly active, check
@@ -1045,6 +1029,18 @@ async function getReply(domBefore, messagesBefore = domBefore, expected = null) 
              reply: null, visible_error: visibleRateLimitError(), source: "api_waiting",
              api_checked: shouldCheckApi, api_status: apiStatus, api_retry_after_ms: apiRetryAfterMs };
   }
+  // No conversation id on the page yet (a hidden tab may not re-render after
+  // an unconfirmed send): look for the new chat on ChatGPT's server, at most
+  // every 30s, so a landed send is still found and followed.
+  if (expected && !done && Date.now() - getReply.lastDiscoveryAt >= 30000) {
+    getReply.lastDiscoveryAt = Date.now();
+    try {
+      const found = await findNewChatWithPrompt(expected, excludeThreads);
+      if (found) return { done: false, generating, thread_id: found, discovered_thread_id: found, message_count: messages.length,
+                          reply: null, visible_error: visibleRateLimitError(), source: "server_discovery",
+                          api_checked: true, api_status: 200, api_retry_after_ms: null };
+    } catch (err) { await log("warn", "Could not look for the new chat on ChatGPT's server", err); }
+  }
   // No conversation id yet: the page is the only source. Accept its answer
   // only when the new user turn on the page is exactly our prompt (a long
   // prompt rendered collapsed simply waits for the conversation tree).
@@ -1055,6 +1051,7 @@ async function getReply(domBefore, messagesBefore = domBefore, expected = null) 
            api_checked: false, api_status: null, api_retry_after_ms: null };
 }
 getReply.lastApiCheckAt = 0;
+getReply.lastDiscoveryAt = 0;
 getReply.apiGapMs = REPLY_CHECK_MIN_GAP_MS;
 
 const PACER_STORAGE_KEY = "bulkFetchSpacingMs";
@@ -1251,8 +1248,8 @@ async function handleCommand(msg) {
     location.href = "https://chatgpt.com/";
     return { navigated: true };
   }
-  if (msg.action === "send_prompt") return sendPrompt(msg.text);
-  if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before, msg.expected ?? null);
+  if (msg.action === "send_prompt") return sendPrompt(msg.text, msg.exclude_threads || []);
+  if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before, msg.expected ?? null, msg.exclude_threads || [], msg.thread_hint || null);
   if (msg.action === "navigate_to_thread") {
     refuseWhileArchiving("navigating");
     const threadId = String(msg.thread_id || "").trim();

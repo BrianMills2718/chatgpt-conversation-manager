@@ -49,9 +49,10 @@ function appendBridgeObservation(event) {
 function bridgeFailureKind(error, last) {
   if (last?.visible_error === 'too_many_requests' || RATE_LIMIT_TEXT.test(String(error?.message || ''))) return 'rate_limited';
   if (/^Could not confirm the prompt was sent/.test(String(error?.message || ''))) return 'send_unconfirmed';
+  if (/^Refusing to return a reply/.test(String(error?.message || ''))) return 'attribution_mismatch';
   if (/No finished reply within|Timed out waiting/i.test(String(error?.message || ''))) return 'timeout';
   // Send-step failures the extension raises before anything was sent.
-  if (/no ChatGPT composer found|no enabled send button found|prompt text did not appear in the composer/i.test(String(error?.message || ''))) return 'browser_ui';
+  if (/no ChatGPT composer found|no enabled send button found|prompt text did not appear in the composer|composer did not end up holding exactly this prompt/i.test(String(error?.message || ''))) return 'browser_ui';
   if (/No browser extension|not connected|No idle agent ChatGPT tab/i.test(String(error?.message || ''))) return 'broker';
   return 'unknown';
 }
@@ -427,7 +428,7 @@ function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { singl
           // send_prompt's pre-typing failures (content.js sendPrompt): which
           // step failed, that nothing was typed, which page instance it was,
           // and whether ChatGPT's rate-limit banner was showing.
-          stage: msg.stage, nothing_sent: msg.nothing_sent, verified_not_sent: msg.verified_not_sent, page_id: msg.page_id, visible_error: msg.visible_error,
+          stage: msg.stage, nothing_sent: msg.nothing_sent, page_id: msg.page_id, visible_error: msg.visible_error,
         });
         remaining--;
         if (remaining <= 0) {
@@ -769,6 +770,17 @@ function pollLearnedNothing(poll) {
   return poll.source === "api_waiting" && !poll.generating && (!poll.api_checked || poll.api_status != null);
 }
 
+// Conversations already handed to an ask (in flight or answered). The
+// extension's server-side search for an unconfirmed new chat skips these, so
+// two asks with identical text never claim the same conversation. Bounded.
+const attributedThreads = new Set();
+function noteAttributedThread(id) {
+  if (!id) return;
+  attributedThreads.delete(id);
+  attributedThreads.add(id);
+  while (attributedThreads.size > 500) attributedThreads.delete(attributedThreads.values().next().value);
+}
+
 async function askChatgpt({ text, thread_id = null, thread_title = null, timeout_seconds = 180, pollMs = 3000, openWaitMs = 90000, sendTimeoutMs = null, fresh_tab = false, account = null, confirmGraceMs = 75000 }) {
   const run = async () => {
     const body = String(text || "").trim();
@@ -810,7 +822,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         await waitForTab(tab, (i) => !i.thread_id, 20000, "opened a new chat");
       }
       const sendPrompt = () => dispatchToExtension(
-        { action: "send_prompt", text: body },
+        { action: "send_prompt", text: body, exclude_threads: [...attributedThreads] },
         sendTimeoutMs ?? promptDispatchTimeoutMs(timeout_seconds),
         { tab, account },
       );
@@ -838,7 +850,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
           if (!recoverable) throw err;
           const nothingSent = 'Nothing was typed or sent, so the ask can be retried safely later.';
           if (err.stage === 'no_composer' && err.visible_error === 'too_many_requests') {
-            throw new Error(`${err.message} ChatGPT is showing its rate-limit banner ("making requests too quickly") in that tab, so it was not reloaded. ${nothingSent}`);
+            throw Object.assign(new Error(`${err.message} ChatGPT is showing its rate-limit banner ("making requests too quickly") in that tab, so it was not reloaded. ${nothingSent}`), { nothing_sent: true });
           }
           await waitForPacerGap(account);
           if (err.stage === 'no_composer') {
@@ -847,14 +859,14 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
             // socket. The new page instance reporting in is the real signal.
             dispatchToExtension({ action: "reload_tab" }, 5000, { tab }).catch(() => {});
             await waitForTab(tab, (i) => Boolean(i.page_id) && i.page_id !== err.page_id && onTargetPage(i), 20000, "reloaded the conversation page")
-              .catch((reloadErr) => { throw new Error(`${err.message} Reloading the tab to recover failed: ${reloadErr.message} ${nothingSent}`); });
+              .catch((reloadErr) => { throw Object.assign(new Error(`${err.message} Reloading the tab to recover failed: ${reloadErr.message} ${nothingSent}`), { nothing_sent: true }); });
           }
           try {
             sent = await sendPrompt();
           } catch (retryErr) {
             if (retryErr.nothing_sent === true && (retryErr.stage === 'no_composer' || retryErr.stage === 'no_baseline')) {
               const tried = err.stage === 'no_composer' ? 'reloaded the tab once' : 'retried once after the rate-limit gap';
-              throw new Error(`${retryErr.message} The broker ${tried} and it failed again. ${nothingSent}`);
+              throw Object.assign(new Error(`${retryErr.message} The broker ${tried} and it failed again. ${nothingSent}`), { nothing_sent: true });
             }
             throw retryErr;
           }
@@ -880,6 +892,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       // which is what its successful send_prompt meant.
       sendSeen = sent.send_confirmed !== false;
       sentThreadId = sent.thread_id || resolvedThreadId || null;
+      noteAttributedThread(sentThreadId);
       const noteSendEvidence = (poll) => {
         if (sendSeen || !poll) return;
         if (poll.done || poll.generating || (conversationMode === 'new' && poll.thread_id)
@@ -898,16 +911,22 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       let confirmUntil = 0;
       while (Date.now() < deadline || Date.now() < confirmUntil) {
         await sleep(pollMs);
-        try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before, expected: body }, 30000, { tab, account }); }
+        try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before, expected: body, thread_hint: sentThreadId, exclude_threads: [...attributedThreads] }, 30000, { tab, account }); }
         catch (err) { last = { done: false, error: err.message }; continue; }
+        if (last.discovered_thread_id && !sentThreadId) {
+          // Found server-side: the send landed although the page never showed it.
+          sentThreadId = last.discovered_thread_id;
+          noteAttributedThread(sentThreadId);
+          sendSeen = true;
+        }
         noteSendEvidence(last);
         if (last.prompt_mismatch) {
           // The extension found a different prompt where ours should be. Its
           // answer is not ours; fail now instead of returning it (the old
           // behaviour) or waiting out the timeout.
-          throw new Error(`Refusing to return a reply: conversation ${last.thread_id} does not contain this prompt as its new turn `
+          throw Object.assign(new Error(`Refusing to return a reply: conversation ${last.thread_id} does not contain this prompt as its new turn `
             + `(found a ${last.found_prompt_chars}-character prompt starting "${last.found_prompt_head}"). Something other than this ask sent into that conversation. `
-            + `Check list_chatgpt_chats before resending.`);
+            + `Whether this prompt reached ChatGPT is unknown; check list_chatgpt_chats before resending.`), { sent_unknown: true });
         }
         if (!last.done) {
           // Only a read that actually observed "not finished" discards a done
@@ -925,13 +944,14 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
           confirmUntil = Date.now() + confirmGraceMs;
           continue;
         }
-        const threadId = last.thread_id || sent.thread_id || resolvedThreadId || null;
+        const threadId = last.thread_id || sentThreadId || resolvedThreadId || null;
+        noteAttributedThread(threadId);
         appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'success', account: usedAccount || null, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
         return { thread_id: threadId, url: threadId ? `https://chatgpt.com/c/${threadId}` : null, reply: last.reply, images: last.images, account: usedAccount || null };
       }
       throw new Error(askTimeoutMessage({ timeout_seconds, sendSeen, threadId: last?.thread_id || sent.thread_id || resolvedThreadId || null, last, sent }));
     } catch (err) {
-      err.sent = err.verified_not_sent || err.nothing_sent ? false : sendSeen;
+      err.sent = err.sent_unknown ? null : err.nothing_sent ? false : sendSeen;
       err.thread_id = last?.thread_id || sentThreadId || resolvedThreadId || null;
       err.account = usedAccount || null;
       appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'failed', account: usedAccount || null, sent: err.sent, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
