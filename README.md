@@ -90,6 +90,21 @@ Microsoft Edge also runs the extension unchanged, and can hold a second account 
 
 Check it with `list_chatgpt_connections`. It lists each tab with its account, so both accounts should appear. Pass `account` (an email) to `ask_chatgpt`, `read_chatgpt_chat` and `list_chatgpt_chats` to choose one.
 
+For a **new ask** with no `account` or thread target, the broker can choose
+between connected accounts automatically. With at least two identified
+accounts, it prefers an idle agent tab whose account has the earliest projected
+start, based on that account's learned pacing gap and active or queued asks.
+Pass `account` when you want to pin a new ask to one account. Thread-targeted
+asks do not enter this automatic selection path; pass `account` when you need
+to specify which account owns the target conversation.
+
+The broker records each successful automatic choice as an `account_route`
+event in `data/observations/request-timing.jsonl`. Its candidate estimates,
+selected account and `route_id` can be joined to the ask result in
+`data/observations/bridge-events.jsonl`. This supports later tuning from real
+traffic. It does not expose ChatGPT's full quota counters or activity outside
+connected browser pages, so it cannot prove a global throughput maximum.
+
 - **Reading.** One connected tab per account is enough to *read* any of that account's chats, including ones started in the ChatGPT desktop app.
 - **Updates.** The extension reloads itself within about a minute when a newer version is on disk. Bump `version` in `extension/manifest.json` with every extension change.
 

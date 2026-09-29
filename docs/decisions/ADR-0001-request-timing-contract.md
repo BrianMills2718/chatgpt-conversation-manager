@@ -19,6 +19,13 @@ rate preceded a throttle.
   API observations include account, endpoint class, start and completion times,
   duration, status, tab, and initiator type. Keep endpoint paths, chat IDs,
   query strings, headers, and bodies out of these events.
+- Record automatic account choices as a third schema-version-2 event type,
+  `account_route`. It includes a `route_id`, selection rule, selected account,
+  and each ranked candidate's projected start delay, pacing gap, pending asks,
+  and whether an idle agent tab was found (`null` means the candidate was not
+  probed after an earlier candidate was selected). Copy `route_id` to the
+  resulting bridge ask outcome so the decision and outcome can be joined. Do
+  not record prompt text or conversation identifiers in the routing event.
 - Observe same-origin `/api/*` and `/backend-api/*` resources through the
   browser Resource Timing API. Record observer availability and any bounded
   queue loss so missing telemetry is visible.
@@ -32,9 +39,11 @@ rate preceded a throttle.
 ## Consequences
 
 The combined timeline can reconstruct observed same-origin API request rate,
-status, duration, and endpoint mix alongside broker operations and account
-throttle reactions. Resource Timing does not expose response headers or bodies;
-it may report a null status when the browser does not expose one. Offline
+status, duration, and endpoint mix alongside broker operations, account-route
+choices, ask outcomes, and throttle reactions. `account_route`'s projected
+start is a scheduler estimate, not a ChatGPT quota counter or promise of the
+global maximum. Resource Timing does not expose response headers or bodies; it
+may report a null status when the browser does not expose one. Offline
 observation buffering is bounded and reports a gap on overflow. The observer
 does not see requests outside the ChatGPT page's same-origin `/api/*` and
 `/backend-api/*` paths.
@@ -44,4 +53,7 @@ does not see requests outside the ChatGPT page's same-origin `/api/*` and
 The pacing decision is wrong if two concurrently started backend actions for
 one reported account are logged less than the earlier reservation's
 `spacing_ms_applied` apart in **two independent executions** of the
-same-account concurrency test.
+same-account concurrency test. The routing decision is wrong if, in two
+independent controlled executions with multiple idle identified accounts, the
+selected account has a later `projected_start_in_ms` than another candidate
+whose `idle_agent_tab` is `true`.

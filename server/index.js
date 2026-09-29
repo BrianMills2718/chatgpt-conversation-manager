@@ -884,6 +884,10 @@ async function resolveThreadTitle(title, account = null) {
 // ask, checked and set synchronously (no await in between) so two concurrent
 // pickIdleTab() calls can never both claim the same tab.
 const claimedTabs = new Set();
+// Unpinned new asks reserve an account before probing browser tabs. This keeps
+// simultaneous asks from all seeing the same idle account and piling onto it
+// while its paced lane is already occupied.
+const pendingAutoRoutes = new Map();
 
 // Agents only ever type into a tab opened for them (https://chatgpt.com/?ccm_agent=1),
 // never into a tab Brian is using. With none open, the broker opens one.
@@ -984,13 +988,108 @@ async function findIdleAgentTab(seen, excludeTokens = new Set(), account = null)
   return null;
 }
 
-async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = null } = {}) {
+function rankConnectedAgentAccounts(now = monoNow()) {
+  const accounts = new Map();
+  for (const ws of extensionSockets) {
+    if (ws.readyState !== ws.OPEN || !ws.agentTab || !ws.account) continue;
+    const account = accountKey(ws.account);
+    if (!account) continue;
+    const key = normalizePacerKey(account);
+    if (!accounts.has(key)) accounts.set(key, key);
+  }
+  return [...accounts.values()].map((account) => {
+    const entry = getPacerEntry(account);
+    const spacingMs = entry.pacer.spacingMs;
+    const pendingAutoAsks = pendingAutoRoutes.get(account) || 0;
+    const inFlightAsks = [...extensionSockets].filter((candidate) => candidate.readyState === candidate.OPEN
+      && candidate.agentTab && candidate.tabToken && claimedTabs.has(candidate.tabToken)
+      && normalizePacerKey(accountKey(candidate.account)) === account).length;
+    const estimatedAheadAsks = Math.max(pendingAutoAsks, inFlightAsks);
+    const nextEligibleAt = Math.max(now, entry.lastRequestAt + spacingMs);
+    const projectedStartAt = nextEligibleAt + estimatedAheadAsks * spacingMs;
+    return {
+      account,
+      spacingMs,
+      pendingAutoAsks,
+      inFlightAsks,
+      estimatedAheadAsks,
+      projectedStartAt,
+      projectedStartInMs: Math.max(0, Math.round(projectedStartAt - now)),
+    };
+  }).sort((a, b) => a.projectedStartAt - b.projectedStartAt || a.account.localeCompare(b.account));
+}
+
+function reserveAutoRoute(account) {
+  const key = normalizePacerKey(account);
+  pendingAutoRoutes.set(key, (pendingAutoRoutes.get(key) || 0) + 1);
+  let released = false;
+  return {
+    account: key,
+    routeId: crypto.randomUUID(),
+    release() {
+      if (released) return;
+      released = true;
+      const pending = pendingAutoRoutes.get(key) || 0;
+      if (pending <= 1) pendingAutoRoutes.delete(key);
+      else pendingAutoRoutes.set(key, pending - 1);
+    },
+  };
+}
+
+async function findRoutedIdleAgentTab(seen, excludeTokens = new Set()) {
+  const ranked = rankConnectedAgentAccounts();
+  // Preserve the existing single-account and unknown-identity behavior. The
+  // router is only useful when at least two account identities are available.
+  if (ranked.length < 2) return undefined;
+  const candidates = ranked.map((candidate) => ({
+    account: candidate.account,
+    projected_start_in_ms: candidate.projectedStartInMs,
+    spacing_ms: candidate.spacingMs,
+    pending_auto_asks: candidate.pendingAutoAsks,
+    in_flight_asks: candidate.inFlightAsks,
+    estimated_ahead_asks: candidate.estimatedAheadAsks,
+    idle_agent_tab: null,
+  }));
+  for (let i = 0; i < ranked.length; i++) {
+    const candidate = ranked[i];
+    // Reserve synchronously before the first async tab probe so a concurrent
+    // ask sees this account's pending work in its own ranking.
+    const reservation = reserveAutoRoute(candidate.account);
+    const found = await findIdleAgentTab(seen, excludeTokens, candidate.account);
+    candidates[i].idle_agent_tab = Boolean(found);
+    if (!found) {
+      reservation.release();
+      continue;
+    }
+    try {
+      appendRequestTiming({
+        schema_version: 2,
+        event_type: 'account_route',
+        route_id: reservation.routeId,
+        selection_rule: 'earliest_projected_start_with_idle_agent_tab',
+        selected_account: candidate.account,
+        candidates,
+      });
+    } catch (err) {
+      reservation.release();
+      throw err;
+    }
+    return { ...found, routeReservation: reservation };
+  }
+  return null;
+}
+
+async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = null, autoRoute = false } = {}) {
   const seen = [];
   const existing = new Set([...extensionSockets]
     .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab)
     .map((ws) => ws.tabToken));
   if (!forceNew) {
-    const found = await findIdleAgentTab(seen, new Set(), account);
+    const routed = autoRoute && !account ? await findRoutedIdleAgentTab(seen) : null;
+    if (routed) return routed;
+    const found = routed === null && autoRoute && !account
+      ? null
+      : await findIdleAgentTab(seen, new Set(), account);
     if (found) return found;
   }
   try { await openAgentTab({ account }); }
@@ -998,6 +1097,14 @@ async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = nul
   const deadline = monoNow() + openWaitMs;
   while (monoNow() < deadline) {
     await sleep(1000);
+    const routed = autoRoute && !account ? await findRoutedIdleAgentTab(seen, forceNew ? existing : new Set()) : null;
+    if (routed) return routed;
+    if (autoRoute && !account) {
+      if (routed === null) continue;
+      const fallback = await findIdleAgentTab(seen, forceNew ? existing : new Set());
+      if (fallback) return fallback;
+      continue;
+    }
     const next = await findIdleAgentTab([], forceNew ? existing : new Set(), account);
     if (next) return next;
   }
@@ -1168,6 +1275,9 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
     let claimedTab = null;
     const requestedAccount = account;
     let usedAccount = account;
+    let autoRouteReservation = null;
+    let routeId = null;
+    const autoRoute = !requestedAccount && !thread_id && !thread_title && !fresh_tab;
     let sendSeen = null;
     // Only send_prompt types the prompt. Until one has reached a tab, a
     // failure (tab pick, navigation, a tab that never reconnected) is sent=no.
@@ -1283,12 +1393,15 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       for (let attempt = 1; ; attempt++) {
         let picked;
         try {
-          picked = await pickIdleTab({ openWaitMs, forceNew: fresh_tab, account: requestedAccount });
+          picked = await pickIdleTab({ openWaitMs, forceNew: fresh_tab, account: requestedAccount, autoRoute });
         } catch (pickErr) {
           // No other tab to move to: report why the previous one was given up.
           if (!lastGoneErr) throw pickErr;
           throw Object.assign(lastGoneErr, { message: `${lastGoneErr.message} No other agent tab became available (${pickErr.message})` });
         }
+        if (autoRouteReservation) autoRouteReservation.release();
+        autoRouteReservation = picked.routeReservation || null;
+        routeId = autoRouteReservation?.routeId || null;
         tab = picked.tab;
         claimedTab = tab;
         const current = picked.thread_id;
@@ -1317,6 +1430,9 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
           appendRequestTiming({ action: 'tab_set_aside', tab: tab.slice(0, 8), reason: err.message.slice(0, 200) });
           claimedTabs.delete(tab);
           claimedTab = null;
+          if (autoRouteReservation) autoRouteReservation.release();
+          autoRouteReservation = null;
+          routeId = null;
         } finally {
           pacingReservation.release({ noRequest: !pacingReservation.consumed });
         }
@@ -1399,7 +1515,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         const threadId = last.thread_id || sentThreadId || resolvedThreadId || null;
         noteAttributedThread(threadId);
         if (threadId && Number.isInteger(last.message_count) && last.source === 'api') threadMessageCounts.set(threadId, last.message_count);
-        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'success', account: usedAccount || null, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'success', account: usedAccount || null, route_id: routeId || undefined, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
         // The caller must know when the model did not get the prompt verbatim.
         // Evidence, not the switch's own report: the stored turn is compared with
         // the prompt (replyFromTree's prompt_escaped).
@@ -1416,10 +1532,11 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       err.sent = err.sent_unknown ? null : (err.nothing_sent || !sendDispatched) ? false : sendSeen ? true : null;
       err.thread_id = last?.thread_id || sentThreadId || resolvedThreadId || null;
       err.account = usedAccount || null;
-      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'failed', account: usedAccount || null, sent: err.sent, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'failed', account: usedAccount || null, route_id: routeId || undefined, sent: err.sent, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
       throw err;
     } finally {
       if (claimedTab) claimedTabs.delete(claimedTab);
+      if (autoRouteReservation) autoRouteReservation.release();
     }
   };
   return run();
