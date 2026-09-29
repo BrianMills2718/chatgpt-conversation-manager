@@ -62,6 +62,7 @@ function bridgeFailureKind(error, last) {
   if (/No finished reply within|Timed out waiting/i.test(String(error?.message || ''))) return 'timeout';
   // Send-step failures the extension raises before anything was sent.
   if (/no ChatGPT composer found|no enabled send button found|prompt text did not appear in the composer|composer did not end up holding exactly this prompt|refusing to click Send|could not put the prompt into ChatGPT's composer/i.test(String(error?.message || ''))) return 'browser_ui';
+  if (/^ChatGPT tab never (opened|reloaded)/.test(String(error?.message || ''))) return 'navigation';
   if (/No browser extension|not connected|No idle agent ChatGPT tab/i.test(String(error?.message || ''))) return 'broker';
   return 'unknown';
 }
@@ -266,6 +267,7 @@ wss.on("connection", (ws, req) => {
       }
     }
   }
+  ws.connectedAtMono = monoNow();
   extensionSockets.add(ws);
   logInfo(`[broker] extension connected (${extensionSockets.size} total)`);
   // Extension fixes only run once Chrome reloads the extension; 0.7.3 sat on
@@ -762,14 +764,58 @@ async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = nul
   throw new Error(`No idle agent ChatGPT tab${where} (${JSON.stringify(seen)}); opened ${AGENT_TAB_URL} but no matching tab connected within ${Math.round(openWaitMs / 1000)}s (is the browser signed in and the extension enabled?).`);
 }
 
-async function waitForTab(tab, predicate, timeoutMs, what) {
-  const deadline = monoNow() + timeoutMs;
+async function waitForTab(tab, predicate, timeoutMs, what, { onPoll = null } = {}) {
+  const startedAt = monoNow();
+  const deadline = startedAt + timeoutMs;
+  const diag = { polls: 0, last_thread_id: undefined, last_page_id: null, last_error: null, reconnected_after_ms: null };
   while (monoNow() < deadline) {
     await sleep(700);
-    try { const info = await dispatchToExtension({ action: "get_tab" }, 3000, { tab }); if (predicate(info)) return info; }
-    catch { /* reconnecting after navigation */ }
+    const ws = [...extensionSockets].find((w) => w.tabToken === tab && w.readyState === w.OPEN);
+    if (ws && ws.connectedAtMono > startedAt && diag.reconnected_after_ms === null) diag.reconnected_after_ms = Math.round(ws.connectedAtMono - startedAt);
+    diag.polls++;
+    try {
+      const info = await dispatchToExtension({ action: "get_tab" }, 3000, { tab });
+      diag.last_thread_id = info.thread_id ?? null; diag.last_page_id = info.page_id ?? null; diag.last_error = null;
+      if (predicate(info)) return { info, diag: { ...diag, elapsed_ms: Math.round(monoNow() - startedAt) } };
+    } catch (err) { diag.last_error = err.message; /* reconnecting after navigation */ }
+    if (onPoll) await onPoll(diag, monoNow() - startedAt);
   }
-  throw new Error(`ChatGPT tab never ${what} within ${Math.round(timeoutMs / 1000)}s.`);
+  diag.elapsed_ms = Math.round(monoNow() - startedAt);
+  const where = diag.last_thread_id === undefined ? 'never answered' : `still showed ${diag.last_thread_id ? `conversation ${diag.last_thread_id}` : 'no conversation'}`;
+  const reload = diag.reconnected_after_ms === null ? 'no page reload was seen' : `it reconnected after ${diag.reconnected_after_ms}ms`;
+  const seen = `the tab ${where} (${reload}; ${diag.polls} checks${diag.last_error ? `; last error: ${diag.last_error}` : ''})`;
+  throw Object.assign(new Error(`ChatGPT tab never ${what} within ${Math.round(timeoutMs / 1000)}s: ${seen}. Nothing was sent.`), { nothing_sent: true, navigation_diag: diag });
+}
+
+// A full page load in a background tab can take well over 20s (ChatGPT's
+// bundle, throttled timers): 2 of ~20 new-chat asks on 2026-09-29 failed the
+// old 20s bound, with nothing sent. Wait up to NAV_WAIT_MS, re-issue the
+// navigation once if the tab is back but on the wrong page, and log every
+// navigation (request-timing.jsonl action "navigate") with its timings on the
+// steady clock.
+const NAV_WAIT_MS = Number(process.env.NAV_WAIT_MS || 60000);
+async function navigateAndWait(tab, { threadId = null, account = null }) {
+  const command = threadId ? { action: "navigate_to_thread", thread_id: threadId } : { action: "navigate_home" };
+  const predicate = threadId ? (i) => i.thread_id === threadId : (i) => !i.thread_id;
+  const what = threadId ? `opened conversation ${threadId}` : "opened a new chat";
+  const startedMs = monoNow();
+  let reissued = false;
+  try {
+    await dispatchToExtension(command, COMMAND_TIMEOUT_MS, { tab });
+    const { diag } = await waitForTab(tab, predicate, NAV_WAIT_MS, what, {
+      onPoll: async (d, elapsed) => {
+        // Back on a page, but not the target: the navigation was lost.
+        if (!reissued && elapsed > NAV_WAIT_MS / 2 && d.last_error === null && d.last_thread_id !== undefined) {
+          reissued = true;
+          await dispatchToExtension(command, COMMAND_TIMEOUT_MS, { tab }).catch(() => {});
+        }
+      },
+    });
+    appendRequestTiming({ action: 'navigate', target: threadId || 'new_chat', ok: true, tab: tab.slice(0, 8), account: account || null, duration_ms: Math.round(monoNow() - startedMs), reissued, ...diag });
+  } catch (err) {
+    appendRequestTiming({ action: 'navigate', target: threadId || 'new_chat', ok: false, tab: tab.slice(0, 8), account: account || null, duration_ms: Math.round(monoNow() - startedMs), reissued, error: err.message.slice(0, 300), ...(err.navigation_diag || {}) });
+    throw err;
+  }
 }
 
 // sendPrompt can legitimately spend up to ~99s waiting for a newly navigated
@@ -866,11 +912,9 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       // composer. The send below then needs no second wait.
       if (current !== resolvedThreadId) await waitForPacerGap(account);
       if (resolvedThreadId && current !== resolvedThreadId) {
-        await dispatchToExtension({ action: "navigate_to_thread", thread_id: resolvedThreadId }, COMMAND_TIMEOUT_MS, { tab });
-        await waitForTab(tab, (i) => i.thread_id === resolvedThreadId, 20000, `opened conversation ${resolvedThreadId}`);
+        await navigateAndWait(tab, { threadId: resolvedThreadId, account });
       } else if (!resolvedThreadId && current) {
-        await dispatchToExtension({ action: "navigate_home" }, COMMAND_TIMEOUT_MS, { tab });
-        await waitForTab(tab, (i) => !i.thread_id, 20000, "opened a new chat");
+        await navigateAndWait(tab, { account });
       }
       const sendPrompt = () => dispatchToExtension(
         { action: "send_prompt", text: body, exclude_threads: [...attributedThreads] },
@@ -1214,7 +1258,7 @@ app.post('/api/undo', async (req, res) => {
 });
 
 function createMcpServer() {
-  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.12" });
+  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.13" });
 
   mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),

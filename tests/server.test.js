@@ -459,7 +459,8 @@ test('the agent request pacer enforces a minimum gap between backend-touching di
   try {
     await askChatgpt({ text: 'first', timeout_seconds: 10, pollMs: 20 });
     await askChatgpt({ text: 'second', timeout_seconds: 10, pollMs: 20 });
-    const events = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    // Only paced requests (they carry spacing_ms); navigation log lines are not requests.
+    const events = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.spacing_ms != null);
     assert.ok(events.length >= 2, 'expected at least the two send_prompt dispatches to be logged');
     // Each success shrinks the pacer's gap a little (AIMD), so compare each
     // gap against the spacing the pacer actually held right after the prior
