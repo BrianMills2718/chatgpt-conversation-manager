@@ -758,13 +758,6 @@ async function sendPrompt(text, excludeThreads = []) {
         { reply: { stage: "no_composer", nothing_sent: true, page_id: PAGE_ID, visible_error: banner } },
       );
     });
-  // Before typing: put this tab's composer in ChatGPT's plain-text mode, so
-  // the prompt is sent verbatim. Otherwise a link or other formatting in it
-  // makes ChatGPT send the whole draft as escaped Markdown (lib/plain-text-mode.js).
-  // Not fatal if it fails -- the send still works, the model just reads the
-  // escaped form -- but the result says so (plain_text_mode).
-  const plainMode = await requestPlainTextMode(true);
-  if (!plainMode?.ok) await log("warn", `could not switch the composer to plain-text mode: ${plainMode?.reason}`);
   const threadBefore = realThreadId();
   // Counted on the page, not through the conversation API: that endpoint is
   // rate-limited for the whole account (HTTP 429) whenever archiving has run.
@@ -800,6 +793,7 @@ async function sendPrompt(text, excludeThreads = []) {
   // first insert, so this retries for a few seconds.
   let el = composer.el;
   const composerText = () => el.value ?? el.innerText ?? "";
+  const typingStarted = Date.now();
   const typedOk = await waitFor(() => {
     el = findFirst(COMPOSER_SELECTORS, visible)?.el || el;
     if (samePrompt(composerText(), body)) return true;
@@ -812,6 +806,31 @@ async function sendPrompt(text, excludeThreads = []) {
     throw Object.assign(
       new Error(`the composer did not end up holding exactly this prompt after retrying for 8s (it held ${heldChars} characters, the prompt has ${body.length}); the composer was cleared and nothing was sent.`),
       { reply: { stage: "not_typed", nothing_sent: true, page_id: PAGE_ID } },
+    );
+  }
+  // After typing, before clicking: switch this tab's composer to ChatGPT's
+  // plain-text mode, so the draft is sent verbatim. Otherwise a link or other
+  // formatting in it makes ChatGPT send the whole draft as escaped Markdown
+  // (lib/plain-text-mode.js). The switch must come AFTER typing: in v0.9.1/0.9.2
+  // it came before, and typing into a plain-text-mode composer is so slow that
+  // an 18k-character prompt took 46s and 50-72k prompts froze the tab for over
+  // five minutes (2026-09-29 06:46-06:58Z). Typing in the normal mode takes
+  // seconds, and getText() only consults the mode when Send is clicked.
+  // Not fatal if it fails -- the send goes ahead, the model reads the escaped
+  // form -- but the result says so (plain_text_mode), and the broker tells the
+  // caller.
+  const typingMs = Date.now() - typingStarted;
+  const plainStarted = Date.now();
+  const plainMode = await requestPlainTextMode(true);
+  const plainMs = Date.now() - plainStarted;
+  if (!plainMode?.ok) await log("warn", `could not switch the composer to plain-text mode: ${plainMode?.reason}`);
+  else if (!samePrompt(composerText(), body)) {
+    // The switch must not have changed what will be sent.
+    const heldChars = composerText().length;
+    clearComposer(el);
+    throw Object.assign(
+      new Error(`switching the composer to plain-text mode changed the draft (it now holds ${heldChars} characters, the prompt has ${body.length}); the composer was cleared and nothing was sent.`),
+      { reply: { stage: "plain_mode_changed_draft", nothing_sent: true, page_id: PAGE_ID } },
     );
   }
   const button = await waitFor(() => findFirst(SEND_BUTTON_SELECTORS, (b) => visible(b) && !b.disabled), 8000)
@@ -869,7 +888,7 @@ async function sendPrompt(text, excludeThreads = []) {
   const threadId = threadBefore || serverThreadId || (confirmedBy ? await waitFor(() => realThreadId(), 60000, 250).catch(() => null) : realThreadId());
   return { thread_id: threadId, dom_before: domBefore, messages_before: messagesBefore,
            send_confirmed: Boolean(confirmedBy), confirmed_by: confirmedBy,
-           plain_text_mode: plainMode?.ok ? true : (plainMode?.reason || "failed"),
+           plain_text_mode: plainMode?.ok ? true : (plainMode?.reason || "failed"), plain_mode_ms: plainMs, typing_ms: typingMs,
            server_check_error: serverCheckError,
            visibility: document.visibilityState, has_focus: document.hasFocus(),
            composer_selector: composer.selector, send_selector: button.selector };

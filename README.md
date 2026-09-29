@@ -206,10 +206,23 @@ The broker must be running for agents to reach ChatGPT; nothing restarts it for 
   - `sent=no`: nothing was sent, so retrying is safe.
   - `sent=unknown`: look at `list_chatgpt_chats` before you retry.
   The same fields come back from `POST /api/ask` as `sent`, `thread_id` and `account`.
-- **Your prompt arrives verbatim.** ChatGPT's composer would otherwise send any prompt containing a link as escaped Markdown (`\#`, `` \`\`\` ``, `&#x20;`), so the model saw mangled code. The agent tab is switched to ChatGPT's plain-text composer mode before every send. Your own tabs are not affected.
+- **Your prompt arrives verbatim.** ChatGPT's composer would otherwise send any prompt containing a link as escaped Markdown (`\#`, `` \`\`\` ``, `&#x20;`), so the model saw mangled code. Before clicking Send, the bridge switches the agent tab's composer to ChatGPT's plain-text mode. Your own tabs are not affected. Every reply says whether this worked: `prompt_verbatim` in `/api/ask`, and a WARNING line in the MCP reply when it did not.
 - **A reply is always the answer to your prompt.** The broker returns a reply only after checking that the user turn before it is exactly the prompt you sent. If something else was sent into that conversation, the ask fails with `Refusing to return a reply` instead of returning someone else's answer.
 - **Several asks can run at once**, one per agent tab (open more `?ccm_agent=1` tabs). For more than one ChatGPT account, see "Several accounts and browsers at once" above.
 - **Very large prompts (over about 60,000 characters) are where sends have failed.** In a background tab, ChatGPT sometimes ignores the click on Send. While the send is unconfirmed, the broker checks ChatGPT's server at 30, 75 and 135 seconds. If the prompt still has not arrived, it clicks Send again. If the prompt never shows up, the error says `sent=unknown`. Prompts over about 95,000 characters leave ChatGPT's Send button disabled, and the error says `sent=no`.
+
+### If prompts stop arriving verbatim
+
+The plain-text switch reaches into ChatGPT's own page code: its React tree, and a composer controller with `setPlainTextMode`. A ChatGPT web update can break it.
+
+**What you see.** An `ask_chatgpt` reply ends with `WARNING: this prompt did NOT reach ChatGPT verbatim (the bridge could not switch ChatGPT's composer to plain-text mode: <reason>)`, or with a milder note when the prompt happened to arrive intact anyway. `data/observations/request-timing.jsonl` shows `plain_text_mode` on each `send_prompt`: `true`, or the reason it failed.
+
+**What still works.** Sending, and matching replies to prompts, both keep working. Only prompts containing a link or other formatting reach the model as escaped Markdown.
+
+**What to do.**
+- Tell whoever maintains the bridge, and include the reason text.
+- In the meantime, prefer prompts without bare URLs.
+- Or turn on ChatGPT's own plain-text composer setting for the account, if the ChatGPT UI offers one. That changes your own composer too.
 
 ## Sharing this with a teammate
 

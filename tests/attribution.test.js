@@ -287,3 +287,26 @@ test('real backslashes and entities in the prompt survive the comparison (regex,
   assert.equal(samePrompt(sent, stored), true);
   assert.equal(samePrompt(stored, sent), true);
 });
+
+test('a tab that never answers send_prompt fails loudly as a stalled tab with sent=unknown', async () => {
+  const t = await agentTab('stall-tab-1', 's@example.com', { send_prompt: () => new Promise(() => {}) });
+  try {
+    await assert.rejects(mod.askChatgpt({ text: 'x'.repeat(5000), timeout_seconds: 10, pollMs: 20, sendTimeoutMs: 300 }), (err) => {
+      assert.match(err.message, /stopped responding while typing or sending this 5000-character prompt/);
+      assert.equal(err.sent, null);
+      return true;
+    });
+  } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
+});
+
+test('the result says whether the prompt reached ChatGPT verbatim, and why not', async () => {
+  const t = await agentTab('verbatim-tab-1', 'v@example.com', {
+    send_prompt: () => ({ thread_id: 'conv-v', dom_before: 0, messages_before: 0, send_confirmed: true, plain_text_mode: 'composer controller not found in the React tree' }),
+    get_reply: () => ({ done: true, source: 'api', end_turn: true, reply: 'r', thread_id: 'conv-v', prompt_escaped: true }),
+  });
+  try {
+    const r = await mod.askChatgpt({ text: 'see https://example.com', timeout_seconds: 10, pollMs: 20 });
+    assert.equal(r.prompt_verbatim, false);
+    assert.match(r.plain_text_mode_error, /controller not found/);
+  } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
+});

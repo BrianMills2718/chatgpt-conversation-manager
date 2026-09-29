@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.9.3 (2026-09-29)
+
+### Fixed: large prompts froze the agent tab (v0.9.1/0.9.2 regression)
+
+- **What happened.** v0.9.1 switched the composer to plain-text mode *before* typing, and typing into a plain-text-mode composer is far slower. An 18k-character prompt took 46s, and 50-72k-character audit prompts froze the tab until the broker gave up after about 5.5 minutes with "Timed out waiting for the browser extension". This hit ats4 at 06:46Z and wz7 at 06:53Z; nothing reached ChatGPT. The 0.9.1 proof used a 318-character prompt, too small to show it.
+- **Fix.** Type in the normal composer mode, which takes seconds as in v0.8.x. Switch to plain-text mode after typing and before clicking Send: `getText()` only consults the mode at send time. After the switch, the extension checks the draft is still exactly the prompt. If it is not, the composer is cleared and the send fails with nothing sent. `typing_ms` and `plain_mode_ms` are logged per send.
+- **A stalled tab is reported as one.** If the tab never answers `send_prompt`, the error now says the tab stopped responding while typing or sending an N-character prompt, and that whether it was sent is unknown (`sent=unknown`), instead of a bare timeout.
+- **Verbatim status reaches the caller.** `/api/ask` results carry `prompt_verbatim`, judged from the stored turn, plus `plain_text_mode_error` when the switch failed. The MCP reply says so in a WARNING line. README has a new section, "If prompts stop arriving verbatim".
+- Extension manifest 0.9.2 -> 0.9.3.
+
 ## v0.9.0–v0.9.2 (2026-09-29)
 
 ### Fixed at the source: prompts reached ChatGPT as escaped Markdown
