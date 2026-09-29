@@ -122,14 +122,14 @@ test('a reply whose conversation holds a different prompt fails at once without 
     get_reply: () => ({ done: false, source: 'api', prompt_mismatch: true, thread_id: 'conv-x', found_prompt_head: 'Correctness-only bug audit ... never-absolute', found_prompt_chars: 65781 }),
   });
   try {
-    const started = Date.now();
+    const started = performance.now();
     await assert.rejects(mod.askChatgpt({ text: PF2, timeout_seconds: 30, pollMs: 20 }), (err) => {
       assert.match(err.message, /Refusing to return a reply/);
       assert.equal(err.sent, null, 'a mismatch says nothing about whether our prompt landed');
       assert.equal(err.thread_id, 'conv-x');
       return true;
     });
-    assert.ok(Date.now() - started < 5000, 'must not wait out the timeout');
+    assert.ok(performance.now() - started < 5000, 'must not wait out the timeout');
   } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
 });
 

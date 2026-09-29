@@ -22,6 +22,12 @@ const HOST = process.env.HOST || "127.0.0.1";
 // timed data like request-timing.jsonl when reconstructing an incident after
 // the fact (2026-09-18: asked to explain a rate-limit spike against Brian's
 // own concurrent usage and could not line the two up in time).
+// Durations, deadlines and pacing use a monotonic clock. The wall clock can
+// step: on Brian's WSL machine it jumped forward about 3.6 s every ~30 s
+// (measured 2026-09-29: 21.5 s of drift corrected in 3 minutes). With
+// Date.now() those steps cut timeouts and pacer gaps short, and made a timing
+// test fail about 1 run in 6. Timestamps written to logs still use new Date().
+const monoNow = () => performance.now();
 function logLine(fn, msg) { fn(`${new Date().toISOString()} ${msg}`); }
 const logInfo = (msg) => logLine(console.log, msg);
 const logWarn = (msg) => logLine(console.warn, msg);
@@ -115,7 +121,7 @@ function getPacerEntry(key) {
   const saved = _savedPacerStateByKey[key];
   const pacer = new AdaptivePacer({ initialMs: saved?.spacingMs ?? 3000, minMs: 1000, maxMs: 120000 });
   if (saved) { pacer.rateLimited = saved.rateLimited || 0; pacer.successes = saved.successes || 0; }
-  entry = { pacer, lastRequestAt: 0 };
+  entry = { pacer, lastRequestAt: -Infinity };
   accountPacers.set(key, entry);
   return entry;
 }
@@ -313,7 +319,7 @@ wss.on("connection", (ws, req) => {
         action: 'auto_capture', ok: true, rate_limited: autoCaptureRateLimited, api_status: msg.api_error_status ?? null,
         account: autoCapturePacerKey === DEFAULT_PACER_KEY ? null : autoCapturePacerKey,
         tab: ws.tabToken?.slice(0, 8) ?? null, agent_tab: ws.agentTab ?? null, spacing_ms: getPacerEntry(autoCapturePacerKey).pacer.spacingMs,
-        ...recordAndCountWindow(Date.now()),
+        ...recordAndCountWindow(monoNow()),
       });
       try { const saved = archive.archiveSnapshot(msg.snapshot); ws.send(JSON.stringify({ type: 'snapshot_ack', thread_id: saved.thread_id, content_hash: saved.content_hash })); }
       catch (err) { logErr(`[broker] snapshot_error for ${msg.snapshot?.thread_id}: ${err.message}`); ws.send(JSON.stringify({ type: 'snapshot_error', error: err.message })); }
@@ -480,7 +486,7 @@ const ALWAYS_REAL_ACTIONS = new Set(['send_prompt', 'retry_send_click', 'list_re
 // Waits out the account's current pacer gap without recording a request.
 async function waitForPacerGap(account) {
   const entry = getPacerEntry(normalizePacerKey(account));
-  const waitMs = entry.pacer.spacingMs - (Date.now() - entry.lastRequestAt);
+  const waitMs = entry.pacer.spacingMs - (monoNow() - entry.lastRequestAt);
   if (waitMs > 0) await sleep(waitMs);
 }
 
@@ -494,8 +500,8 @@ function targetTabReady(tab, account) {
   return [...extensionSockets].some((ws) => ws.readyState === ws.OPEN && ws.tabToken === tab && (!account || accountMatches(ws.account, account)));
 }
 async function waitForTargetTab(tab, account, waitMs) {
-  const deadline = Date.now() + waitMs;
-  while (!targetTabReady(tab, account) && Date.now() < deadline) await sleep(100);
+  const deadline = monoNow() + waitMs;
+  while (!targetTabReady(tab, account) && monoNow() < deadline) await sleep(100);
 }
 
 async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts = {}) {
@@ -506,36 +512,36 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
   const entry = getPacerEntry(pacerKey);
   if (alwaysReal) await waitForPacerGap(opts.account);
   if (tracked) agentRequestsInFlight++;
-  const startedMs = Date.now();
+  const startedMs = monoNow();
   try {
     const result = await dispatchToExtensionRaw(command, timeoutMs, opts);
     const real = alwaysReal || (command.action === 'get_reply' && result?.api_checked);
     if (real) {
-      entry.lastRequestAt = Date.now();
+      entry.lastRequestAt = monoNow();
       const rateLimited = isRateLimitSignal(null, result);
       if (rateLimited) applyRateLimit(retryAfterMsOf(null, result), pacerKey); else entry.pacer.onSuccess();
       saveAgentPacerState();
       appendRequestTiming({
-        action: command.action, ok: true, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, spacing_ms: entry.pacer.spacingMs,
+        action: command.action, ok: true, duration_ms: monoNow() - startedMs, rate_limited: rateLimited, spacing_ms: entry.pacer.spacingMs,
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: result?.tab?.slice(0, 8) ?? null, agent_tab: result?.agent ?? null, incognito: result?.incognito ?? null,
         api_checked: result?.api_checked ?? null, api_status: result?.api_status ?? null,
         ...(command.action === 'send_prompt' ? { send_confirmed: result?.send_confirmed ?? null, confirmed_by: result?.confirmed_by ?? null, visibility: result?.visibility ?? null, plain_text_mode: result?.plain_text_mode ?? null, typing_ms: result?.typing_ms ?? null, fill_mode: result?.fill_mode ?? null, fill_detail: result?.fill_detail ?? null } : {}),
-        in_flight: agentRequestsInFlight, ...recordAndCountWindow(Date.now()),
+        in_flight: agentRequestsInFlight, ...recordAndCountWindow(monoNow()),
       });
     }
     return result;
   } catch (err) {
     const real = alwaysReal || (command.action === 'get_reply' && err?.api_status != null);
     if (real) {
-      entry.lastRequestAt = Date.now();
+      entry.lastRequestAt = monoNow();
       const rateLimited = isRateLimitSignal(err, null);
       if (rateLimited) { applyRateLimit(retryAfterMsOf(err, null), pacerKey); saveAgentPacerState(); }
       appendRequestTiming({
-        action: command.action, ok: false, duration_ms: Date.now() - startedMs, rate_limited: rateLimited, error: err.message, spacing_ms: entry.pacer.spacingMs,
+        action: command.action, ok: false, duration_ms: monoNow() - startedMs, rate_limited: rateLimited, error: err.message, spacing_ms: entry.pacer.spacingMs,
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: err?.tab?.slice(0, 8) ?? null, agent_tab: err?.agent ?? null, incognito: err?.incognito ?? null,
-        api_status: err?.api_status ?? null, in_flight: agentRequestsInFlight, ...recordAndCountWindow(Date.now()),
+        api_status: err?.api_status ?? null, in_flight: agentRequestsInFlight, ...recordAndCountWindow(monoNow()),
       });
     }
     throw err;
@@ -563,8 +569,8 @@ async function navigateToThread(threadId) {
   const cur = await currentThreadId().catch(() => null);
   if (cur === threadId) return;
   await dispatchToExtension({ action: 'navigate_to_thread', thread_id: threadId });
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
+  const deadline = monoNow() + 15000;
+  while (monoNow() < deadline) {
     await sleep(700);
     try {
       // A short per-attempt timeout, not the full COMMAND_TIMEOUT_MS — otherwise
@@ -707,12 +713,12 @@ function setAgentTabOpener(fn) { openAgentTab = fn; }
 // so wait briefly for it: the 2026-09-29 live check showed a new agent tab's
 // first ask still logged account:null without this wait.
 async function accountOfTab(tab, waitMs = 5000) {
-  const deadline = Date.now() + waitMs;
+  const deadline = monoNow() + waitMs;
   for (;;) {
     const ws = [...extensionSockets].find((w) => w.tabToken === tab && w.readyState === w.OPEN);
     const key = accountKey(ws?.account);
     // undefined: the tab has not reported yet; null: it reported no account.
-    if (key || ws?.account !== undefined || Date.now() >= deadline) return key || null;
+    if (key || ws?.account !== undefined || monoNow() >= deadline) return key || null;
     await sleep(200);
   }
 }
@@ -746,8 +752,8 @@ async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = nul
     if (found) return found;
   }
   await openAgentTab({ account });
-  const deadline = Date.now() + openWaitMs;
-  while (Date.now() < deadline) {
+  const deadline = monoNow() + openWaitMs;
+  while (monoNow() < deadline) {
     await sleep(1000);
     const next = await findIdleAgentTab([], forceNew ? existing : new Set(), account);
     if (next) return next;
@@ -757,8 +763,8 @@ async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = nul
 }
 
 async function waitForTab(tab, predicate, timeoutMs, what) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  const deadline = monoNow() + timeoutMs;
+  while (monoNow() < deadline) {
     await sleep(700);
     try { const info = await dispatchToExtension({ action: "get_tab" }, 3000, { tab }); if (predicate(info)) return info; }
     catch { /* reconnecting after navigation */ }
@@ -828,7 +834,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
     if (!body) throw new Error("text is required.");
     if (thread_id && thread_title) throw new Error("pass thread_id or thread_title, not both.");
     const startedAt = new Date().toISOString();
-    const startedMs = Date.now();
+    const startedMs = monoNow();
     let last = null;
     let resolvedThreadId = thread_id;
     let conversationMode = thread_id || thread_title ? 'continuing' : 'new';
@@ -899,7 +905,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
           }
           await waitForPacerGap(account);
           if (err.stage === 'no_composer') {
-            appendRequestTiming({ action: 'reload_for_composer', ok: true, tab: tab.slice(0, 8), page_id: err.page_id, ...recordAndCountWindow(Date.now()) });
+            appendRequestTiming({ action: 'reload_for_composer', ok: true, tab: tab.slice(0, 8), page_id: err.page_id, ...recordAndCountWindow(monoNow()) });
             // Not awaited: the page may unload before its reply crosses the
             // socket. The new page instance reporting in is the real signal.
             dispatchToExtension({ action: "reload_tab" }, 5000, { tab }).catch(() => {});
@@ -950,8 +956,8 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         if (poll.done || poll.generating || (conversationMode === 'new' && poll.thread_id)
           || (Number.isInteger(poll.message_count) && poll.message_count > (Number(sent.dom_before) || 0))) sendSeen = true;
       };
-      const deadline = Date.now() + timeout_seconds * 1000;
-      const sentAtMs = Date.now();
+      const deadline = monoNow() + timeout_seconds * 1000;
+      const sentAtMs = monoNow();
       const retryClickAfterMs = [...RETRY_CLICK_AFTER_MS];
       let previousDoneText = null;
       // A finished reply needs two agreeing reads to rule out a mid-stream
@@ -963,21 +969,21 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       // is seen, confirmation may run past the deadline -- bounded by
       // confirmGraceMs, which covers the extension's backed-off API-read gap.
       let confirmUntil = 0;
-      while (Date.now() < deadline || Date.now() < confirmUntil) {
+      while (monoNow() < deadline || monoNow() < confirmUntil) {
         await sleep(pollMs);
         try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before, expected: body, thread_hint: sentThreadId, exclude_threads: [...attributedThreads] }, 30000, { tab, account }); }
         catch (err) { last = { done: false, error: err.message }; continue; }
-        if (!sendSeen && !last.discovered_thread_id && retryClickAfterMs.length && Date.now() - sentAtMs >= retryClickAfterMs[0]) {
+        if (!sendSeen && !last.discovered_thread_id && retryClickAfterMs.length && monoNow() - sentAtMs >= retryClickAfterMs[0]) {
           retryClickAfterMs.shift();
           try {
             const retry = await dispatchToExtension({ action: "retry_send_click", expected: body, thread_before: conversationMode === 'new' ? null : resolvedThreadId,
               messages_before: sent.messages_before, exclude_threads: [...attributedThreads] }, 60000, { tab, account });
-            retryClicks.push({ after_ms: Date.now() - sentAtMs, clicked: Boolean(retry.clicked), confirmed_by: retry.confirmed_by || null, reason: retry.reason || null });
+            retryClicks.push({ after_ms: monoNow() - sentAtMs, clicked: Boolean(retry.clicked), confirmed_by: retry.confirmed_by || null, reason: retry.reason || null });
             if (retry.confirmed_by) {
               sendSeen = true;
               if (retry.thread_id && !sentThreadId) { sentThreadId = retry.thread_id; noteAttributedThread(sentThreadId); }
             }
-          } catch (err) { retryClicks.push({ after_ms: Date.now() - sentAtMs, error: err.message }); }
+          } catch (err) { retryClicks.push({ after_ms: monoNow() - sentAtMs, error: err.message }); }
         }
         if (last.discovered_thread_id && !sentThreadId) {
           // Found server-side: the send landed although the page never showed it.
@@ -1007,12 +1013,12 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         const authoritative = last.source === "api" && last.end_turn === true;
         if (!authoritative && last.reply !== previousDoneText) {
           previousDoneText = last.reply;
-          confirmUntil = Date.now() + confirmGraceMs;
+          confirmUntil = monoNow() + confirmGraceMs;
           continue;
         }
         const threadId = last.thread_id || sentThreadId || resolvedThreadId || null;
         noteAttributedThread(threadId);
-        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'success', account: usedAccount || null, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: monoNow() - startedMs, outcome: 'success', account: usedAccount || null, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
         // The caller must know when the model did not get the prompt verbatim.
         // Evidence, not the switch's own report: the stored turn is compared with
         // the prompt (replyFromTree's prompt_escaped).
@@ -1029,7 +1035,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       err.sent = err.sent_unknown ? null : (err.nothing_sent || !sendDispatched) ? false : sendSeen ? true : null;
       err.thread_id = last?.thread_id || sentThreadId || resolvedThreadId || null;
       err.account = usedAccount || null;
-      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'failed', account: usedAccount || null, sent: err.sent, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: monoNow() - startedMs, outcome: 'failed', account: usedAccount || null, sent: err.sent, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
       throw err;
     } finally {
       if (claimedTab) claimedTabs.delete(claimedTab);
@@ -1208,7 +1214,7 @@ app.post('/api/undo', async (req, res) => {
 });
 
 function createMcpServer() {
-  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.10" });
+  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.11" });
 
   mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),
