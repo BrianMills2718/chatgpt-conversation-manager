@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.9.19 (2026-09-29), extension 0.9.15
+
+### Same-account requests share a reserved pacing lane
+
+- Concurrent backend actions now reserve their account's slot before dispatch, so parallel asks cannot all pass the same old pacer timestamp and start together.
+- `get_reply` keeps local DOM polling responsive, while a broker-issued account permit gates conversation reads and new-chat discovery across tabs.
+- The log separates broker-action pacing and concurrency from physical API requests observed on the ChatGPT page. API events include account, endpoint class, HTTP status, start/completion time, and duration without storing endpoint paths, conversation IDs, query strings, headers, or bodies.
+- The extension reports the moment a prompt is submitted and when an API-backed reply check begins, so the broker can pace from the actual action time. A bounded offline queue reports a telemetry gap if it ever overflows.
+- Unpinned new asks can select the idle connected account with the earliest projected start, factoring in its learned pacing gap and pending work. Explicit-account asks stay pinned; thread-targeted asks remain on their existing path. An `account_route` event links each automatic choice to its ask outcome without recording prompt text.
+- A mocked 429 test verifies that a learned cooldown moves the next unpinned ask to another idle account. This verifies routing behavior, not real ChatGPT quota limits or maximum live throughput.
+
 ## v0.9.18 (2026-09-29), extension 0.9.14
 
 ### "No composer" on continuations: the page's own conversation load was refused by ChatGPT's rate limit

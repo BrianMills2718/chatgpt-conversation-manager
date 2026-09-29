@@ -23,6 +23,7 @@ let requestTimingPath;
 let domActivityPath;
 let broadcastReloadTab;
 let getPacerEntry;
+let dispatchToExtension;
 
 before(async () => {
   process.env.PORT = '0';
@@ -44,6 +45,7 @@ before(async () => {
   domActivityPath = mod.DOM_ACTIVITY_PATH;
   broadcastReloadTab = mod.broadcastReloadTab;
   getPacerEntry = mod.getPacerEntry;
+  dispatchToExtension = mod.dispatchToExtension;
   await new Promise((resolve) => {
     if (server.listening) return resolve();
     server.listen(0, resolve);
@@ -205,14 +207,14 @@ test('dispatchToExtension fails only once every connected tab has failed', async
   }
 });
 
-function fakeTab(tab, { busy = false, thread = null, agent = false, onCommand }) {
+function fakeTab(tab, { busy = false, thread = null, agent = false, account = null, onCommand }) {
   const state = { busy, thread, received: [], ws: null };
   const open = () => new Promise((resolve) => {
     const ws = new WebSocket(`${wsUrl}&tab=${tab}${agent ? '&agent=1' : ''}`);
     state.ws = ws;
     // A real tab reports its account right after connecting (content.js
-    // reportIdentity); these fakes report none.
-    ws.on('open', () => { ws.send(JSON.stringify({ type: 'identity', account: null })); resolve(); });
+    // reportIdentity); most fakes report none, while pacing cases may name one.
+    ws.on('open', () => { ws.send(JSON.stringify({ type: 'identity', account: account ? { email: account, user_id: `user-${account}`, name: account } : null })); resolve(); });
     ws.on('message', async (buf) => {
       const msg = JSON.parse(buf.toString());
       if (msg.type !== 'command') return;
@@ -446,6 +448,124 @@ test('ask_chatgpt runs two concurrent asks in parallel, one per idle agent tab',
 // applies (observed live 2026-09-17): it must force a real minimum gap
 // between two backend-touching dispatches regardless of which tab or which
 // logical ask_chatgpt call they belong to.
+test('same-account backend actions reserve their start slot so concurrent asks cannot wake and dispatch together', async () => {
+  const account = 'serialized-pacer@example.com';
+  const starts = [];
+  const make = (name) => fakeTab(name, { account, onCommand: async (msg, _state, reply) => {
+    if (msg.action === 'send_prompt') {
+      starts.push(Date.now());
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return reply({ ok: true, send_confirmed: true, sent_at: new Date().toISOString() });
+    }
+    reply({ ok: false, error: `unexpected ${msg.action}` });
+  } });
+  const a = make('serialized-pacer-a');
+  const b = make('serialized-pacer-b');
+  await Promise.all([a.open(), b.open()]);
+  const entry = getPacerEntry(account);
+  const saved = { spacing: entry.pacer.spacingMs, min: entry.pacer.minMs, last: entry.lastRequestAt };
+  entry.pacer.minMs = 120;
+  entry.pacer.spacingMs = 120;
+  entry.lastRequestAt = -Infinity;
+  fs.rmSync(requestTimingPath, { force: true });
+  try {
+    await Promise.all([
+      dispatchToExtension({ action: 'send_prompt', text: 'one' }, 3000, { tab: 'serialized-pacer-a', account }),
+      dispatchToExtension({ action: 'send_prompt', text: 'two' }, 3000, { tab: 'serialized-pacer-b', account }),
+    ]);
+    assert.equal(starts.length, 2);
+    assert.ok(starts[1] - starts[0] >= 110, `expected reserved sends to be at least 110ms apart, got ${starts[1] - starts[0]}ms`);
+    const events = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.action === 'send_prompt');
+    assert.equal(events.length, 2);
+    assert.ok(events.every((e) => e.account === account && typeof e.request_started_at === 'string'));
+    assert.deepEqual(events.map((e) => e.account_broker_actions_last_60s), [1, 2]);
+  } finally {
+    Object.assign(entry.pacer, { spacingMs: saved.spacing, minMs: saved.min });
+    entry.lastRequestAt = saved.last;
+    a.ws.close(); b.ws.close();
+  }
+});
+
+test('only one same-account get_reply poll receives the API-check permit at a time', async () => {
+  const account = 'serialized-api-check@example.com';
+  let firstStarted;
+  const firstStartedPromise = new Promise((resolve) => { firstStarted = resolve; });
+  const flags = [];
+  const a = fakeTab('api-permit-a', { account, onCommand: async (msg, _state, reply) => {
+    if (msg.action !== 'get_reply') return reply({ ok: false, error: `unexpected ${msg.action}` });
+    flags.push(msg.api_check_allowed);
+    if (msg.api_check_allowed) {
+      firstStarted();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return reply({ ok: true, done: false, thread_id: 'permit-thread', api_checked: true, api_status: 200, api_request_started_at: new Date().toISOString() });
+    }
+    return reply({ ok: true, done: false, thread_id: 'permit-thread', api_checked: false });
+  } });
+  const b = fakeTab('api-permit-b', { account, onCommand: async (msg, _state, reply) => {
+    if (msg.action !== 'get_reply') return reply({ ok: false, error: `unexpected ${msg.action}` });
+    flags.push(msg.api_check_allowed);
+    return reply({ ok: true, done: false, thread_id: 'permit-thread', api_checked: false });
+  } });
+  await Promise.all([a.open(), b.open()]);
+  const entry = getPacerEntry(account);
+  const saved = { spacing: entry.pacer.spacingMs, min: entry.pacer.minMs, last: entry.lastRequestAt };
+  entry.pacer.minMs = 500;
+  entry.pacer.spacingMs = 500;
+  entry.lastRequestAt = -Infinity;
+  fs.rmSync(requestTimingPath, { force: true });
+  try {
+    const first = dispatchToExtension({ action: 'get_reply' }, 3000, { tab: 'api-permit-a', account });
+    await firstStartedPromise;
+    await dispatchToExtension({ action: 'get_reply' }, 3000, { tab: 'api-permit-b', account });
+    await first;
+    assert.deepEqual(flags, [true, false]);
+    const events = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.action === 'get_reply');
+    assert.equal(events.length, 1);
+    assert.equal(events[0].api_checked, true);
+    assert.equal(events[0].account_broker_actions_last_60s, 1);
+  } finally {
+    Object.assign(entry.pacer, { spacingMs: saved.spacing, minMs: saved.min });
+    entry.lastRequestAt = saved.last;
+    a.ws.close(); b.ws.close();
+  }
+});
+
+test('observed ChatGPT API requests are recorded with account, endpoint class, status, and actual timing', async () => {
+  const account = 'api-observer@example.com';
+  const tab = fakeTab('api-observer-tab', { account, onCommand: (_msg, _state, reply) => reply({ ok: true }) });
+  await tab.open();
+  try {
+    fs.rmSync(requestTimingPath, { force: true });
+    const start = Date.now() - 85;
+    tab.ws.send(JSON.stringify({
+      type: 'api_request_observed',
+      source: 'performance_resource_timing',
+      endpoint_class: 'conversation',
+      request_started_at: new Date(start).toISOString(),
+      completed_at: new Date(start + 81).toISOString(),
+      duration_ms: 81,
+      api_status: 429,
+      initiator_type: 'fetch',
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const event = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))[0];
+    assert.equal(event.schema_version, 2);
+    assert.equal(event.event_type, 'api_request');
+    assert.equal(event.action, 'chatgpt_api_request');
+    assert.equal(event.account, account);
+    assert.equal(event.endpoint_class, 'conversation');
+    assert.equal(event.api_status, 429);
+    assert.equal(event.rate_limited, true);
+    assert.equal(event.request_started_at, new Date(start).toISOString());
+    assert.equal(event.completed_at, new Date(start + 81).toISOString());
+    assert.equal(event.api_events_received_last_60s, 1);
+    assert.equal(event.account_api_events_received_last_60s, 1);
+    assert.equal(JSON.stringify(event).includes('conversation-id'), false);
+  } finally {
+    tab.ws.close();
+  }
+});
+
 test('the agent request pacer enforces a minimum gap between backend-touching dispatches, across different tabs', async () => {
   const tab = fakeTab('pacer-tab', {
     agent: true,
@@ -465,15 +585,17 @@ test('the agent request pacer enforces a minimum gap between backend-touching di
   try {
     await askChatgpt({ text: 'first', timeout_seconds: 10, pollMs: 20 });
     await askChatgpt({ text: 'second', timeout_seconds: 10, pollMs: 20 });
-    // Only paced requests (they carry spacing_ms); navigation log lines are not requests.
-    const events = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.spacing_ms != null);
+    // Navigation and its prompt share one reserved ask sequence; compare the
+    // separately paced backend actions and API-check permits here.
+    const events = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+      .filter((e) => e.spacing_ms != null && !['navigate_home', 'navigate_to_thread', 'reload_tab'].includes(e.action));
     assert.ok(events.length >= 2, 'expected at least the two send_prompt dispatches to be logged');
     // Each success shrinks the pacer's gap a little (AIMD), so compare each
     // gap against the spacing the pacer actually held right after the prior
     // dispatch (logged on that event), not a fixed constant.
     for (let i = 1; i < events.length; i++) {
-      const gap = new Date(events[i].ts).getTime() - new Date(events[i - 1].ts).getTime();
-      const requiredGap = events[i - 1].spacing_ms - 20; // small scheduling slack
+      const gap = new Date(events[i].request_started_at).getTime() - new Date(events[i - 1].request_started_at).getTime();
+      const requiredGap = events[i - 1].spacing_ms_applied - 20; // small scheduling slack
       assert.ok(gap >= requiredGap, `expected >=${requiredGap}ms between "${events[i - 1].action}" and "${events[i].action}", got ${gap}ms`);
     }
   } finally {
@@ -560,9 +682,9 @@ test('a real (api_checked) get_reply is logged with tab/agent/incognito context 
     assert.equal(entry.incognito, false);
     assert.equal(entry.api_checked, true);
     assert.equal(entry.api_status, 200);
-    assert.equal(typeof entry.requests_last_60s, 'number');
-    assert.equal(typeof entry.requests_last_300s, 'number');
-    assert.equal(typeof entry.in_flight, 'number');
+    assert.equal(typeof entry.broker_actions_last_60s, 'number');
+    assert.equal(typeof entry.broker_actions_last_300s, 'number');
+    assert.equal(typeof entry.broker_actions_in_flight, 'number');
   } finally {
     tab.ws.close();
   }
@@ -636,9 +758,10 @@ test('an auto-archive thread_snapshot is logged into the same request-timing tim
     const lines = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     const entry = lines.find((l) => l.action === 'auto_capture');
     assert.ok(entry, 'expected the auto-archive push to be logged as auto_capture');
+    assert.equal(entry.event_type, 'capture_snapshot');
     assert.equal(entry.rate_limited, false);
     assert.equal(entry.tab, 'snapshot-'.slice(0, 8));
-    assert.equal(typeof entry.requests_last_60s, 'number');
+    assert.equal('broker_actions_last_60s' in entry, false, 'snapshot events are not physical API request counts');
   } finally {
     ws.close();
   }

@@ -5,10 +5,11 @@
 **Mission:** Stop maintaining two competing ChatGPT-dispatch mechanisms (an
 ad-hoc raw-`ask_chatgpt` loop vs. the more mature `weekly_chatgpt_supervisor.py`),
 extract the latter's proven dispatch robustness into one shared client, prove
-real multi-account dispatch works (never actually tried with two distinct live
-accounts), fix the broker's rate-limit pacer so accounts are properly
+real multi-account dispatch works, fix the broker's rate-limit pacer so accounts are properly
 independent, and document the per-person deployment shape that lets Brian
-hand this to a colleague. Full plan and rationale:
+hand this to a colleague. Brian expanded the goal on 2026-09-29 to include
+adaptive selection among connected ChatGPT accounts for unpinned new asks,
+using each account's observed pacing and queued work. Full plan and rationale:
 `/home/brian/.claude/plans/async-snuggling-thompson.md` (approved by Brian,
 2026-09-25).
 
@@ -32,9 +33,10 @@ focus contention and a since-fixed `fresh_tab` PATH bug. (Correction 2026-09-26:
 
 **Forbidden substitutes:** A single-account dispatch relabeled as "multi-account
 verified." A mocked/stubbed broker response standing in for a real ChatGPT
-reply. Claiming Phase 3 done from the pacer code change alone without an
-actual live two-account concurrent dispatch and inspection of the persisted
-pacer state file showing two independent entries.
+reply for C3/C4. Claiming Phase 3 done from the pacer code change alone without
+an actual live two-account concurrent dispatch and inspection of the persisted
+pacer state file showing two independent entries. C6's synthetic 429 is only
+evidence for the routing algorithm; it is not live quota or throughput evidence.
 
 **Repository / working scope:** Primary: `weekly-plans` (Phase 1 — new
 `scripts/chatgpt_dispatch_client.py` module extracted from
@@ -48,7 +50,9 @@ governs while working in it.
 
 - In scope: the shared dispatch client, the review-sweep's dispatch mechanism,
   the broker's rate-limit pacer, connecting a second real ChatGPT account,
-  documenting per-person deployment.
+  documenting per-person deployment, and locally routing unpinned new asks to
+  the connected account with the earliest projected start under its learned
+  pacing gap and current queue.
 - Out of scope: any centralized/hosted broker (Brian's explicit call,
   2026-09-25); any new "router" that decides ChatGPT-vs-Claude (Decision 0014
   governs that, reused as-is); `weekly_chatgpt_supervisor.py`'s task-profile
@@ -76,6 +80,13 @@ governs while working in it.
 | C3 | Real two-account concurrent dispatch | Two real replies from two distinct connected accounts in one `dispatch_many` call, both transcripts read back directly |
 | C4 | Pacer is per-account | Persisted pacer state file shows two independent account-keyed entries after C3's run, not one shared global entry |
 | C5 | Per-person deployment documented | The written README/CLAUDE.md section accurately describes what C1-C4 actually built, not an aspirational future state |
+| C6 | Adaptive account routing responds to account cooldowns | A broker-level test feeds a synthetic 429 to account A, verifies A's learned gap widens, then verifies an unpinned new ask selects idle account B with the earlier projected start; the route decision is joined to its ask outcome by `route_id` |
+
+C6 proves the scheduler behavior using controlled browser fakes. It does not
+prove ChatGPT's hidden account limits or claim that any fixed routing policy
+achieves a global throughput maximum. Live quota estimates must come from
+observed traffic and 429s, and are limited to activity visible in connected
+browser pages.
 
 ## Increments
 
@@ -108,6 +119,12 @@ governs while working in it.
 4. Phase 3: pacer made per-account; second real account connected; live
    two-account concurrent dispatch proven (C3, C4).
 5. Phase 4: per-person deployment documented (C5).
+6. **Added 2026-09-29 at Brian's direction.** Phase 5: for unpinned new asks,
+   choose the connected account with the earliest projected start based on its
+   learned pacer gap, in-flight asks, and pending automatic assignments. Keep
+   explicit-account requests pinned and leave thread-targeted requests on the
+   existing path. Record the candidate estimates and selected account, then
+   link the resulting ask outcome (C6).
 
 ## Loop Bounds
 
@@ -162,7 +179,7 @@ non_gating_utility_review:
   this document's "Current State" section, the referenced plan file, and
   `git log` on both repos before resuming, not just this file's prose.
 - Worker reporting/status: single lane, no sub-workers. Report at each phase
-  acceptance-check boundary (C1-C5); no polling loop.
+  acceptance-check boundary (C1-C6); no polling loop.
 - Pinned cross-repository dependencies: Phase 1 must land in
   `chatgpt-conversation-manager-v0.2` before Phase 1's refactor of
   `weekly-plans/scripts/weekly_chatgpt_supervisor.py` or Phase 2's
@@ -184,86 +201,41 @@ non_gating_utility_review:
 
 ## Current State
 
-- Demonstrated (2026-09-25, prior to this goal starting): single-account
-  sequential ChatGPT dispatch works end-to-end (multiple real code-review bugs
-  found and fixed via the existing raw pathway). Multi-account dispatch:
-  never attempted with two real distinct live accounts.
-- Technical execution status: Increment 1 and Phase 1 (Increment 2) complete.
-  `weekly-plans/scripts/chatgpt_dispatch_client.py` extracted (PR #162,
-  merged, commit `b196a14`); `weekly_chatgpt_supervisor.py` refactored to
-  import it. C1 verified: all 18 pre-existing supervisor tests pass
-  unmodified, plus 5 new tests for the extracted client (23/23), CLI
-  smoke-tested (`weekly_chatgpt_supervisor.py validate`). The new client
-  also gained account-aware `dispatch_one`/`dispatch_many` entry points for
-  Phase 3, ahead of need.
-- Phase 3's code side is complete and deployed: `server/index.js`'s
-  `agentPacer` is now an `accountPacers` Map keyed by normalized account
-  (PR #17, merged, commit `8c5bd83`), with `agentPacer` itself kept as the
-  `'(default)'` entry for backward compatibility. Found and fixed a real
-  gap while wiring this up: `askChatgpt`'s own `send_prompt`/`get_reply`
-  calls only passed `{tab}`, not `{tab, account}`, so an explicit account
-  request would have silently landed in the default bucket. Verified: full
-  mocked suite 125/125 (was 124), including a new test proving two
-  accounts' pacers widen independently via the persisted state file. The
-  live broker was restarted (old PID 351 confirmed dead via `ps -p`,
-  relaunched via `scripts/run-server.sh`, `/health` and
-  `list_chatgpt_connections` confirmed it came back up with real tabs
-  reconnected) so this fix is live, not just merged.
-- Still only one ChatGPT account is connected to the broker
-  (`therakorski@gmail.com`, reconfirmed post-restart). Phase 3's C3/C4
-  (real two-account dispatch, per-account pacer state *with a genuine
-  second account*) cannot be verified live until a second account is
-  connected as an agent tab. This is the one remaining blocker on this
-  goal that only Brian can resolve — see "Need anything from human" in
-  this session's closeout message. Everything else in Phase 3 that doesn't
-  require a second live account is done.
-- **Phase 2 complete** (C2): `weekly-plans/scripts/review_sweep.py` built
-  on `chatgpt_dispatch_client.dispatch_many` (weekly-plans PR #163, merged,
-  commit `ad8e478`) -- replaces the raw `ask_chatgpt` + PowerShell
-  focus-lock loop used all through 2026-09-25. Verified with 5 new mocked
-  tests AND one real live dispatch against DIGIMON's actual pending
-  manifest (`Core/Prompt/RaptorPrompt.py`), which correctly recovered a
-  real reply through the broker's known false-timeout bug with zero manual
-  intervention, was independently verified, and landed as
-  `digimon_application_20260215` PR #380 (merged) -- a real manifest row
-  went from `pending` to `clean` using the new dispatch path end-to-end.
-- **Phase 4 / C5 complete**: added a "Sharing this with a teammate" section
-  to this repo's `README.md`, describing exactly what's built (per-person
-  local broker, no centralized/hosted broker) and, per the Forbidden
-  Substitutes rule above, explicitly stating what's still unverified
-  (per-account pacer code exists but has never run with two real
-  simultaneously-connected accounts) rather than describing an aspirational
-  state.
-- Added `weekly-plans/scripts/verify_multi_account_dispatch.py` (PR #164,
-  merged): a ready-to-run script that performs C3/C4's exact check (real
-  concurrent `dispatch_many` to two named accounts, then inspects the
-  persisted pacer state for two independent account-keyed entries) and
-  fails loudly rather than accepting a degraded single-account result. Not
-  runnable yet -- still only one account connected -- but removes all
-  remaining engineering work from the resume: once a second account is
-  connected, this is one command, not ad-hoc work.
-- Only C3 and C4 remain, both requiring a genuine second connected ChatGPT
-  account -- blocked on Brian; see "Need anything from human" in this
-  session's closeout message. Every other acceptance check (C1, C2, C5) is
-  done and verified.
-- **2026-09-29 update (share-readiness owner).**
-  - **Root cause of #27 and #28, fixed.** Bridge v0.8.0 to v0.8.2 (PRs #30 to #34, all merged and deployed; details in CHANGELOG):
-    - Every misattributed reply in the 2026-09-27/28 audit was a failed send's prompt left in the composer and then sent by the next ask.
-    - Most failed sends were very large prompts whose Send click ChatGPT drops.
-    - The bridge now retypes every prompt, verifies attribution against the exact prompt, and re-clicks only after checking ChatGPT's server.
-    - Every failure reports `sent=yes/no/unknown`.
-    - Asks are paced and logged under their tab's account.
-  - **Live checks, one account (therakorski), on 0.8.1:**
-    - a new chat with formatting;
-    - a continuation, logged under the tab's account;
-    - a 73k-character prompt in a hidden tab, with one prompt in the chat and the right reply.
-
-    The server-gated re-click path is covered by unit tests only.
-  - **Shared client bug found and fixed.** In `weekly-plans`, `chatgpt_dispatch_client.sent_thread_id` had matched only the pre-v0.7.2 wording "The message was sent". SentWithoutReply recovery therefore never fired from 2026-09-26 until weekly-plans PR #178 (merged `204bd73`), which reads the structured `sent`/`thread_id` fields.
-  - **C3/C4 still open.** A second account (brianmills2718@gmail.com) was being connected on 2026-09-29, but `list_chatgpt_connections` still showed only therakorski at 05:20Z. Once it appears, run `weekly-plans/scripts/verify_multi_account_dispatch.py`.
-- **C3/C4 PASSED (2026-09-29 16:05Z, bridge v0.9.17 / extension 0.9.13).**
-  - **Command.** `weekly-plans/scripts/verify_multi_account_dispatch.py --account-a therakorski@gmail.com --account-b brianmills2718@gmail.com`: one concurrent `dispatch_many` call, both asks started 16:05:23.
-  - **C3.** Both returned `verified`. The transcripts were read back directly: `6abbe1ce` under therakorski and `6abbe1cf` under brianmills2718, each "latest reply: finished". Reading `6abbe1ce` under brianmills2718 gave HTTP 404, so the two are distinct accounts.
-  - **C4.** `data/observations/agent-pacer-state.json` has independent `therakorski@gmail.com` and `brianmills2718@gmail.com` entries.
-  - **Prerequisite (v0.9.17).** Agent tabs are opened by the extension inside the account's own Chrome profile, not by `cmd.exe ... chrome`, which always opened the default profile. Also, one account per Chrome profile: ChatGPT's account switcher changes every tab in a profile.
-  - All acceptance checks C1-C5 are now met.
+- C1-C5 are complete. The shared client and review-sweep are merged in
+  `weekly-plans`; the real two-account `dispatch_many` run and independent
+  account pacer entries were verified on 2026-09-29 16:05Z. README documents
+  per-person local deployment. The original plan remains at
+  `/home/brian/.claude/plans/async-snuggling-thompson.md`.
+- **C6 implementation and controlled verification are complete in this
+  branch.** For unpinned new asks, the broker ranks identified accounts with
+  idle agent tabs by projected pacing start, accounting for each account's
+  spacing, in-flight asks, and pending assignments. Two parallel unpinned asks
+  reserve accounts before probing tabs, avoiding a same-account scheduling
+  pile-up. Explicit-account requests stay pinned; thread-targeted asks retain
+  their existing behavior. Route decisions are logged with candidate estimates
+  and linked to ask outcomes by `route_id`.
+- `npm test` passed 208 tests, including a synthetic 429 on account A followed
+  by an unpinned ask routed to B, parallel asks spread across A and B, and a
+  mixed pinned/automatic queue regression. This proves the scheduler's code
+  path, not a real ChatGPT quota limit or a maximum useful throughput.
+- PR #67 adds per-account broker-action and same-origin API telemetry, including
+  status, endpoint class, and timing, plus routing decisions linked to ask
+  outcomes. Once running, it will not observe ChatGPT native apps or activity
+  in unconnected browser profiles, and it does not expose all quota counters or
+  limits. Real usable rates remain an empirical estimate from activity this
+  broker can observe. Resource Timing observations are measurement-only: the
+  adaptive pacer currently reacts to 429s returned through broker operations,
+  not throttles seen only in ordinary page activity.
+- PR #67 on branch `fix/per-account-pacing` is still open and unmerged, so the
+  new router and telemetry are not live. Brian renewed authorization on
+  2026-09-29 for one bounded live validation. For that smoke, disable the
+  scheduled first-run sync so it does not add a second ChatGPT operation; send
+  no more than one unpinned ask and do not retry it if it times out or is
+  rate-limited.
+- **Still outstanding before calling the usage goal complete:** capture the
+  bounded live route and ask outcome, then use attributable per-account traffic
+  and 429 observations to estimate useful rates. Existing same-day logs show
+  reply-poll 429s alongside completed asks, so those events alone do not
+  establish a prompt-level throttle rate. Do not describe the scheduler as a
+  proven maximum throughput or share that claim before the evidence supports
+  it.

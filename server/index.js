@@ -82,9 +82,12 @@ function bridgeFailureKind(error, last) {
 // persisted to disk so a broker restart does not forget a learned slowdown.
 const REQUEST_TIMING_PATH = path.join(ARCHIVE_DIR, 'observations', 'request-timing.jsonl');
 const AGENT_PACER_STATE_PATH = path.join(ARCHIVE_DIR, 'observations', 'agent-pacer-state.json');
-// Actions that make a real request against ChatGPT's backend (not a pure
-// local DOM/status read like get_tab or navigate_home).
-const BACKEND_TOUCHING_ACTIONS = new Set(['send_prompt', 'get_reply', 'retry_send_click', 'list_recent_chats', 'capture_current_chat']);
+const API_REQUEST_ENDPOINT_CLASSES = new Set(['auth_session', 'conversation', 'conversation_list', 'project_sidebar', 'file_download', 'backend_other', 'api_other']);
+// Broker actions that can cause ChatGPT backend traffic. These are logical
+// actions, not a count of each HTTP request; Resource Timing observations below
+// record physical same-origin API requests separately.
+const PACING_SEQUENCE_ACTIONS = new Set(['navigate_home', 'navigate_to_thread', 'reload_tab']);
+const BACKEND_TOUCHING_ACTIONS = new Set(['send_prompt', 'get_reply', 'retry_send_click', 'list_recent_chats', 'list_project_chats', 'read_conversation', 'capture_current_chat', 'move_to_project', 'rename_current_chat', 'open_agent_tab', ...PACING_SEQUENCE_ACTIONS]);
 
 // One pacer per ChatGPT account, not one global pacer, so a rate-limit signal
 // on one account's quota does not throttle every other connected account too
@@ -123,35 +126,83 @@ function getPacerEntry(key) {
   const saved = _savedPacerStateByKey[key];
   const pacer = new AdaptivePacer({ initialMs: saved?.spacingMs ?? 3000, minMs: 1000, maxMs: 120000 });
   if (saved) { pacer.rateLimited = saved.rateLimited || 0; pacer.successes = saved.successes || 0; }
-  entry = { pacer, lastRequestAt: -Infinity };
+  entry = { pacer, lastRequestAt: -Infinity, actionTail: Promise.resolve(), actionInFlight: false, apiCheckReservation: null };
   accountPacers.set(key, entry);
   return entry;
 }
 const agentPacer = getPacerEntry(DEFAULT_PACER_KEY).pacer;
-// How many paced dispatches are currently waiting on or executing a real
-// request at once -- a direct measure of concurrency pressure, independent
-// of the minimum-gap the pacer enforces, for correlating a future rate-limit
-// event against "was this a burst of parallel calls" specifically.
+// How many paced broker actions are waiting on or executing at once -- a
+// direct measure of orchestration concurrency, independent of the minimum gap.
 let agentRequestsInFlight = 0;
-// A minimum gap between requests prevents zero-gap spamming by construction,
-// but says nothing about a longer rolling-window rate (e.g. "no more than N
-// in 60s") that a low, well-decayed gap could still exceed. Recording how
-// many backend-touching requests fell within the last 60s/300s at the time
-// of each dispatch is what actually lets a future incident be diagnosed as
-// "raw rate" vs "burst" vs neither, instead of guessing.
+// Broker action rates and observed HTTP request rates are separate metrics:
+// each action can cause several HTTP requests, and normal ChatGPT page traffic
+// also reaches the same account's quota.
 const REQUEST_WINDOW_MS = 5 * 60 * 1000;
 const recentAgentRequestTimestamps = [];
-function recordAndCountWindow(nowMs) {
+const recentAgentRequestTimestampsByAccount = new Map();
+const agentRequestsInFlightByAccount = new Map();
+// Physical same-origin API requests observed by the content script's Resource
+// Timing observer. Keep these separate from broker action counts below: one
+// broker action can produce several HTTP requests, and the ChatGPT page also
+// makes requests the broker did not initiate.
+const recentObservedApiEventTimestamps = [];
+const recentObservedApiEventTimestampsByAccount = new Map();
+function recordAndCountWindow(nowMs, account) {
   recentAgentRequestTimestamps.push(nowMs);
+  recentAgentRequestTimestamps.sort((a, b) => a - b);
   const cutoff = nowMs - REQUEST_WINDOW_MS;
   while (recentAgentRequestTimestamps.length && recentAgentRequestTimestamps[0] < cutoff) recentAgentRequestTimestamps.shift();
   const last60s = recentAgentRequestTimestamps.filter((t) => t >= nowMs - 60000).length;
-  return { requests_last_60s: last60s, requests_last_300s: recentAgentRequestTimestamps.length };
+  const key = normalizePacerKey(account);
+  let accountTimes = recentAgentRequestTimestampsByAccount.get(key);
+  if (!accountTimes) { accountTimes = []; recentAgentRequestTimestampsByAccount.set(key, accountTimes); }
+  accountTimes.push(nowMs);
+  accountTimes.sort((a, b) => a - b);
+  while (accountTimes.length && accountTimes[0] < cutoff) accountTimes.shift();
+  const accountLast60s = accountTimes.filter((t) => t >= nowMs - 60000).length;
+  return {
+    broker_actions_last_60s: last60s,
+    broker_actions_last_300s: recentAgentRequestTimestamps.length,
+    account_broker_actions_last_60s: accountLast60s,
+    account_broker_actions_last_300s: accountTimes.length,
+  };
+}
+
+function recordAndCountObservedApiEvents(receivedAtMono, account) {
+  const cutoff = receivedAtMono - REQUEST_WINDOW_MS;
+  recentObservedApiEventTimestamps.push(receivedAtMono);
+  recentObservedApiEventTimestamps.sort((a, b) => a - b);
+  while (recentObservedApiEventTimestamps.length && recentObservedApiEventTimestamps[0] < cutoff) recentObservedApiEventTimestamps.shift();
+  let accountTimes = null;
+  if (account) {
+    const key = normalizePacerKey(account);
+    accountTimes = recentObservedApiEventTimestampsByAccount.get(key);
+    if (!accountTimes) { accountTimes = []; recentObservedApiEventTimestampsByAccount.set(key, accountTimes); }
+    accountTimes.push(receivedAtMono);
+    accountTimes.sort((a, b) => a - b);
+    while (accountTimes.length && accountTimes[0] < cutoff) accountTimes.shift();
+  }
+  return {
+    api_events_received_last_60s: recentObservedApiEventTimestamps.filter((t) => t >= receivedAtMono - 60000).length,
+    api_events_received_last_300s: recentObservedApiEventTimestamps.length,
+    account_api_events_received_last_60s: accountTimes ? accountTimes.filter((t) => t >= receivedAtMono - 60000).length : null,
+    account_api_events_received_last_300s: accountTimes?.length ?? null,
+  };
+}
+
+function requestStartFromResult(action, result, fallbackIso, fallbackMono, fallbackWallMs) {
+  const candidate = action === 'get_reply' ? result?.api_request_started_at
+    : ['send_prompt', 'retry_send_click'].includes(action) ? result?.sent_at : null;
+  const timestamp = typeof candidate === 'string' ? Date.parse(candidate) : NaN;
+  const mono = Number.isFinite(timestamp)
+    ? fallbackMono + Math.max(0, timestamp - fallbackWallMs)
+    : fallbackMono;
+  return { at: Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : fallbackIso, mono };
 }
 
 function appendRequestTiming(event) {
   fs.mkdirSync(path.dirname(REQUEST_TIMING_PATH), { recursive: true });
-  fs.appendFileSync(REQUEST_TIMING_PATH, `${JSON.stringify({ schema_version: 1, ts: new Date().toISOString(), ...event })}\n`);
+  fs.appendFileSync(REQUEST_TIMING_PATH, `${JSON.stringify({ schema_version: event.schema_version ?? 1, ts: new Date().toISOString(), ...event })}\n`);
 }
 
 // Zero-network-cost record of Brian's own ChatGPT activity (which tab, which
@@ -293,6 +344,39 @@ wss.on("connection", (ws, req) => {
       if (!ws.backgroundOk) logWarn(`[broker] tab ${ws.tabToken?.slice(0, 8) ?? '?'}: the extension's background worker did not answer (${msg.error || 'no reason given'}), so the extension cannot reload itself onto new versions. Reload it by hand: chrome://extensions, reload "ChatGPT Conversation Manager Bridge".`);
       return;
     }
+    if (msg?.type === 'api_request_observer_status') {
+      appendRequestTiming({ schema_version: 2, event_type: 'observer_status', action: 'api_request_observer_status',
+        available: msg.available === true, account: accountKey(ws.account), tab: ws.tabToken?.slice(0, 8) ?? null, agent_tab: ws.agentTab ?? null });
+      return;
+    }
+    if (msg?.type === 'api_request_observed') {
+      const startedAtMs = typeof msg.request_started_at === 'string' ? Date.parse(msg.request_started_at) : NaN;
+      const completedAtMs = typeof msg.completed_at === 'string' ? Date.parse(msg.completed_at) : NaN;
+      const durationMs = msg.duration_ms;
+      const apiStatus = Number.isInteger(msg.api_status) && msg.api_status >= 100 && msg.api_status <= 599 ? msg.api_status : null;
+      if (msg.source !== 'performance_resource_timing' || !API_REQUEST_ENDPOINT_CLASSES.has(msg.endpoint_class)
+          || !Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs)
+          || !Number.isFinite(durationMs) || durationMs < 0 || durationMs > 24 * 60 * 60 * 1000) return;
+      const account = accountKey(ws.account);
+      appendRequestTiming({
+        schema_version: 2, event_type: 'api_request', action: 'chatgpt_api_request',
+        source: msg.source, endpoint_class: msg.endpoint_class,
+        request_started_at: new Date(startedAtMs).toISOString(), completed_at: new Date(completedAtMs).toISOString(),
+        duration_ms: Math.round(durationMs), api_status: apiStatus, rate_limited: apiStatus === 429,
+        initiator_type: typeof msg.initiator_type === 'string' && /^[a-z0-9_-]{1,32}$/i.test(msg.initiator_type) ? msg.initiator_type : null,
+        account, tab: ws.tabToken?.slice(0, 8) ?? null, agent_tab: ws.agentTab ?? null,
+        ...recordAndCountObservedApiEvents(monoNow(), account),
+      });
+      return;
+    }
+    if (msg?.type === 'api_request_observation_gap') {
+      const dropped = msg.dropped;
+      if (Number.isInteger(dropped) && dropped > 0) {
+        appendRequestTiming({ schema_version: 2, event_type: 'telemetry_gap', action: 'api_request_observation_gap', dropped,
+          account: accountKey(ws.account), tab: ws.tabToken?.slice(0, 8) ?? null, agent_tab: ws.agentTab ?? null });
+      }
+      return;
+    }
     if (msg?.type === 'dom_activity') {
       // Purely local signal the extension already computed from the DOM
       // (thread id, message-count/role/length key, whether a capture was
@@ -319,10 +403,9 @@ wss.on("connection", (ws, req) => {
       // connected in another tab has its own independent quota and pacer.
       if (autoCaptureRateLimited) applyRateLimit(null, autoCapturePacerKey);
       appendRequestTiming({
-        action: 'auto_capture', ok: true, rate_limited: autoCaptureRateLimited, api_status: msg.api_error_status ?? null,
+        schema_version: 2, event_type: 'capture_snapshot', action: 'auto_capture', ok: true, rate_limited: autoCaptureRateLimited, api_status: msg.api_error_status ?? null,
         account: autoCapturePacerKey === DEFAULT_PACER_KEY ? null : autoCapturePacerKey,
         tab: ws.tabToken?.slice(0, 8) ?? null, agent_tab: ws.agentTab ?? null, spacing_ms: getPacerEntry(autoCapturePacerKey).pacer.spacingMs,
-        ...recordAndCountWindow(monoNow()),
       });
       try { const saved = archive.archiveSnapshot(msg.snapshot); ws.send(JSON.stringify({ type: 'snapshot_ack', thread_id: saved.thread_id, content_hash: saved.content_hash })); }
       catch (err) { logErr(`[broker] snapshot_error for ${msg.snapshot?.thread_id}: ${err.message}`); ws.send(JSON.stringify({ type: 'snapshot_error', error: err.message })); }
@@ -477,20 +560,78 @@ function broadcastReloadTab() {
 // get_reply is dispatched every poll cycle but only actually reaches
 // ChatGPT's backend roughly once per 10s per tab (its own internal
 // api-check cooldown, extension/content.js) -- the rest are free, local DOM
-// reads. Gating every get_reply behind the pacer's gap would throttle calls
-// that never touch the account's quota at all, which works against "as much
-// usage as possible" for no safety benefit. So get_reply is only pre-gated,
-// counted, and reacted to as a real request when its OWN result says it
-// actually checked the API (api_checked) or actually failed trying to
-// (err.api_status set) -- everything else in this set always makes a real
-// request and is paced unconditionally.
-const ALWAYS_REAL_ACTIONS = new Set(['send_prompt', 'retry_send_click', 'list_recent_chats', 'capture_current_chat']);
+// get_reply polls stay responsive, but the extension receives an account-wide
+// API-check permit so concurrent tabs cannot each spend the same account gap.
+// These actions always reserve the account lane before dispatch.
+const ALWAYS_REAL_ACTIONS = new Set(['send_prompt', 'retry_send_click', 'list_recent_chats', 'list_project_chats', 'read_conversation', 'capture_current_chat', 'move_to_project', 'rename_current_chat', 'open_agent_tab']);
 
 // Waits out the account's current pacer gap without recording a request.
 async function waitForPacerGap(account) {
   const entry = getPacerEntry(normalizePacerKey(account));
   const waitMs = entry.pacer.spacingMs - (monoNow() - entry.lastRequestAt);
   if (waitMs > 0) await sleep(waitMs);
+}
+
+// Account actions need a reservation, not just a check-then-sleep: otherwise
+// concurrent asks all wake on the same old lastRequestAt and dispatch together.
+// Hold the account lane through the browser action so a long prompt fill cannot
+// let the next prompt bunch immediately after its Send click.
+async function reserveAccountAction(account) {
+  const entry = getPacerEntry(normalizePacerKey(account));
+  const previous = entry.actionTail;
+  let unlock;
+  entry.actionTail = new Promise((resolve) => { unlock = resolve; });
+  await previous;
+  while (entry.apiCheckReservation) await sleep(10);
+  entry.actionInFlight = true;
+  const priorRequestAt = entry.lastRequestAt;
+  const waitMs = entry.pacer.spacingMs - (monoNow() - entry.lastRequestAt);
+  if (waitMs > 0) await sleep(waitMs);
+  const startedAtMono = monoNow();
+  entry.lastRequestAt = startedAtMono;
+  let consumed = false;
+  let lastRequestAtMono = startedAtMono;
+  return {
+    entry,
+    priorRequestAt,
+    startedAtMono,
+    get consumed() { return consumed; },
+    recordRequestStart(requestAtMono) {
+      consumed = true;
+      lastRequestAtMono = Math.max(startedAtMono, requestAtMono);
+      entry.lastRequestAt = Math.max(entry.lastRequestAt, lastRequestAtMono);
+    },
+    spacingMs: entry.pacer.spacingMs,
+    release({ noRequest = false, completedAt = null } = {}) {
+      if (noRequest && !consumed && entry.lastRequestAt === startedAtMono) entry.lastRequestAt = priorRequestAt;
+      else if (completedAt != null && consumed) entry.lastRequestAt = Math.max(entry.lastRequestAt, completedAt, lastRequestAtMono);
+      entry.actionInFlight = false;
+      unlock();
+    },
+  };
+}
+
+// get_reply is mostly a local DOM read, so keep it responsive. Grant at most
+// one API-check lease per account and only when the shared account gap permits
+// it; content.js skips both the conversation read and new-chat discovery when
+// the lease is denied. A result that did not actually call the API releases
+// the lease without consuming request capacity.
+function reserveApiCheck(account) {
+  const entry = getPacerEntry(normalizePacerKey(account));
+  const now = monoNow();
+  if (entry.actionInFlight || entry.apiCheckReservation) return null;
+  if (now - entry.lastRequestAt < entry.pacer.spacingMs) return null;
+  const reservation = { startedAtMono: now, startedAt: new Date().toISOString(), spacingMs: entry.pacer.spacingMs };
+  entry.apiCheckReservation = reservation;
+  return { entry, reservation };
+}
+
+function finishApiCheck(reserved, { apiChecked = false, completedAt = null } = {}) {
+  if (!reserved) return;
+  const { entry, reservation } = reserved;
+  if (entry.apiCheckReservation !== reservation) return;
+  if (apiChecked) entry.lastRequestAt = completedAt == null ? reservation.startedAtMono : Math.max(reservation.startedAtMono, completedAt);
+  entry.apiCheckReservation = null;
 }
 
 // A targeted tab is briefly absent whenever its page loads: navigating to a
@@ -513,43 +654,100 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
   const alwaysReal = ALWAYS_REAL_ACTIONS.has(command.action);
   const pacerKey = normalizePacerKey(opts.account);
   const entry = getPacerEntry(pacerKey);
-  if (alwaysReal) await waitForPacerGap(opts.account);
-  if (tracked) agentRequestsInFlight++;
+  const actionReservation = opts.pacingReservation || (alwaysReal ? await reserveAccountAction(opts.account) : null);
+  const ownsActionReservation = Boolean(actionReservation && actionReservation !== opts.pacingReservation);
+  const reservationSequenceAction = Boolean(opts.pacingReservation && PACING_SEQUENCE_ACTIONS.has(command.action));
+  const apiCheckReservation = command.action === 'get_reply' ? reserveApiCheck(opts.account) : null;
+  const dispatchCommand = command.action === 'get_reply'
+    ? { ...command, api_check_allowed: Boolean(apiCheckReservation) }
+    : command;
+  if (tracked) {
+    agentRequestsInFlight++;
+    agentRequestsInFlightByAccount.set(pacerKey, (agentRequestsInFlightByAccount.get(pacerKey) || 0) + 1);
+  }
   const startedMs = monoNow();
+  const dispatchStartedWallMs = Date.now();
+  const dispatchStartedAt = new Date(dispatchStartedWallMs).toISOString();
+  let actionRelease = {};
+  let requestStartedAt = dispatchStartedAt;
+  let requestStartedMono = startedMs;
   try {
-    const result = await dispatchToExtensionRaw(command, timeoutMs, opts);
-    const real = alwaysReal || (command.action === 'get_reply' && result?.api_checked);
+    const result = await dispatchToExtensionRaw(dispatchCommand, timeoutMs, opts);
+    const apiChecked = command.action === 'get_reply' && result?.api_checked === true;
+    const real = alwaysReal || reservationSequenceAction || apiChecked;
+    if (apiCheckReservation) {
+      const requestStart = requestStartFromResult(command.action, result, apiCheckReservation.reservation.startedAt, apiCheckReservation.reservation.startedAtMono, dispatchStartedWallMs);
+      if (apiChecked) { requestStartedAt = requestStart.at; requestStartedMono = requestStart.mono; }
+      finishApiCheck(apiCheckReservation, { apiChecked, completedAt: apiChecked ? requestStart.mono : null });
+    }
     if (real) {
-      entry.lastRequestAt = monoNow();
+      if (actionReservation) {
+        const requestStart = requestStartFromResult(command.action, result, dispatchStartedAt, startedMs, dispatchStartedWallMs);
+        requestStartedAt = requestStart.at;
+        requestStartedMono = requestStart.mono;
+        actionReservation.recordRequestStart(requestStartedMono);
+        actionRelease = { completedAt: requestStart.mono };
+      }
+      entry.lastRequestAt = requestStartedMono;
       const rateLimited = isRateLimitSignal(null, result);
       if (rateLimited) applyRateLimit(retryAfterMsOf(null, result), pacerKey); else entry.pacer.onSuccess();
       saveAgentPacerState();
+      const completedAt = new Date().toISOString();
       appendRequestTiming({
-        action: command.action, ok: true, duration_ms: Math.round(monoNow() - startedMs), rate_limited: rateLimited, spacing_ms: entry.pacer.spacingMs,
+        schema_version: 2, event_type: 'broker_action', action: command.action, ok: true,
+        request_started_at: requestStartedAt, dispatch_started_at: dispatchStartedAt, completed_at: completedAt,
+        duration_ms: Math.round(monoNow() - startedMs), rate_limited: rateLimited, spacing_ms: entry.pacer.spacingMs,
+        spacing_ms_applied: actionReservation?.spacingMs ?? apiCheckReservation?.reservation.spacingMs ?? entry.pacer.spacingMs,
+        next_spacing_ms: entry.pacer.spacingMs,
+        ...(command.action === 'get_reply' ? { api_check_permitted: Boolean(apiCheckReservation) } : {}),
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: result?.tab?.slice(0, 8) ?? null, agent_tab: result?.agent ?? null, incognito: result?.incognito ?? null,
         api_checked: result?.api_checked ?? null, api_status: result?.api_status ?? null, ...(result?.api_limit_detail ? { api_limit_detail: result.api_limit_detail } : {}),
         ...(command.action === 'send_prompt' ? { send_confirmed: result?.send_confirmed ?? null, confirmed_by: result?.confirmed_by ?? null, visibility: result?.visibility ?? null, plain_text_mode: result?.plain_text_mode ?? null, typing_ms: result?.typing_ms ?? null, fill_mode: result?.fill_mode ?? null, fill_detail: result?.fill_detail ?? null } : {}),
-        in_flight: agentRequestsInFlight, ...recordAndCountWindow(monoNow()),
+        broker_actions_in_flight: agentRequestsInFlight, broker_actions_in_flight_account: agentRequestsInFlightByAccount.get(pacerKey) || 0,
+        ...recordAndCountWindow(requestStartedMono, opts.account),
       });
     }
     return result;
   } catch (err) {
-    const real = alwaysReal || (command.action === 'get_reply' && err?.api_status != null);
+    const apiRequestUnknown = Boolean(apiCheckReservation && !err?.not_dispatched && err?.api_status == null);
+    const apiChecked = Boolean(apiCheckReservation && (err?.api_status != null || apiRequestUnknown));
+    const real = ((alwaysReal || reservationSequenceAction) && !err?.not_dispatched) || (command.action === 'get_reply' && (err?.api_status != null || apiRequestUnknown));
+    if (apiCheckReservation) finishApiCheck(apiCheckReservation, { apiChecked, completedAt: apiCheckReservation.reservation.startedAtMono });
+    if (actionReservation && err?.not_dispatched) actionRelease = { noRequest: true };
     if (real) {
-      entry.lastRequestAt = monoNow();
+      if (actionReservation) {
+        actionReservation.recordRequestStart(startedMs);
+      } else {
+        entry.lastRequestAt = apiCheckReservation?.reservation.startedAtMono ?? startedMs;
+      }
       const rateLimited = isRateLimitSignal(err, null);
       if (rateLimited) { applyRateLimit(retryAfterMsOf(err, null), pacerKey); saveAgentPacerState(); }
+      const completedAt = new Date().toISOString();
       appendRequestTiming({
-        action: command.action, ok: false, duration_ms: Math.round(monoNow() - startedMs), rate_limited: rateLimited, error: err.message, spacing_ms: entry.pacer.spacingMs,
+        schema_version: 2, event_type: 'broker_action', action: command.action, ok: false,
+        request_started_at: actionReservation ? dispatchStartedAt : apiCheckReservation?.reservation.startedAt ?? dispatchStartedAt,
+        dispatch_started_at: dispatchStartedAt, completed_at: completedAt, backend_request_unknown: apiRequestUnknown || undefined,
+        duration_ms: Math.round(monoNow() - startedMs), rate_limited: rateLimited, error: err.message, spacing_ms: entry.pacer.spacingMs,
+        spacing_ms_applied: actionReservation?.spacingMs ?? apiCheckReservation?.reservation.spacingMs ?? entry.pacer.spacingMs,
+        next_spacing_ms: entry.pacer.spacingMs,
+        ...(command.action === 'get_reply' ? { api_check_permitted: Boolean(apiCheckReservation) } : {}),
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: err?.tab?.slice(0, 8) ?? null, agent_tab: err?.agent ?? null, incognito: err?.incognito ?? null,
-        api_status: err?.api_status ?? null, ...(err?.api_limit_detail ? { api_limit_detail: err.api_limit_detail } : {}), ...(err?.stage ? { stage: err.stage } : {}), ...(err?.conversation_fetch ? { conversation_fetch: err.conversation_fetch, rendered_messages: err.rendered_messages } : {}), ...(err?.lifecycle ? { lifecycle: err.lifecycle } : {}), ...(err?.fill_detail ? { fill_detail: err.fill_detail } : {}), in_flight: agentRequestsInFlight, ...recordAndCountWindow(monoNow()),
+        api_checked: apiChecked || null, api_status: err?.api_status ?? null, ...(err?.api_limit_detail ? { api_limit_detail: err.api_limit_detail } : {}), ...(err?.stage ? { stage: err.stage } : {}), ...(err?.conversation_fetch ? { conversation_fetch: err.conversation_fetch, rendered_messages: err.rendered_messages } : {}), ...(err?.lifecycle ? { lifecycle: err.lifecycle } : {}), ...(err?.fill_detail ? { fill_detail: err.fill_detail } : {}),
+        broker_actions_in_flight: agentRequestsInFlight, broker_actions_in_flight_account: agentRequestsInFlightByAccount.get(pacerKey) || 0,
+        ...recordAndCountWindow(actionReservation?.startedAtMono ?? apiCheckReservation?.reservation.startedAtMono ?? startedMs, opts.account),
       });
     }
     throw err;
   } finally {
-    if (tracked) agentRequestsInFlight--;
+    if (apiCheckReservation && entry.apiCheckReservation === apiCheckReservation.reservation) finishApiCheck(apiCheckReservation);
+    if (ownsActionReservation) actionReservation.release(actionRelease);
+    if (tracked) {
+      agentRequestsInFlight--;
+      const remaining = Math.max(0, (agentRequestsInFlightByAccount.get(pacerKey) || 1) - 1);
+      if (remaining) agentRequestsInFlightByAccount.set(pacerKey, remaining); else agentRequestsInFlightByAccount.delete(pacerKey);
+    }
   }
 }
 
@@ -686,6 +884,11 @@ async function resolveThreadTitle(title, account = null) {
 // ask, checked and set synchronously (no await in between) so two concurrent
 // pickIdleTab() calls can never both claim the same tab.
 const claimedTabs = new Set();
+// Unpinned new asks reserve an account before probing browser tabs. This map
+// counts only those not yet claimed; after a tab is claimed, claimedTabs owns
+// the in-flight count. Keeping the sets disjoint lets the router add both
+// queued automatic assignments and active pinned asks without undercounting.
+const pendingAutoRoutes = new Map();
 
 // Agents only ever type into a tab opened for them (https://chatgpt.com/?ccm_agent=1),
 // never into a tab Brian is using. With none open, the broker opens one.
@@ -786,13 +989,122 @@ async function findIdleAgentTab(seen, excludeTokens = new Set(), account = null)
   return null;
 }
 
-async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = null } = {}) {
+function rankConnectedAgentAccounts(now = monoNow()) {
+  const accounts = new Map();
+  for (const ws of extensionSockets) {
+    if (ws.readyState !== ws.OPEN || !ws.agentTab || !ws.account) continue;
+    const account = accountKey(ws.account);
+    if (!account) continue;
+    const key = normalizePacerKey(account);
+    if (!accounts.has(key)) accounts.set(key, key);
+  }
+  return [...accounts.values()].map((account) => {
+    const entry = getPacerEntry(account);
+    const spacingMs = entry.pacer.spacingMs;
+    const pendingAutoAsks = pendingAutoRoutes.get(account) || 0;
+    const inFlightAsks = [...extensionSockets].filter((candidate) => candidate.readyState === candidate.OPEN
+      && candidate.agentTab && candidate.tabToken && claimedTabs.has(candidate.tabToken)
+      && normalizePacerKey(accountKey(candidate.account)) === account).length;
+    // pendingAutoAsks contains only unclaimed auto assignments; inFlightAsks
+    // contains every claimed ask, pinned or automatic. These are disjoint
+    // queues, so add them rather than taking the max.
+    const estimatedAheadAsks = pendingAutoAsks + inFlightAsks;
+    const nextEligibleAt = Math.max(now, entry.lastRequestAt + spacingMs);
+    const projectedStartAt = nextEligibleAt + estimatedAheadAsks * spacingMs;
+    return {
+      account,
+      spacingMs,
+      pendingAutoAsks,
+      inFlightAsks,
+      estimatedAheadAsks,
+      projectedStartAt,
+      projectedStartInMs: Math.max(0, Math.round(projectedStartAt - now)),
+    };
+  }).sort((a, b) => a.projectedStartAt - b.projectedStartAt || a.account.localeCompare(b.account));
+}
+
+function reserveAutoRoute(account) {
+  const key = normalizePacerKey(account);
+  pendingAutoRoutes.set(key, (pendingAutoRoutes.get(key) || 0) + 1);
+  let released = false;
+  let pending = true;
+  const leavePending = () => {
+    if (!pending) return;
+    pending = false;
+    const count = pendingAutoRoutes.get(key) || 0;
+    if (count <= 1) pendingAutoRoutes.delete(key);
+    else pendingAutoRoutes.set(key, count - 1);
+  };
+  return {
+    account: key,
+    routeId: crypto.randomUUID(),
+    markClaimed() { leavePending(); },
+    release() {
+      if (released) return;
+      released = true;
+      leavePending();
+    },
+  };
+}
+
+async function findRoutedIdleAgentTab(seen, excludeTokens = new Set()) {
+  const ranked = rankConnectedAgentAccounts();
+  // Preserve the existing single-account and unknown-identity behavior. The
+  // router is only useful when at least two account identities are available.
+  if (ranked.length < 2) return undefined;
+  const candidates = ranked.map((candidate) => ({
+    account: candidate.account,
+    projected_start_in_ms: candidate.projectedStartInMs,
+    spacing_ms: candidate.spacingMs,
+    pending_auto_asks: candidate.pendingAutoAsks,
+    in_flight_asks: candidate.inFlightAsks,
+    estimated_ahead_asks: candidate.estimatedAheadAsks,
+    idle_agent_tab: null,
+  }));
+  for (let i = 0; i < ranked.length; i++) {
+    const candidate = ranked[i];
+    // Reserve synchronously before the first async tab probe so a concurrent
+    // ask sees this account's pending work in its own ranking.
+    const reservation = reserveAutoRoute(candidate.account);
+    const found = await findIdleAgentTab(seen, excludeTokens, candidate.account);
+    candidates[i].idle_agent_tab = Boolean(found);
+    if (!found) {
+      reservation.release();
+      continue;
+    }
+    // The ask now appears in claimedTabs/inFlightAsks. Remove it from the
+    // pending count before another route can rank this account.
+    reservation.markClaimed();
+    try {
+      appendRequestTiming({
+        schema_version: 2,
+        event_type: 'account_route',
+        route_id: reservation.routeId,
+        selection_rule: 'earliest_projected_start_with_idle_agent_tab',
+        selected_account: candidate.account,
+        candidates,
+      });
+    } catch (err) {
+      claimedTabs.delete(found.tab);
+      reservation.release();
+      throw err;
+    }
+    return { ...found, routeReservation: reservation };
+  }
+  return null;
+}
+
+async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = null, autoRoute = false } = {}) {
   const seen = [];
   const existing = new Set([...extensionSockets]
     .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab)
     .map((ws) => ws.tabToken));
   if (!forceNew) {
-    const found = await findIdleAgentTab(seen, new Set(), account);
+    const routed = autoRoute && !account ? await findRoutedIdleAgentTab(seen) : null;
+    if (routed) return routed;
+    const found = routed === null && autoRoute && !account
+      ? null
+      : await findIdleAgentTab(seen, new Set(), account);
     if (found) return found;
   }
   try { await openAgentTab({ account }); }
@@ -800,6 +1112,14 @@ async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = nul
   const deadline = monoNow() + openWaitMs;
   while (monoNow() < deadline) {
     await sleep(1000);
+    const routed = autoRoute && !account ? await findRoutedIdleAgentTab(seen, forceNew ? existing : new Set()) : null;
+    if (routed) return routed;
+    if (autoRoute && !account) {
+      if (routed === null) continue;
+      const fallback = await findIdleAgentTab(seen, forceNew ? existing : new Set());
+      if (fallback) return fallback;
+      continue;
+    }
     const next = await findIdleAgentTab([], forceNew ? existing : new Set(), account);
     if (next) return next;
   }
@@ -865,14 +1185,14 @@ function tabGone(err) {
   return err?.tab_dead === true && (err.nothing_sent === true || err.not_dispatched === true) && err.sent_unknown !== true;
 }
 const NAV_DEAD_MS = Number(process.env.NAV_DEAD_MS || 20000);
-async function navigateAndWait(tab, { threadId = null, account = null }) {
+async function navigateAndWait(tab, { threadId = null, account = null, pacingReservation = null }) {
   const command = threadId ? { action: "navigate_to_thread", thread_id: threadId } : { action: "navigate_home" };
   const predicate = threadId ? (i) => i.thread_id === threadId : (i) => !i.thread_id;
   const what = threadId ? `opened conversation ${threadId}` : "opened a new chat";
   const startedMs = monoNow();
   let reissued = false;
   try {
-    await dispatchToExtension(command, COMMAND_TIMEOUT_MS, { tab });
+    await dispatchToExtension(command, COMMAND_TIMEOUT_MS, { tab, account, pacingReservation });
     const { diag } = await waitForTab(tab, predicate, NAV_WAIT_MS, what, {
       since: startedMs,
       onPoll: async (d, elapsed) => {
@@ -887,7 +1207,7 @@ async function navigateAndWait(tab, { threadId = null, account = null }) {
         // Back on a page, but not the target: the navigation was lost.
         if (!reissued && elapsed > NAV_WAIT_MS / 2 && d.last_error === null && d.last_thread_id !== undefined) {
           reissued = true;
-          await dispatchToExtension(command, COMMAND_TIMEOUT_MS, { tab }).catch(() => {});
+          await dispatchToExtension(command, COMMAND_TIMEOUT_MS, { tab, account, pacingReservation }).catch(() => {});
         }
       },
     });
@@ -970,6 +1290,9 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
     let claimedTab = null;
     const requestedAccount = account;
     let usedAccount = account;
+    let autoRouteReservation = null;
+    let routeId = null;
+    const autoRoute = !requestedAccount && !thread_id && !thread_title && !fresh_tab;
     let sendSeen = null;
     // Only send_prompt types the prompt. Until one has reached a tab, a
     // failure (tab pick, navigation, a tab that never reconnected) is sent=no.
@@ -989,16 +1312,16 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       // tab turns out to be gone (it never answers, or never comes back from a
       // page load or reload) before anything was typed, the ask sets it aside
       // and starts over on another tab: see tabGone below.
-      const sendOnTab = async () => {
+      const sendOnTab = async (pacingReservation = null) => {
       const sendPrompt = () => dispatchToExtension(
         { action: "send_prompt", text: body, exclude_threads: [...attributedThreads], messages_before_hint: resolvedThreadId ? (threadMessageCounts.get(resolvedThreadId) ?? null) : null },
         sendTimeoutMs ?? promptDispatchTimeoutMs(timeout_seconds),
-        { tab, account },
+        { tab, account, pacingReservation },
       ).then((r) => { sendDispatched = true; return r; }, (e) => { if (!e.not_dispatched) sendDispatched = true; throw e; });
       let sent;
       try {
         try {
-          sent = await sendPrompt();
+          sent = await sendPrompt(pacingReservation);
         } catch (err) {
           // The composer never appeared on this page (observed 2026-09-27 on
           // continuation pages that had been loaded for ~2 minutes; they do
@@ -1041,15 +1364,15 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
           }
           await waitForPacerGap(account);
           if (err.stage === 'no_composer') {
-            appendRequestTiming({ action: 'reload_for_composer', ok: true, tab: tab.slice(0, 8), page_id: err.page_id, ...recordAndCountWindow(monoNow()) });
+            appendRequestTiming({ action: 'reload_for_composer', ok: true, tab: tab.slice(0, 8), account: account || null, page_id: err.page_id });
             // Not awaited: the page may unload before its reply crosses the
             // socket. The new page instance reporting in is the real signal.
-            dispatchToExtension({ action: "reload_tab" }, 5000, { tab }).catch(() => {});
+            dispatchToExtension({ action: "reload_tab" }, 5000, { tab, account, pacingReservation }).catch(() => {});
             await waitForTab(tab, (i) => Boolean(i.page_id) && i.page_id !== err.page_id && onTargetPage(i), 20000, "reloaded the conversation page")
               .catch((reloadErr) => { throw Object.assign(new Error(`${err.message} Reloading the tab to recover failed: ${reloadErr.message} ${nothingSent}`), { nothing_sent: true, tab_dead: reloadErr.navigation_diag?.last_thread_id === undefined }); });
           }
           try {
-            sent = await sendPrompt();
+            sent = await sendPrompt(pacingReservation);
           } catch (retryErr) {
             if (retryErr.nothing_sent === true && (retryErr.stage === 'no_composer' || retryErr.stage === 'no_baseline')) {
               const tried = err.stage === 'no_composer' ? 'reloaded the tab once' : 'retried once after the rate-limit gap';
@@ -1085,12 +1408,15 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       for (let attempt = 1; ; attempt++) {
         let picked;
         try {
-          picked = await pickIdleTab({ openWaitMs, forceNew: fresh_tab, account: requestedAccount });
+          picked = await pickIdleTab({ openWaitMs, forceNew: fresh_tab, account: requestedAccount, autoRoute });
         } catch (pickErr) {
           // No other tab to move to: report why the previous one was given up.
           if (!lastGoneErr) throw pickErr;
           throw Object.assign(lastGoneErr, { message: `${lastGoneErr.message} No other agent tab became available (${pickErr.message})` });
         }
+        if (autoRouteReservation) autoRouteReservation.release();
+        autoRouteReservation = picked.routeReservation || null;
+        routeId = autoRouteReservation?.routeId || null;
         tab = picked.tab;
         claimedTab = tab;
         const current = picked.thread_id;
@@ -1105,11 +1431,11 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         // 2026-09-27 "no composer" failures navigated 10-13s after an HTTP 429
         // and then sat ~2 min in the pacer on a page that never showed a
         // composer. The send below then needs no second wait.
-        if (current !== resolvedThreadId) await waitForPacerGap(account);
+        const pacingReservation = await reserveAccountAction(account);
         try {
-          if (resolvedThreadId && current !== resolvedThreadId) await navigateAndWait(tab, { threadId: resolvedThreadId, account });
-          else if (!resolvedThreadId && current) await navigateAndWait(tab, { account });
-          sent = await sendOnTab();
+          if (resolvedThreadId && current !== resolvedThreadId) await navigateAndWait(tab, { threadId: resolvedThreadId, account, pacingReservation });
+          else if (!resolvedThreadId && current) await navigateAndWait(tab, { account, pacingReservation });
+          sent = await sendOnTab(pacingReservation);
           break;
         } catch (err) {
           if (!tabGone(err) || attempt >= 3) throw err;
@@ -1119,6 +1445,11 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
           appendRequestTiming({ action: 'tab_set_aside', tab: tab.slice(0, 8), reason: err.message.slice(0, 200) });
           claimedTabs.delete(tab);
           claimedTab = null;
+          if (autoRouteReservation) autoRouteReservation.release();
+          autoRouteReservation = null;
+          routeId = null;
+        } finally {
+          pacingReservation.release({ noRequest: !pacingReservation.consumed });
         }
       }
       // The extension reports send_confirmed:false when Send was clicked but no
@@ -1199,7 +1530,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         const threadId = last.thread_id || sentThreadId || resolvedThreadId || null;
         noteAttributedThread(threadId);
         if (threadId && Number.isInteger(last.message_count) && last.source === 'api') threadMessageCounts.set(threadId, last.message_count);
-        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'success', account: usedAccount || null, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'success', account: usedAccount || null, route_id: routeId || undefined, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
         // The caller must know when the model did not get the prompt verbatim.
         // Evidence, not the switch's own report: the stored turn is compared with
         // the prompt (replyFromTree's prompt_escaped).
@@ -1216,10 +1547,11 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       err.sent = err.sent_unknown ? null : (err.nothing_sent || !sendDispatched) ? false : sendSeen ? true : null;
       err.thread_id = last?.thread_id || sentThreadId || resolvedThreadId || null;
       err.account = usedAccount || null;
-      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'failed', account: usedAccount || null, sent: err.sent, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'failed', account: usedAccount || null, route_id: routeId || undefined, sent: err.sent, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
       throw err;
     } finally {
       if (claimedTab) claimedTabs.delete(claimedTab);
+      if (autoRouteReservation) autoRouteReservation.release();
     }
   };
   return run();

@@ -10,6 +10,7 @@ const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getUR
 const { sendEvidence, sendEvidenceFromCounts, samePrompt, verbatimMismatch } = await import(chrome.runtime.getURL("lib/send-confirm.js"));
 const { waitFor: waitForLib } = await import(chrome.runtime.getURL("lib/wait-for.js"));
 const { pingBackground } = await import(chrome.runtime.getURL("lib/background-ping.js"));
+const { apiRequestObservationFromResource } = await import(chrome.runtime.getURL("lib/api-request-observation.js"));
 const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, parseRemoteTime, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats, nextReplyCheckGapMs, REPLY_CHECK_MIN_GAP_MS } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
@@ -27,6 +28,70 @@ let lastSnapshotFingerprint = null;
 let lastAutoDomKey = null;
 let isCapturing = false;
 let contextInvalidated = false;
+let apiRequestPerformanceObserver = null;
+let apiRequestObserverAvailable = false;
+let brokerIdentityReported = false;
+let apiRequestObservationFlushTimer = null;
+const pendingApiRequestObservations = [];
+const API_REQUEST_OBSERVATION_QUEUE_LIMIT = 2000;
+const API_REQUEST_OBSERVATION_SOCKET_BUFFER_LIMIT = 1000000;
+const API_REQUEST_OBSERVATION_FLUSH_DELAY_MS = 200;
+const API_RESOURCE_TIMING_BUFFER_LIMIT = 5000;
+let droppedApiRequestObservations = 0;
+
+function sendApiRequestObservation(message) {
+  try {
+    if (brokerIdentityReported && socket?.readyState === WebSocket.OPEN && socket.bufferedAmount < API_REQUEST_OBSERVATION_SOCKET_BUFFER_LIMIT) {
+      socket.send(JSON.stringify(message));
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+function reportApiRequestObservation(observation) {
+  if (sendApiRequestObservation({ type: "api_request_observed", ...observation })) return;
+  if (pendingApiRequestObservations.length < API_REQUEST_OBSERVATION_QUEUE_LIMIT) {
+    pendingApiRequestObservations.push(observation);
+  } else {
+    droppedApiRequestObservations++;
+  }
+  scheduleApiRequestObservationFlush();
+}
+
+function scheduleApiRequestObservationFlush() {
+  if (apiRequestObservationFlushTimer || !brokerIdentityReported || socket?.readyState !== WebSocket.OPEN) return;
+  apiRequestObservationFlushTimer = setTimeout(() => {
+    apiRequestObservationFlushTimer = null;
+    flushApiRequestObservations();
+  }, API_REQUEST_OBSERVATION_FLUSH_DELAY_MS);
+}
+
+function flushApiRequestObservations() {
+  while (pendingApiRequestObservations.length) {
+    if (!sendApiRequestObservation({ type: "api_request_observed", ...pendingApiRequestObservations[0] })) return;
+    pendingApiRequestObservations.shift();
+  }
+  if (droppedApiRequestObservations && sendApiRequestObservation({
+    type: "api_request_observation_gap",
+    dropped: droppedApiRequestObservations,
+  })) droppedApiRequestObservations = 0;
+  if (pendingApiRequestObservations.length || droppedApiRequestObservations) scheduleApiRequestObservationFlush();
+}
+
+try {
+  performance.setResourceTimingBufferSize(API_RESOURCE_TIMING_BUFFER_LIMIT);
+  apiRequestPerformanceObserver = new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      const observation = apiRequestObservationFromResource(entry, performance.timeOrigin);
+      if (observation) reportApiRequestObservation(observation);
+    }
+  });
+  apiRequestPerformanceObserver.observe({ type: "resource", buffered: true });
+  apiRequestObserverAvailable = true;
+} catch {
+  // Resource Timing is a zero-network-cost observer, not a dependency of the bridge.
+}
 
 // Auto-archive (MutationObserver -> scheduleArchive -> sendSnapshot) pushes
 // thread_snapshot straight over the socket -- it never goes through the
@@ -97,6 +162,7 @@ function handlePossibleContextInvalidation(err) {
   clearTimeout(archiveTimer);
   try {
     observer.disconnect();
+    apiRequestPerformanceObserver?.disconnect();
   } catch {}
   // Not an application failure: this happens whenever the unpacked extension is
   // reloaded while an old content script instance is still attached to a live
@@ -882,6 +948,7 @@ async function sendPrompt(text, excludeThreads = [], messagesBeforeHint = null) 
       return { error: err.message };
     }
   };
+  const sentAt = new Date().toISOString();
   button.el.click();
   // After the click the prompt may already be with ChatGPT, so from here on a
   // missing confirmation is "unconfirmed", never "not sent". A hidden tab's
@@ -903,7 +970,7 @@ async function sendPrompt(text, excludeThreads = [], messagesBeforeHint = null) 
   // A new chat first shows a temporary id ("WEB:<uuid>") in the URL and swaps in
   // the real conversation id once the server has created it.
   const threadId = threadBefore || serverThreadId || (confirmedBy ? await waitFor(() => realThreadId(), 60000, 250).catch(() => null) : realThreadId());
-  return { thread_id: threadId, dom_before: domBefore, messages_before: messagesBefore,
+  return { thread_id: threadId, dom_before: domBefore, messages_before: messagesBefore, sent_at: sentAt,
            send_confirmed: Boolean(confirmedBy), confirmed_by: confirmedBy,
            plain_text_mode: plainMode?.ok ? true : (plainMode?.reason || "failed"), typing_ms: typingMs, fill_mode: fillMode, fill_detail: typedOk ? (fillDetail ? { recovered_after: fillDetail } : null) : fillDetail,
            server_check_error: serverCheckError,
@@ -941,8 +1008,9 @@ async function retrySendClick(expected, threadBefore, messagesBefore, excludeThr
   if (!composer || !samePrompt(composer.el.value ?? composer.el.innerText ?? "", expected)) return { clicked: false, reason: "composer_no_longer_holds_prompt" };
   const button = findFirst(SEND_BUTTON_SELECTORS, (b) => visible(b) && !b.disabled);
   if (!button) return { clicked: false, reason: "no_enabled_send_button" };
+  const sentAt = new Date().toISOString();
   button.el.click();
-  return { clicked: true, visibility: document.visibilityState };
+  return { clicked: true, sent_at: sentAt, visibility: document.visibilityState };
 }
 
 // Ask the background worker to switch this tab's composer to ChatGPT's own
@@ -1000,7 +1068,6 @@ async function findNewChatWithPrompt(body, excludeThreads = []) {
 // messages and no composer until that data arrives, so a refused load (HTTP
 // 429 while the account is rate-limited) leaves exactly the "0 messages
 // rendered, no composer" page seen on 2026-09-29 (kw3, sbl3, rph5).
-try { performance.setResourceTimingBufferSize(5000); } catch {}
 function pageConversationFetch() {
   const id = realThreadId();
   if (!id) return null;
@@ -1073,7 +1140,7 @@ async function resolveReplyImages(images) {
 // two done reads with no "not finished" read between them (reads that learn
 // nothing, like a skipped or throttled API check, do not count), unless the
 // backend marks the reply end_turn -- so a pause mid-stream is not "done".
-async function getReply(domBefore, messagesBefore = domBefore, expected = null, excludeThreads = [], threadHint = null) {
+async function getReply(domBefore, messagesBefore = domBefore, expected = null, excludeThreads = [], threadHint = null, apiCheckAllowed = true) {
   const generating = Boolean(findFirst(STOP_BUTTON_SELECTORS, visible));
   const messages = extractMessagesFromDom();
   const added = messages.slice(Number(domBefore) || 0);
@@ -1089,7 +1156,7 @@ async function getReply(domBefore, messagesBefore = domBefore, expected = null, 
   // that tree regardless of the DOM-derived `done` flag. Throttle the private
   // API read so long tool runs do not poll it every three seconds, and back
   // it off while the account is throttled (nextReplyCheckGapMs).
-  const shouldCheckApi = !generating && threadId && Date.now() - getReply.lastApiCheckAt >= getReply.apiGapMs;
+  const shouldCheckApi = apiCheckAllowed && !generating && threadId && Date.now() - getReply.lastApiCheckAt >= getReply.apiGapMs;
   // Whether this call actually hit ChatGPT's backend, and with what result --
   // an HTTP status/Retry-After from a real failed fetch is a far more
   // reliable rate-limit signal than scraping a DOM banner for wording that
@@ -1098,7 +1165,11 @@ async function getReply(domBefore, messagesBefore = domBefore, expected = null, 
   let apiStatus = null;
   let apiRetryAfterMs = null;
   let apiLimitDetail = null;
+  let didApiCheck = false;
+  let apiRequestStartedAt = null;
   if (shouldCheckApi) {
+    didApiCheck = true;
+    apiRequestStartedAt = new Date().toISOString();
     getReply.lastApiCheckAt = Date.now();
     try {
       const apiReply = replyFromTree(await fetchConversationTree(threadId), messagesBefore == null ? null : (Number(messagesBefore) || 0), { expected });
@@ -1109,13 +1180,13 @@ async function getReply(domBefore, messagesBefore = domBefore, expected = null, 
         return { done: false, generating, thread_id: threadId, message_count: messages.length, reply: null,
                  visible_error: visibleRateLimitError(), source: "api", prompt_mismatch: true,
                  found_prompt_head: apiReply.found_prompt_head, found_prompt_chars: apiReply.found_prompt_chars,
-                 api_checked: true, api_status: 200, api_retry_after_ms: null };
+                 api_checked: true, api_status: 200, api_retry_after_ms: null, api_request_started_at: apiRequestStartedAt };
       }
       if (apiReply.done) {
         const images = await resolveReplyImages(apiReply.images);
         return { ...apiReply, images, generating: false, thread_id: threadId,
                  visible_error: visibleRateLimitError(), source: "api",
-                 api_checked: true, api_status: 200, api_retry_after_ms: null };
+                 api_checked: true, api_status: 200, api_retry_after_ms: null, api_request_started_at: apiRequestStartedAt };
       }
     } catch (err) {
       apiStatus = err.status ?? null;
@@ -1135,19 +1206,28 @@ async function getReply(domBefore, messagesBefore = domBefore, expected = null, 
   if (threadId) {
     return { done: false, generating, thread_id: threadId, message_count: messages.length,
              reply: null, visible_error: visibleRateLimitError(), source: "api_waiting",
-             api_checked: shouldCheckApi, api_status: apiStatus, api_retry_after_ms: apiRetryAfterMs, api_limit_detail: apiLimitDetail };
+             api_checked: didApiCheck, api_status: apiStatus, api_retry_after_ms: apiRetryAfterMs, api_limit_detail: apiLimitDetail,
+             ...(apiRequestStartedAt ? { api_request_started_at: apiRequestStartedAt } : {}) };
   }
   // No conversation id on the page yet (a hidden tab may not re-render after
   // an unconfirmed send): look for the new chat on ChatGPT's server, at most
   // every 30s, so a landed send is still found and followed.
-  if (expected && !done && Date.now() - getReply.lastDiscoveryAt >= 30000) {
+  if (apiCheckAllowed && expected && !done && Date.now() - getReply.lastDiscoveryAt >= 30000) {
+    didApiCheck = true;
+    apiRequestStartedAt = new Date().toISOString();
     getReply.lastDiscoveryAt = Date.now();
     try {
       const found = await findNewChatWithPrompt(expected, excludeThreads);
       if (found) return { done: false, generating, thread_id: found, discovered_thread_id: found, message_count: messages.length,
                           reply: null, visible_error: visibleRateLimitError(), source: "server_discovery",
-                          api_checked: true, api_status: 200, api_retry_after_ms: null };
-    } catch (err) { await log("warn", "Could not look for the new chat on ChatGPT's server", err); }
+                          api_checked: true, api_status: 200, api_retry_after_ms: null, api_request_started_at: apiRequestStartedAt };
+    } catch (err) {
+      apiStatus = err.status ?? null;
+      apiRetryAfterMs = err.retryAfterMs ?? null;
+      apiLimitDetail = err.limitDetail ?? null;
+      getReply.apiGapMs = nextReplyCheckGapMs(getReply.apiGapMs, { status: apiStatus, retryAfterMs: apiRetryAfterMs });
+      await log("warn", "Could not look for the new chat on ChatGPT's server", err);
+    }
   }
   // No conversation id yet: the page is the only source. Accept its answer
   // only when the new user turn on the page is exactly our prompt (a long
@@ -1156,7 +1236,8 @@ async function getReply(domBefore, messagesBefore = domBefore, expected = null, 
   const domDone = done && ourTurn;
   return { done: domDone, generating, thread_id: realThreadId(), message_count: messages.length,
            reply: domDone ? replies.map((m) => m.text).join("\n\n") : null, visible_error: visibleRateLimitError(), source: "dom",
-           api_checked: false, api_status: null, api_retry_after_ms: null };
+           api_checked: didApiCheck, api_status: apiStatus, api_retry_after_ms: apiRetryAfterMs, api_limit_detail: apiLimitDetail,
+           ...(apiRequestStartedAt ? { api_request_started_at: apiRequestStartedAt } : {}) };
 }
 getReply.lastApiCheckAt = 0;
 getReply.lastDiscoveryAt = 0;
@@ -1363,7 +1444,7 @@ async function handleCommand(msg) {
   }
   if (msg.action === "retry_send_click") return retrySendClick(String(msg.expected || ""), msg.thread_before || null, msg.messages_before ?? null, msg.exclude_threads || []);
   if (msg.action === "send_prompt") return sendPrompt(msg.text, msg.exclude_threads || [], msg.messages_before_hint ?? null);
-  if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before, msg.expected ?? null, msg.exclude_threads || [], msg.thread_hint || null);
+  if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before, msg.expected ?? null, msg.exclude_threads || [], msg.thread_hint || null, msg.api_check_allowed !== false);
   if (msg.action === "navigate_to_thread") {
     refuseWhileArchiving("navigating");
     const threadId = String(msg.thread_id || "").trim();
@@ -1466,7 +1547,17 @@ let tabIdentity = null;
 async function reportIdentity() {
   try { tabIdentity = await getSessionIdentity(); }
   catch (err) { tabIdentity = null; await log("warn", "could not read this tab's ChatGPT account", err); }
-  try { socket?.send(JSON.stringify({ type: "identity", account: tabIdentity })); } catch {}
+  try {
+    if (socket?.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "identity", account: tabIdentity }));
+      brokerIdentityReported = true;
+    }
+  } catch { brokerIdentityReported = false; }
+  if (brokerIdentityReported) {
+    try { socket.send(JSON.stringify({ type: "api_request_observer_status", available: apiRequestObserverAvailable })); }
+    catch { /* observer status is best-effort; the identity and request queue remain valid */ }
+  }
+  flushApiRequestObservations();
 }
 
 // Wakes the background worker so it checks for a new extension version now
@@ -1517,6 +1608,7 @@ async function connect() {
   // Lets the broker see which extension version each tab is really running
   // (a merged change only runs once Chrome has reloaded the extension).
   try { url.searchParams.set("v", chrome.runtime.getManifest().version); } catch {}
+  brokerIdentityReported = false;
   socket = new WebSocket(url.toString());
   socket.onopen = () => {
     setStatus({ connected: true });
