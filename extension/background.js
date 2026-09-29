@@ -90,9 +90,10 @@ try { importScripts("lib/plain-text-mode.js"); } catch (err) { console.warn(`[cc
 // an isolated world), so the plain-text switch runs in the page's main world
 // from here, only for the tab that asked (lib/plain-text-mode.js).
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg?.type !== "ccm-plain-text-mode" || !sender.tab?.id) return;
+  const req = msg?.type === "ccm-composer-main" ? msg.req : msg?.type === "ccm-plain-text-mode" ? { op: "plain", on: msg.on !== false } : null;
+  if (!req || !sender.tab?.id) return;
   Promise.resolve()
-    .then(() => chrome.scripting.executeScript({ target: { tabId: sender.tab.id, frameIds: [sender.frameId ?? 0] }, world: "MAIN", func: self.setComposerPlainTextMode, args: [msg.on !== false] }))
+    .then(() => chrome.scripting.executeScript({ target: { tabId: sender.tab.id, frameIds: [sender.frameId ?? 0] }, world: "MAIN", func: self.composerMainWorld, args: [req] }))
     .then((results) => sendResponse(results?.[0]?.result ?? { ok: false, reason: "no result from the page" }))
     .catch((err) => sendResponse({ ok: false, reason: String(err?.message || err) }));
   return true;
