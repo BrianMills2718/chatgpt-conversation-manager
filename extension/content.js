@@ -1312,6 +1312,26 @@ async function handleCommand(msg) {
     location.href = "https://chatgpt.com/";
     return { navigated: true };
   }
+  if (msg.action === "debug_type_timing") {
+    // Temporary (2026-09-29): time typing text into the composer in normal or
+    // plain-text mode WITHOUT sending, then empty it.
+    const c = findFirst(COMPOSER_SELECTORS, visible);
+    if (!c) throw new Error("no composer");
+    const mode = await requestPlainTextMode(Boolean(msg.plain));
+    const t0 = performance.now();
+    setComposerText(c.el, String(msg.text || ""));
+    const typeMs = Math.round(performance.now() - t0);
+    const el = findFirst(COMPOSER_SELECTORS, visible)?.el || c.el;
+    const t1 = performance.now();
+    const same = samePrompt(el.innerText, msg.text);
+    const readMs = Math.round(performance.now() - t1);
+    const links = el.querySelectorAll("[text-link-href], a").length;
+    const t2 = performance.now();
+    setComposerText(el, "");
+    const clearMs = Math.round(performance.now() - t2);
+    await requestPlainTextMode(false);
+    return { mode_ok: mode?.ok ?? false, plain: Boolean(msg.plain), chars: String(msg.text || "").length, typeMs, readMs, clearMs, same, links, visibility: document.visibilityState };
+  }
   if (msg.action === "retry_send_click") return retrySendClick(String(msg.expected || ""), msg.thread_before || null, msg.messages_before ?? null, msg.exclude_threads || []);
   if (msg.action === "send_prompt") return sendPrompt(msg.text, msg.exclude_threads || []);
   if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before, msg.expected ?? null, msg.exclude_threads || [], msg.thread_hint || null);
