@@ -99,8 +99,6 @@ account-wide throttle mid-session, observed directly by Brian in his own ChatGPT
 
 ## Temporary debug surface (remove when done)
 
-`POST /api/debug/composer-probe` / `debug_composer_probe` (added 2026-09-29) puts text into an idle agent tab's composer **without sending**, reports what the editor made of it (marks, code blocks, links), and empties it again. It exists to find why ChatGPT stores some prompts markdown-escaped (CHANGELOG v0.8.3); remove it once that is fixed.
-
 `debug_inspect_toolbar` and `debug_click_and_inspect` (`server/index.js`, `extension/content.js`) are
 throwaway, read-only reconnaissance endpoints added 2026-09-17 to find ChatGPT's thinking-level UI
 control without guessing selectors blind. Not documented as MCP tools, not unit tested (same as the

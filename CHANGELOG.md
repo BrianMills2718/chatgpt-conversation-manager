@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.9.0–v0.9.2 (2026-09-29)
+
+### Fixed at the source: prompts reached ChatGPT as escaped Markdown
+
+- **Symptom.** 119 of 291 archived audit prompts were stored, and so read by the model, with every literal Markdown character escaped:
+  - `\#`, `` \`\`\` ``, `\_`;
+  - leading spaces as `&#x20;`;
+  - bare URLs as `[url](url)`.
+
+  Code fences and indentation in the code under review were mangled. v0.8.3 only taught attribution to recognize such a copy.
+- **Root cause.** Found in ChatGPT's own composer code, read from the page's loaded JavaScript (`getText`/`hasMarkdownFormatting`). When the draft contains any formatting, the composer sends a Markdown serialization of it, and that serializer escapes everything literal. A URL the editor turns into a link is enough, as are other detected formats. Otherwise it sends the text verbatim. The same prompt is escaped, or not, every time, which is what the archive shows. Confirmed live:
+  - a small prompt with a bare URL came back escaped (conversation `6abb552b`);
+  - the same prompt without the URL came back verbatim (`6abb5573`).
+- **Fix.**
+  - **The switch.** ChatGPT has a plain-text composer mode (setting `composerPlainTextMode`, "keeps code, Markdown, and links as literal text", off by default), in which the draft is always sent verbatim. Before typing each prompt, the extension now switches the agent tab's own composer controller into that mode. It reaches the controller through React's tree from the page's main world (`extension/lib/plain-text-mode.js`, run by the background worker via `chrome.scripting.executeScript`). The account setting is not changed, so the user's own tabs keep their normal composer.
+  - **Logging.** Each send logs `plain_text_mode` in `request-timing.jsonl`: `true`, or the reason the switch failed. A failed switch is not fatal: the send goes ahead as before, and the reply is flagged `prompt_escaped`.
+- **Verified live (0.9.1, conversation `6abb5c7a`).** One prompt covered a bare URL, a code fence, `###` and `##` headers, 4-space indentation, a tab, `*` and `1.` list markers, `<tag>`, `&`, a backslash, inline code, `_under_` and `**bold**`. It was stored identical to what was sent, except for the single trailing newline, which ChatGPT trims. Before the fix the same content was stored escaped.
+- **Removed** the temporary composer, bundle and storage probes used to find this (v0.8.4–v0.8.9).
+- **Fragility.** The switch depends on ChatGPT's internal composer shape: React fiber, a controller with `setPlainTextMode`/`getText`. If ChatGPT changes it, `plain_text_mode` in the logs shows the failure reason, and prompts fall back to escaped Markdown, which is still correctly attributed.
+
 ## v0.8.3 (2026-09-29)
 
 ### Fixed: false "Refusing to return a reply" on markdown-escaped prompts, and asks failing while the agent tab reloads
