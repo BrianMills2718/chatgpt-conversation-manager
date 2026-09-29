@@ -61,10 +61,23 @@ export function unescapeChatgptPrompt(s) {
     .replace(MD_ESCAPE, "$1");
 }
 
+// ChatGPT has also stored a prompt wrapped whole in a longer code fence:
+// "````\n" + prompt + "\n````" (ats4, 2026-09-29, a prompt typed and then
+// switched to plain-text mode). The fence must be longer than any backtick run
+// inside, so a prompt that is itself one fenced block is not stripped.
+export function unwrapWholeFence(s) {
+  const m = /^(`{3,})[^\S\n]*\n([\s\S]*)\n\1[^\S\n]*$/.exec(String(s ?? "").replace(/\s+$/, ""));
+  if (!m) return null;
+  const longestInner = Math.max(0, ...(m[2].match(/`+/g) || []).map((x) => x.length));
+  return m[1].length > longestInner ? m[2] : null;
+}
+
 export function samePrompt(a, b) {
   const x = norm(a), y = norm(b);
   if (x === "" || y === "") return false;
-  return x === y || norm(unescapeChatgptPrompt(a)) === y || x === norm(unescapeChatgptPrompt(b));
+  if (x === y || norm(unescapeChatgptPrompt(a)) === y || x === norm(unescapeChatgptPrompt(b))) return true;
+  const ua = unwrapWholeFence(a), ub = unwrapWholeFence(b);
+  return (ua != null && norm(ua) === y) || (ub != null && norm(ub) === x);
 }
 
 // First differing position after normalization, for error messages.
