@@ -423,6 +423,8 @@ async function sendSnapshot(force = false) {
   }
 }
 
+const AGENT_ARCHIVE_DELAY_MS = 120000;
+
 function scheduleArchive() {
   if (contextInvalidated) return;
   clearTimeout(archiveTimer);
@@ -438,9 +440,14 @@ function scheduleArchive() {
   pending
     .then((cfg) => {
       if (!cfg.autoArchive || !currentThreadId()) return;
+      // In an agent tab, wait until well after the page load: the page's own
+      // load and the ask's reply checks already read the conversation, and a
+      // third full read of a large conversation within seconds is what met
+      // HTTP 429s on 2026-09-29 (continuations at 12:45, 13:16, 13:47).
+      const delay = AGENT_TAB ? Math.max(AGENT_ARCHIVE_DELAY_MS - (Date.now() - PAGE_STARTED_AT), Number(cfg.autoArchiveDelayMs) || 3000) : (Number(cfg.autoArchiveDelayMs) || 3000);
       archiveTimer = setTimeout(() => {
         sendSnapshot(false).catch(() => {});
-      }, Number(cfg.autoArchiveDelayMs) || 3000);
+      }, delay);
     })
     .catch((err) => handlePossibleContextInvalidation(err));
 }
@@ -737,7 +744,7 @@ function refuseWhileArchiving(action) {
   if (bulkArchiving) throw new Error(`busy: a bulk archive is running in this tab, so ${action} would stop it; use another ChatGPT tab.`);
 }
 
-async function sendPrompt(text, excludeThreads = []) {
+async function sendPrompt(text, excludeThreads = [], messagesBeforeHint = null) {
   refuseWhileArchiving("sending a prompt");
   const body = String(text || "");
   if (!body.trim()) throw new Error("text is required.");
@@ -762,35 +769,17 @@ async function sendPrompt(text, excludeThreads = []) {
   // Counted on the page, not through the conversation API: that endpoint is
   // rate-limited for the whole account (HTTP 429) whenever archiving has run.
   const domBefore = extractMessagesFromDom().length;
-  // For a continued conversation the DOM may be virtualized (a hidden tab
-  // mounts 0 messages), so only the conversation tree's message count marks
-  // where our reply starts. Without it there is no safe boundary: a 0
-  // baseline returned every earlier answer as "the reply" (2026-09-27,
-  // extension 0.7.2), and locating our turn by prompt text cannot tell it
-  // from an earlier turn of a templated prompt (the audit's prompts share
-  // 117+ leading characters). So a continuation is not sent without it; the
-  // error says nothing was sent, and the broker retries once after its
-  // rate-limit gap (server/index.js askChatgpt).
-  let messagesBefore = domBefore;
-  if (threadBefore) {
-    try {
-      messagesBefore = linearizeMapping(await fetchConversationTree(threadBefore)).length;
-    } catch (err) {
-      throw Object.assign(
-        new Error(`could not read conversation ${threadBefore} before sending (${err.message}), so its reply could not be told apart from earlier ones; nothing was typed or sent.`),
-        { reply: { stage: "no_baseline", nothing_sent: true, page_id: PAGE_ID, api_status: err.status ?? null, api_retry_after_ms: err.retryAfterMs ?? null } },
-      );
-    }
-  }
-  // The composer is always emptied first and then must hold exactly our
-  // prompt (whitespace-normalized) before Send is clicked. It used to skip
-  // typing when the composer already "included" the prompt's first 40
-  // characters -- and a failed or unaccepted earlier send leaves its text in
-  // the composer. Audit prompts share long templated heads, so the next ask
-  // skipped typing and clicked Send on the previous ask's text: all 28
-  // misattributed replies on 2026-09-27/28 were exactly this (see
-  // CHANGELOG v0.8.0). Right after a navigation the editor can also drop the
-  // first insert, so this retries for a few seconds.
+  // Where our reply will start in a continued conversation. This used to be a
+  // full read of the conversation right before sending, and on large audit
+  // threads that read was what ChatGPT rate-limited (HTTP 429 at 12:45,
+  // 13:16 and 13:47 on 2026-09-29), failing the ask before anything was sent.
+  // Now nothing is read: the broker passes the message count it last saw for
+  // this conversation (a hint; a stale one is tolerated by replyFromTree), and
+  // without one the reply is found after the user turn that is exactly our
+  // prompt (replyFromTree with a null baseline).
+  const messagesBefore = threadBefore && Number.isInteger(messagesBeforeHint) ? messagesBeforeHint : (threadBefore ? null : domBefore);
+  // The composer is emptied and must hold exactly our prompt before Send (see
+  // CHANGELOG v0.8.0: a prefix check once sent a previous ask's leftover text).
   let el = composer.el;
   const composerText = () => el.value ?? el.innerText ?? "";
   // Fill the composer in one editor transaction from the page's own world,
@@ -880,7 +869,7 @@ async function sendPrompt(text, excludeThreads = []) {
   const serverEvidence = async () => {
     try {
       if (threadBefore) {
-        const by = sendEvidenceFromCounts(linearizeMapping(await fetchConversationTree(threadBefore)).length, messagesBefore);
+        const by = continuationTurnEvidence(await fetchConversationTree(threadBefore), messagesBefore, body);
         return by ? { by, thread_id: threadBefore } : null;
       }
       const id = await findNewChatWithPrompt(body, excludeThreads);
@@ -925,10 +914,20 @@ async function sendPrompt(text, excludeThreads = []) {
 // generating. Evidence (2026-09-27/28 audit): a click on a very large prompt
 // in a hidden tab was dropped, not queued. In 26 cases the prompt stayed
 // unsent for up to 15 minutes, until a later click sent it exactly once.
+// Did our prompt arrive in this conversation? With a known pre-send message
+// count: the count grew. Without one (no pre-send read any more): the
+// conversation's latest user turn is exactly our prompt.
+function continuationTurnEvidence(tree, messagesBefore, prompt) {
+  const msgs = linearizeMapping(tree);
+  if (Number.isInteger(messagesBefore)) return sendEvidenceFromCounts(msgs.length, messagesBefore);
+  const lastUser = [...msgs].reverse().find((m) => m.role === "user");
+  return lastUser && samePrompt(lastUser.text, prompt) ? "server_turn_prompt" : null;
+}
+
 async function retrySendClick(expected, threadBefore, messagesBefore, excludeThreads = []) {
   if (threadBefore) {
-    const count = linearizeMapping(await fetchConversationTree(threadBefore)).length;
-    if (sendEvidenceFromCounts(count, messagesBefore)) return { clicked: false, confirmed_by: "server_turn", thread_id: threadBefore };
+    const tree = await fetchConversationTree(threadBefore);
+    if (continuationTurnEvidence(tree, messagesBefore, expected)) return { clicked: false, confirmed_by: "server_turn", thread_id: threadBefore };
   } else {
     const id = await findNewChatWithPrompt(expected, excludeThreads);
     if (id) return { clicked: false, confirmed_by: "server_new_chat", thread_id: id };
@@ -1080,6 +1079,7 @@ async function getReply(domBefore, messagesBefore = domBefore, expected = null, 
   // stated Retry-After instead of a guessed backoff.
   let apiStatus = null;
   let apiRetryAfterMs = null;
+  let apiLimitDetail = null;
   if (shouldCheckApi) {
     getReply.lastApiCheckAt = Date.now();
     try {
@@ -1102,6 +1102,7 @@ async function getReply(domBefore, messagesBefore = domBefore, expected = null, 
     } catch (err) {
       apiStatus = err.status ?? null;
       apiRetryAfterMs = err.retryAfterMs ?? null;
+      apiLimitDetail = err.limitDetail ?? null;
       getReply.apiGapMs = nextReplyCheckGapMs(getReply.apiGapMs, { status: apiStatus, retryAfterMs: apiRetryAfterMs });
       await log("warn", "Could not read the completed reply from the conversation API; waiting instead of trusting virtualized DOM text", err);
     }
@@ -1116,7 +1117,7 @@ async function getReply(domBefore, messagesBefore = domBefore, expected = null, 
   if (threadId) {
     return { done: false, generating, thread_id: threadId, message_count: messages.length,
              reply: null, visible_error: visibleRateLimitError(), source: "api_waiting",
-             api_checked: shouldCheckApi, api_status: apiStatus, api_retry_after_ms: apiRetryAfterMs };
+             api_checked: shouldCheckApi, api_status: apiStatus, api_retry_after_ms: apiRetryAfterMs, api_limit_detail: apiLimitDetail };
   }
   // No conversation id on the page yet (a hidden tab may not re-render after
   // an unconfirmed send): look for the new chat on ChatGPT's server, at most
@@ -1338,7 +1339,7 @@ async function handleCommand(msg) {
     return { navigated: true };
   }
   if (msg.action === "retry_send_click") return retrySendClick(String(msg.expected || ""), msg.thread_before || null, msg.messages_before ?? null, msg.exclude_threads || []);
-  if (msg.action === "send_prompt") return sendPrompt(msg.text, msg.exclude_threads || []);
+  if (msg.action === "send_prompt") return sendPrompt(msg.text, msg.exclude_threads || [], msg.messages_before_hint ?? null);
   if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before, msg.expected ?? null, msg.exclude_threads || [], msg.thread_hint || null);
   if (msg.action === "navigate_to_thread") {
     refuseWhileArchiving("navigating");

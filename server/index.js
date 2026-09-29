@@ -438,7 +438,7 @@ function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { singl
         // came from instead of losing everything but the error text.
         lastError = Object.assign(new Error(msg.error || "browser action failed"), {
           tab: msg.tab, agent: msg.agent, incognito: msg.incognito,
-          api_status: msg.api_status, api_retry_after_ms: msg.api_retry_after_ms,
+          api_status: msg.api_status, api_retry_after_ms: msg.api_retry_after_ms, api_limit_detail: msg.api_limit_detail,
           // send_prompt's pre-typing failures (content.js sendPrompt): which
           // step failed, that nothing was typed, which page instance it was,
           // and whether ChatGPT's rate-limit banner was showing.
@@ -527,7 +527,7 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
         action: command.action, ok: true, duration_ms: monoNow() - startedMs, rate_limited: rateLimited, spacing_ms: entry.pacer.spacingMs,
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: result?.tab?.slice(0, 8) ?? null, agent_tab: result?.agent ?? null, incognito: result?.incognito ?? null,
-        api_checked: result?.api_checked ?? null, api_status: result?.api_status ?? null,
+        api_checked: result?.api_checked ?? null, api_status: result?.api_status ?? null, ...(result?.api_limit_detail ? { api_limit_detail: result.api_limit_detail } : {}),
         ...(command.action === 'send_prompt' ? { send_confirmed: result?.send_confirmed ?? null, confirmed_by: result?.confirmed_by ?? null, visibility: result?.visibility ?? null, plain_text_mode: result?.plain_text_mode ?? null, typing_ms: result?.typing_ms ?? null, fill_mode: result?.fill_mode ?? null, fill_detail: result?.fill_detail ?? null } : {}),
         in_flight: agentRequestsInFlight, ...recordAndCountWindow(monoNow()),
       });
@@ -543,7 +543,7 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
         action: command.action, ok: false, duration_ms: monoNow() - startedMs, rate_limited: rateLimited, error: err.message, spacing_ms: entry.pacer.spacingMs,
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: err?.tab?.slice(0, 8) ?? null, agent_tab: err?.agent ?? null, incognito: err?.incognito ?? null,
-        api_status: err?.api_status ?? null, in_flight: agentRequestsInFlight, ...recordAndCountWindow(monoNow()),
+        api_status: err?.api_status ?? null, ...(err?.api_limit_detail ? { api_limit_detail: err.api_limit_detail } : {}), in_flight: agentRequestsInFlight, ...recordAndCountWindow(monoNow()),
       });
     }
     throw err;
@@ -910,6 +910,9 @@ const RETRY_CLICK_AFTER_MS = (process.env.RETRY_CLICK_AFTER_MS || '30000,75000,1
 // extension's server-side search for an unconfirmed new chat skips these, so
 // two asks with identical text never claim the same conversation. Bounded.
 const attributedThreads = new Set();
+// The message count each conversation had when an ask last read it, so a
+// continuation needs no pre-send read of a possibly huge conversation.
+const threadMessageCounts = new Map();
 function noteAttributedThread(id) {
   if (!id) return;
   attributedThreads.delete(id);
@@ -977,7 +980,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         }
       }
       const sendPrompt = () => dispatchToExtension(
-        { action: "send_prompt", text: body, exclude_threads: [...attributedThreads] },
+        { action: "send_prompt", text: body, exclude_threads: [...attributedThreads], messages_before_hint: resolvedThreadId ? (threadMessageCounts.get(resolvedThreadId) ?? null) : null },
         sendTimeoutMs ?? promptDispatchTimeoutMs(timeout_seconds),
         { tab, account },
       ).then((r) => { sendDispatched = true; return r; }, (e) => { if (!e.not_dispatched) sendDispatched = true; throw e; });
@@ -1122,6 +1125,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         }
         const threadId = last.thread_id || sentThreadId || resolvedThreadId || null;
         noteAttributedThread(threadId);
+        if (threadId && Number.isInteger(last.message_count) && last.source === 'api') threadMessageCounts.set(threadId, last.message_count);
         appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: monoNow() - startedMs, outcome: 'success', account: usedAccount || null, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
         // The caller must know when the model did not get the prompt verbatim.
         // Evidence, not the switch's own report: the stored turn is compared with
@@ -1318,7 +1322,7 @@ app.post('/api/undo', async (req, res) => {
 });
 
 function createMcpServer() {
-  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.14" });
+  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.15" });
 
   mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),

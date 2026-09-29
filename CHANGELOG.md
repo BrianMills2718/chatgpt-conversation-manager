@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.9.15 (2026-09-29), extension 0.9.11
+
+### Continuations no longer read the whole conversation before sending; rate-limit evidence is recorded
+
+- **What was failing.** Five continuation sends failed `sent=no`, all on large audit threads: 12:45:19/:25 (`6abba06c`), 13:16:13 (`6abb9dff`) and 13:47:03/:09 (`6abbaca4`). The pre-send read of the whole conversation (`GET /backend-api/conversation/<id>`) got HTTP 429, and so did the retry 6 s later. Fresh-chat sends and reply checks in between succeeded.
+- **What the limit is, from today's evidence (08:00Z onward).**
+  - **Endpoint.** Every 429 was on the full conversation read: 6 reply checks (10:35-10:39Z and 11:42Z) and those 5 pre-send reads. The conversation list was also refused once (05:36-05:38Z).
+  - **No `Retry-After`.** None of the 429s carried a `Retry-After` value (`api_retry_after_ms` is null on all of them).
+  - **Not our request rate.** Counting every read this bridge made in the 10/30/60 minutes before each 429 gives 15-32 / 29-75 / 69-131. The same volumes also occurred without any 429. So it is not a simple per-account request count on our side.
+  - **Pattern.** The pre-send failures each came seconds after the tab had navigated to that large conversation (12:45:11, 13:15:45, 13:47:03). By then the page's own load had read it once, and at 13:47 the extension's auto-archive read it three more times within 30 s.
+  - **Reading.** That fits a short-window limit on reading the same large conversation repeatedly, possibly weighted by size. The ~31-minute recurrence is the audit's cadence, one continuation every ~31 min, not the limit's window. This is an inference: the counters ChatGPT applies are not visible.
+- **Changes.**
+  - **No pre-send read.** A continuation no longer reads the conversation before sending. The broker passes the message count it saw when it last read that conversation (`messages_before_hint`). Without one, the reply is found after the user turn that is exactly our prompt (full-text match, not a prefix). A stale hint is tolerated: the reply check looks past older turns for our prompt. Send confirmation for continuations uses the same exact-prompt check. The `no_baseline` failure can no longer happen.
+  - **Agent-tab auto-archive deferred.** It now waits until 2 minutes after the page load, instead of adding full reads while the page and the reply checks are already reading.
+  - **Limit evidence recorded.** Every refused conversation or list read now records the response's rate-limit headers (`retry-after`, `x-ratelimit-*`, `cf-ray` and similar) and the start of the body. This is `api_limit_detail` in `request-timing.jsonl`, so the next 429 shows what ChatGPT says about the limit.
+  - **Waiting on a refused read.** Reply checks already wait rather than fail: the extension's read gap doubles on each 429 up to 60 s, or the `Retry-After` value if one is ever sent.
+- **Not done yet.** A per-endpoint pacer. With the pre-send read gone, the only full reads left are the page's own load, the reply checks (already backing off) and the deferred archive. Whether a separate pacer is needed is left to what `api_limit_detail` shows.
+
 ## v0.9.14 (2026-09-29)
 
 ### An agent tab that does not come back after a page load is set aside; the ask moves on

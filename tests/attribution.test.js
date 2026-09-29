@@ -418,3 +418,38 @@ test('an agent tab that never comes back after the page load is set aside and th
     assert.equal(good.received.filter((m) => m.action === 'send_prompt').length, 1);
   } finally { good.close(); await new Promise((r) => setTimeout(r, 50)); }
 });
+
+test('a stale (too low) baseline hint still finds our turn; no baseline finds it by exact prompt', () => {
+  const t = tree([msg('u1', 'user', 'q1'), msg('a1', 'assistant', 'r1', finished), msg('u2', 'user', 'someone else'), msg('a2', 'assistant', 'r2', finished),
+                  msg('u3', 'user', PF2), msg('a3', 'assistant', 'ours', finished)]);
+  assert.equal(replyFromTree(t, 2, { expected: PF2 }).reply, 'ours');
+  assert.equal(replyFromTree(t, null, { expected: PF2 }).reply, 'ours');
+  assert.equal(replyFromTree(t, 4, { expected: PF2 }).reply, 'ours');
+});
+
+test('a continuation carries the message count seen by the previous ask, so the extension need not read the conversation first', async () => {
+  const sends = [];
+  let n = 0;
+  const t = await agentTab('hint-tab-1', 'h@example.com', {
+    navigate_to_thread: () => ({ navigated: false }),
+    send_prompt: (m) => { sends.push(m); return { thread_id: 'conv-h', dom_before: 0, messages_before: m.messages_before_hint, send_confirmed: true }; },
+    get_reply: () => ({ done: true, source: 'api', end_turn: true, reply: `r${++n}`, thread_id: 'conv-h', message_count: 2 * n }),
+  });
+  try {
+    await mod.askChatgpt({ text: 'first', timeout_seconds: 10, pollMs: 20 });
+    // The tab is now on conv-h, so the continuation needs no navigation.
+    t.ws.removeAllListeners('message');
+    t.ws.on('message', (buf) => {
+      const m = JSON.parse(buf.toString());
+      if (m.type !== 'command') return;
+      const reply = (extra) => t.ws.send(JSON.stringify({ type: 'command_result', id: m.id, tab: 'hint-tab-1', agent: true, ...extra }));
+      if (m.action === 'get_tab') return reply({ ok: true, tab: 'hint-tab-1', agent: true, busy: false, thread_id: 'conv-h', account: { email: 'h@example.com' } });
+      if (m.action === 'send_prompt') { sends.push(m); return reply({ ok: true, thread_id: 'conv-h', dom_before: 0, messages_before: m.messages_before_hint, send_confirmed: true }); }
+      if (m.action === 'get_reply') return reply({ ok: true, done: true, source: 'api', end_turn: true, reply: 'r2', thread_id: 'conv-h', message_count: 4 });
+      reply({ ok: false, error: `unhandled ${m.action}` });
+    });
+    await mod.askChatgpt({ text: 'second', thread_id: 'conv-h', timeout_seconds: 10, pollMs: 20 });
+    assert.equal(sends[0].messages_before_hint, null);
+    assert.equal(sends[1].messages_before_hint, 2);
+  } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
+});
