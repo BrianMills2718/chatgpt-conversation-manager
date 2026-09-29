@@ -199,17 +199,30 @@ export function replyFromTree(data, beforeCount, { expected = null } = {}) {
   const status = message?.status || null;
   const finished = role === "assistant" && (status === "finished_successfully" || message?.end_turn === true);
   const messages = linearizeMapping(data);
+  const want = normText(expected);
   let added;
   if (beforeCount == null) {
     let lastUser = -1;
     for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { lastUser = i; break; }
-    const want = normText(expected).slice(0, 40);
-    if (lastUser < 0 || (want && !normText(messages[lastUser].text).includes(want))) {
+    if (lastUser < 0 || (want && normText(messages[lastUser].text) !== want)) {
       return { done: false, role, status: lastUser < 0 ? status : "prompt_not_in_tree", message_count: messages.length };
     }
     added = messages.slice(lastUser + 1);
   } else {
     added = messages.slice(beforeCount);
+    // Attribution: the turn that opens the new part of the conversation must
+    // be exactly our prompt. Anything else is someone else's turn (a stale
+    // composer sent by a later click, or a human typing into the thread), and
+    // its answer must never be returned as ours. Whitespace-normalized
+    // equality, not a prefix: callers' prompts share long templated heads.
+    if (want) {
+      const firstUser = added.find((m) => m.role === "user");
+      if (!firstUser) return { done: false, role, status: "prompt_not_in_tree", message_count: messages.length };
+      if (normText(firstUser.text) !== want) {
+        return { done: false, role, status: "prompt_mismatch", message_count: messages.length,
+                 found_prompt_head: normText(firstUser.text).slice(0, 120), found_prompt_chars: normText(firstUser.text).length };
+      }
+    }
   }
   const replies = added.filter((m) => m.role === "assistant");
   if (!finished || replies.length === 0) {
