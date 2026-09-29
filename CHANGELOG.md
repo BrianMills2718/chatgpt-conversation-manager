@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.8.0 (2026-09-29)
+
+### Fixed: replies attributed to the wrong prompt (#27), and sends logged without an account (#28)
+
+- **Root cause of every misattributed reply.** All 28 wrong replies in the 2026-09-27/28 audit (about 195 sends) had the same shape. The reply named a brand-new chat whose only prompt was a *different* ask's text. In 26 of the 28, that other ask had just failed with `Could not confirm the prompt was sent` or `no enabled send button found`; the other 2 were follow-up rounds of the same repo whose ids could not be told apart. Those failures left the prompt sitting in the agent tab's composer. The next ask's `sendPrompt` skipped typing whenever the composer already "included" the new prompt's first 40 characters. Audit prompts share a 117-character header, so it skipped typing and clicked Send on the leftover text, then returned that text's answer as its own. So "unconfirmed" sends mostly did land, but only when the *next* ask clicked Send. Evidence: each chat checked against `data/raw/chats/*.json` and `chatgpt-bug-audit/results.log`.
+- **Why the first click failed.** Unconfirmed sends grew with prompt size: none under 40k characters, 10 of 198 asks at 40-70k, and 16 of 48 at 70k or more (`bridge-events.jsonl`, 2026-09-26 onward). ChatGPT did not accept the click on a very large prompt in time. The mechanism inside ChatGPT is not known.
+- **Fix, in the extension (0.8.0):**
+  - **Typing.** The composer is emptied, the prompt is typed, and Send is clicked only when the composer holds exactly the prompt (whitespace-normalized), not merely its first 40 characters.
+  - **Failed attempts.** Any failed or unconfirmed attempt clears the composer, so nothing is left for a later click.
+  - **Clicks the page shows nothing for.** The extension asks ChatGPT's server: for a new chat, is one of the 3 newest chats one whose first prompt is exactly this text; for a continuation, did the conversation's message count grow. If the server has no such turn and the composer still holds the prompt, it clicks once more. If that also fails, it reports `send_not_accepted` (`verified_not_sent`): nothing was sent, retrying is safe.
+- **Fix, in reply attribution.** A reply is accepted only when the user turn it follows is exactly this prompt. The broker now passes the whole prompt instead of a 200-character slice, and a new chat's page-only (DOM) answer is checked the same way. If the conversation holds a different prompt, the ask fails at once with `Refusing to return a reply`, rather than returning another prompt's answer.
+- **Outcome is machine-readable.** `/api/ask` errors carry `sent` (`true`: collect the reply, do not resend; `false`: retrying is safe; `null`: unknown), `thread_id` and `account`. The MCP tool's error text ends with one line: `[sent=yes|no|unknown conversation=<id> account=<email>]`.
+- **Account (#28).** An ask that names no account is now paced and logged under the account its agent tab is signed into. Before, it went to the shared `(default)` pacer and was logged with `account: null`. `bridge-events.jsonl` rows now carry `account` and `sent`.
+- Extension manifest 0.7.6 -> 0.8.0.
+
 ## v0.7.6 (2026-09-27)
 
 ### Fixed: the extension stopped reloading itself onto new versions, silently

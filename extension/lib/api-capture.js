@@ -220,7 +220,7 @@ export function replyFromTree(data, beforeCount, { expected = null } = {}) {
       if (!firstUser) return { done: false, role, status: "prompt_not_in_tree", message_count: messages.length };
       if (normText(firstUser.text) !== want) {
         return { done: false, role, status: "prompt_mismatch", message_count: messages.length,
-                 found_prompt_head: normText(firstUser.text).slice(0, 120), found_prompt_chars: normText(firstUser.text).length };
+                 found_prompt_head: normText(firstUser.text).slice(0, 200), found_prompt_chars: normText(firstUser.text).length };
       }
     }
   }
