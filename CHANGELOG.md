@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.9.4 (2026-09-29)
+
+### Fixed: v0.9.3 still froze on large prompts, because plain-text mode stayed on
+
+- The composer controller lives as long as the page, so plain-text mode switched on for one send stayed on for the next. v0.9.3's "type first, then switch" therefore still typed into a plain-text-mode composer from the second send on. A live 80k-character send froze the tab again (07:11Z), this time reported loudly as a stalled tab with `sent=unknown`. The extension now switches plain-text mode off before typing, and back on after typing, just before Send.
+- Extension manifest 0.9.3 -> 0.9.4.
+
 ## v0.9.3 (2026-09-29)
 
 ### Fixed: large prompts froze the agent tab (v0.9.1/0.9.2 regression)

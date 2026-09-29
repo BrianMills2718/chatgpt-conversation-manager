@@ -793,6 +793,13 @@ async function sendPrompt(text, excludeThreads = []) {
   // first insert, so this retries for a few seconds.
   let el = composer.el;
   const composerText = () => el.value ?? el.innerText ?? "";
+  // Plain-text mode stays on for the page's composer after a send (the
+  // controller lives as long as the page), and typing into it is what froze
+  // the tab: v0.9.3 moved the switch after typing, but the previous send had
+  // left it on, so an 80k prompt still froze the tab (2026-09-29 07:11Z).
+  // So turn it off before typing, every time.
+  const plainOff = await requestPlainTextMode(false);
+  if (!plainOff?.ok) await log("warn", `could not switch the composer out of plain-text mode before typing: ${plainOff?.reason}`);
   const typingStarted = Date.now();
   const typedOk = await waitFor(() => {
     el = findFirst(COMPOSER_SELECTORS, visible)?.el || el;
