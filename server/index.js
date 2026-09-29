@@ -14,6 +14,9 @@ import { AdaptivePacer } from '../extension/lib/api-capture.js';
 
 const PORT = Number(process.env.PORT || 8787);
 const AUTH_TOKEN = process.env.RENAMER_TOKEN || "change-me";
+// Loopback only unless HOST says otherwise: anyone who can reach this port and
+// knows the token can type into your ChatGPT account.
+const HOST = process.env.HOST || "127.0.0.1";
 // server.log's own console lines had no timestamps, making it impossible to
 // correlate broker activity (tab connects, sync/archive outcomes) against
 // timed data like request-timing.jsonl when reconstructing an incident after
@@ -1171,7 +1174,7 @@ app.post('/api/undo', async (req, res) => {
 });
 
 function createMcpServer() {
-  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.3.0" });
+  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.8.0" });
 
   mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),
@@ -1391,8 +1394,14 @@ const SYNC_INTERVAL_MINUTES = Number(process.env.SYNC_INTERVAL_MINUTES || 0);
 
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
-  server.listen(PORT, () => {
-    logInfo(`Conversation manager listening on http://localhost:${PORT}`);
+  // A missing or placeholder token used to start silently with "change-me",
+  // which the extension also pre-fills: an open door to the account.
+  if (!process.env.RENAMER_TOKEN || ['change-me', 'replace-with-a-long-random-token'].includes(AUTH_TOKEN) || AUTH_TOKEN.length < 16) {
+    console.error('RENAMER_TOKEN is missing, a placeholder, or shorter than 16 characters. Set a long random value in .env (see README "Install"), e.g. `openssl rand -hex 24`.');
+    process.exit(1);
+  }
+  server.listen(PORT, HOST, () => {
+    logInfo(`Conversation manager listening on http://${HOST}:${PORT}`);
     logInfo(`Archive: ${ARCHIVE_DIR}`);
     logInfo(`MCP:     http://localhost:${PORT}/mcp`);
     if (SYNC_INTERVAL_MINUTES > 0) {

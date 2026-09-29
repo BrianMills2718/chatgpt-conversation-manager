@@ -1,8 +1,10 @@
-# ChatGPT Conversation Manager — v0.3
+# ChatGPT Conversation Manager
+
+Lets Claude Code or Codex talk to ChatGPT in your own logged-in browser (`ask_chatgpt`, `read_chatgpt_chat`, …), and archives your ChatGPT conversations locally. Version: see `package.json` / `CHANGELOG.md`. To set it up, go to **Install**.
 
 A narrow browser-extension + MCP bridge for managing and preserving ChatGPT conversations without stealing browser session cookies or calling undocumented private APIs from a *server*.
 
-## What v0.3 adds over v0.2
+## History: what v0.3 added over v0.2
 
 - **Fixed title extraction.** The "Skip to content" bug is fixed at the root cause (see `CHANGELOG.md`), not papered over with a string exclusion. Title selection is a pure, unit-tested function with an explicit priority order.
 - **Reliable long-conversation capture.** The content script now reads the full conversation via the same-origin endpoint ChatGPT's own web app uses to hydrate the page, instead of relying solely on whatever is currently mounted in the (virtualized) DOM. DOM scraping remains as a fallback, explicitly flagged as possibly-incomplete when used.
@@ -71,6 +73,7 @@ This is the exact request the chatgpt.com web app itself issues, from the same p
 - `list_chatgpt_connections()` — every ChatGPT tab connected to the bridge, the ChatGPT account (email) each is signed into, and whether it is an agent tab. Use it to see which accounts are reachable.
 - `read_chatgpt_chat(thread, account?, include_images?, inline_images?, max_images?)` — read a whole conversation (every message plus generated/uploaded images) by id or `chatgpt.com/c/...` link **without sending anything into it**. Works for any chat the signed-in account owns, wherever it was started — the ChatGPT desktop app, another browser, a phone, or inside a Project — because conversations live server-side, not in a tab. Without `account` it tries each connected account in turn. Images are written to `data/images/<thread>/` (paths appear in the transcript) and returned inline unless `inline_images` is false; an image that fails to download is reported with its error, never silently dropped.
 - `list_chatgpt_chats(query?, limit?, account?, include_projects?)` — recent chats live from ChatGPT (id, title, project, last updated), optionally filtered by title. ChatGPT's main chat list leaves out chats filed inside a Project; those are merged in by default (`include_projects: false` to skip). `account` picks which signed-in account to list. For older chats or message text use `search_archived_chats`.
+- `reload_chatgpt_tabs()` — hard-refresh every connected ChatGPT tab (only useful right after reloading the extension itself in `chrome://extensions`).
 - `ask_chatgpt(text, thread_id?, thread_title?, timeout_seconds?)` — type a message into ChatGPT and return the reply. Without `thread_id` or `thread_title` it starts a new chat; with an id, or a title matching exactly one of the 100 most recent chats, it continues that chat (an ambiguous title is refused with the candidates). It only types into the agent tab — a tab opened at `https://chatgpt.com/?ccm_agent=1`, marked with an orange "Agent tab" badge — and never into a tab you are using. If no idle agent tab is open, the broker opens one with `AGENT_TAB_OPEN_CMD` (default: `SYNC_OPEN_CHATGPT_CMD` pointed at that URL). Returns `{ thread_id, url, reply }`, so a follow-up can pass the same `thread_id`. Several asks may run at once, each on its own agent tab. If the reply is not finished within `timeout_seconds`, the error says whether the prompt was sent (`the prompt WAS sent` vs `Could not confirm the prompt was sent`) and names the conversation: do not resend; collect the late reply with `read_chatgpt_chat`, whose transcript header says `latest reply: finished` once ChatGPT is done. Pass `account` (an email from `list_chatgpt_connections`) to use an agent tab signed into that account; the broker's automatic tab-opening uses the default browser profile, so for another account open `https://chatgpt.com/?ccm_agent=1` once in that account's profile.
 
 ### Several accounts and browsers at once
@@ -143,85 +146,86 @@ the list endpoint this uses; if they do not, they are not backed up.
 
 ## Install
 
-Requirements: Node.js 20+, Chrome/Chromium.
+You need Node.js 20.6 or newer, Google Chrome (or Microsoft Edge), and a ChatGPT account. About ten minutes.
 
-```bash
-cd chatgpt-conversation-manager-v0.2
-npm install
-export RENAMER_TOKEN="$(openssl rand -hex 24)"
-npm start
-```
+1. **Get the code and a token.** The token is the password that the extension and your coding agents use to talk to the broker.
 
-Optional:
+   ```bash
+   git clone https://github.com/BrianMills2718/chatgpt-conversation-manager.git
+   cd chatgpt-conversation-manager
+   npm install
+   cp .env.example .env
+   # put a long random token into .env:
+   sed -i.bak "s/^RENAMER_TOKEN=.*/RENAMER_TOKEN=$(openssl rand -hex 24)/" .env && rm .env.bak
+   ```
 
-```bash
-export ARCHIVE_DIR="$HOME/ChatGPT-Archive"
-```
+   Open `.env` and check it. The broker listens only on this computer (`HOST=127.0.0.1`). It refuses to start without a real token. If you want the broker to open ChatGPT tabs by itself, set `SYNC_OPEN_CHATGPT_CMD` (examples for macOS, Linux and WSL are in the file). Otherwise you open them yourself (step 4).
 
-Open `chrome://extensions`, enable **Developer mode**, select **Load unpacked**, and choose the `extension/` directory.
+2. **Start the broker.** Leave this running:
 
-Open the extension's options page and enter:
+   ```bash
+   npm start
+   ```
 
-```text
-Broker URL:    ws://localhost:8787/extension
-Token:         same value as RENAMER_TOKEN
-Auto archive:  enabled
-Debug logging: off (turn on only while diagnosing an issue)
-```
+   `curl http://localhost:8787/health` should print `"ok":true`.
 
-Then open a normal ChatGPT conversation. Within a few seconds the archive should contain:
+3. **Load the extension.**
+   - In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and pick this repo's `extension/` folder.
+   - Open the extension's **Options**. Set the broker URL to `ws://localhost:8787/extension`, changing the port if you changed `PORT`; it must say `localhost`, not `127.0.0.1`. Paste the token from `.env`, then click **Save**.
+   - Open https://chatgpt.com, signed in. `curl http://localhost:8787/health` should now show `"extension_connections":1`.
 
-```text
-data/raw/chats/<conversation-id>.json
-data/raw/chats/<conversation-id>.md
-data/raw/chats/<conversation-id>.history.jsonl
-```
+4. **Open the agent tab.** Open `https://chatgpt.com/?ccm_agent=1` and leave it open, in its own window if you can. An orange "Agent tab" badge appears. Agents type only into this tab, never into the chatgpt.com tabs you use yourself. If `SYNC_OPEN_CHATGPT_CMD` is set, the broker opens this tab itself when none is open.
 
-Click the toolbar icon to open the popup and confirm broker/connection/archive status.
+5. **Connect your coding agent.** Both commands read the token from `.env` without printing it.
+
+   ```bash
+   # Claude Code
+   claude mcp add --scope user --transport http chatgpt-bridge http://localhost:8787/mcp \
+     -H "Authorization: Bearer $(grep ^RENAMER_TOKEN= .env | cut -d= -f2)"
+   ```
+
+   For Codex, add this to `~/.codex/config.toml`, and export `CHATGPT_BRIDGE_TOKEN` in your shell profile, set to the same token:
+
+   ```toml
+   [mcp_servers.chatgpt-bridge]
+   url = "http://localhost:8787/mcp"
+   bearer_token_env_var = "CHATGPT_BRIDGE_TOKEN"
+   ```
+
+6. **Check it end to end.** Ask your agent to:
+   - call `list_chatgpt_connections`. It should show your account, one tab marked `agent`, and extension `0.8.0` or newer. This sends nothing to ChatGPT.
+   - call `ask_chatgpt` with `Reply with the single word: pong`. It should return `pong` with a `[conversation … — account …]` line.
+
+The broker must be running for agents to reach ChatGPT; nothing restarts it for you. Start it again with `npm start` after a reboot. On WSL, `scripts/install-windows-startup.sh` starts it at Windows logon.
+
+### Using it well
+
+- **Every ask uses your real ChatGPT quota.** Sends, reads and backup all count against the same account-wide rate limit that your own ChatGPT use does. The broker paces requests per account (`data/observations/request-timing.jsonl`). Don't loop hundreds of asks without watching for `rate_limited`.
+- **When an ask fails, read the last line of the error:** `[sent=yes|no|unknown conversation=<id> account=<email>]`.
+  - `sent=yes`: the prompt reached ChatGPT. Do **not** resend it; collect the answer later with `read_chatgpt_chat` on that conversation.
+  - `sent=no`: nothing was sent, so retrying is safe.
+  - `sent=unknown`: look at `list_chatgpt_chats` before you retry.
+  The same fields come back from `POST /api/ask` as `sent`, `thread_id` and `account`.
+- **A reply is always the answer to your prompt.** The broker returns a reply only after checking that the user turn before it is exactly the prompt you sent. If something else was sent into that conversation, the ask fails with `Refusing to return a reply` instead of returning someone else's answer.
+- **Several asks can run at once**, one per agent tab (open more `?ccm_agent=1` tabs). For more than one ChatGPT account, see "Several accounts and browsers at once" above.
+- **Very large prompts (over about 60,000 characters) are where sends have failed.** ChatGPT sometimes ignores the first click on Send; the extension checks ChatGPT's server and clicks once more, then reports `sent=no`. Prompts over about 95,000 characters leave ChatGPT's Send button disabled, which fails with `sent=no`.
 
 ## Sharing this with a teammate
 
-Each person runs their own broker locally and connects their own ChatGPT
-account(s) -- exactly the setup above, repeated per person. There is no
-shared/hosted broker (a deliberate call, 2026-09-25: centralizing would only
-save the server piece, since each teammate's Chrome extension still has to
-be logged into their own account regardless of where the broker runs, and it
-would add a security surface and an ops burden for nothing currently
-needed). A colleague installing this:
+Each person runs their own broker and signs their own ChatGPT account into their own Chrome, following **Install** above. There is no shared or hosted broker. Brian decided this on 2026-09-25: a central broker would save only the server step, because every teammate's extension still has to be signed into their own account, and it would add a security surface.
 
-1. Clones the repo, runs Install above with their own `RENAMER_TOKEN`.
-2. Loads the extension into their own Chrome profile, signed into their own
-   ChatGPT account.
-3. Can independently run any of the three dispatch layers against their own
-   broker: the low-level `ask_chatgpt`/`list_chatgpt_chats` MCP tools
-   directly, the shared `chatgpt_dispatch_client.py` (in the separate
-   `weekly-plans` repo -- `dispatch_one`/`dispatch_many`, with real
-   `SentWithoutReply` poll-recovery and parallel dispatch), or a consumer
-   built on it like `weekly_chatgpt_supervisor.py` or `scripts/review_sweep.py`.
+What a teammate gets is the MCP tools above, usable from Claude Code or Codex. Brian's own Python helpers (`chatgpt_dispatch_client.py` for parallel batches, and the weekly supervisor built on it) live in his private `weekly-plans` repo. They are optional and not needed to use the bridge.
 
-**What's actually verified as of 2026-09-25**, so this section doesn't
-overstate the current state:
+**What has actually been checked, and when:**
 
-- Single-account dispatch: fully working, used all day to find and fix real
-  bugs via ChatGPT-orchestrated code review (see the `chatgpt-review-sweep`
-  investigations in target repos for a worked example).
-- The broker's rate-limit pacer (`agentPacer`) is per-account in code (a
-  `Map` keyed by account, not one shared global instance) and covered by a
-  mocked test proving two accounts' pacers widen independently -- but this
-  has **not yet been exercised with two real, simultaneously-connected
-  ChatGPT accounts**. Only one account has been connected to this broker so
-  far. If you connect a second account and see anything surprising about
-  request pacing, that's the first real-world test of this code path.
-- `list_chatgpt_connections`/`readChatgptChat`/`listRecentChats` already
-  support routing to a specific connected account by email, and multiple
-  accounts connecting to the same broker at once is expected to work (the
-  routing logic doesn't special-case a single account) -- again, genuinely
-  untested with two live accounts as of this writing.
+- **One account, one or more agent tabs.** Used for about 350 real sends on 2026-09-25 through 09-28. That volume exposed the misattribution and "could not confirm" failures that v0.8.0 fixes; see CHANGELOG. The v0.8.0 fix has unit tests and a live check (see CHANGELOG), but has not yet run at that volume.
+- **Two accounts at once.** The per-account routing and pacing have mocked tests only. Two real, simultaneously connected accounts have not been checked yet.
+- **Setup on another operating system.** This walkthrough was followed on a fresh clone on Linux: `npm install`, `npm test`, broker start, MCP `initialize`/`tools/list`, and `list_chatgpt_connections` with no browser attached. The macOS and Windows-native paths have not been tried by a teammate yet.
 
 ## Automated tests
 
 ```bash
-npm run check   # syntax check every JS file
+npm run check   # syntax check the server and extension JS
 npm test        # node --test — unit + light integration tests, no browser required
 ```
 
@@ -310,10 +314,7 @@ For ChatGPT to call it, expose the server through the MCP connectivity mechanism
 
 ### Agents on this machine (Claude Code and Codex)
 
-Both clients are registered as the MCP server `chatgpt-bridge`, so an agent can call `ask_chatgpt` directly:
-
-- Claude Code: `claude mcp add --scope user --transport http chatgpt-bridge http://localhost:8787/mcp -H "Authorization: Bearer <token>"`.
-- Codex: `[mcp_servers.chatgpt-bridge]` in `~/.codex/config.toml` with `url = "http://localhost:8787/mcp"` and `bearer_token_env_var = "CHATGPT_BRIDGE_TOKEN"`. `~/.bashrc` exports that variable from `~/.local/state/chatgpt-bridge/token` (mode 600), which holds the same value as `RENAMER_TOKEN`. If you rotate the token, update both.
+Both clients register the broker as the MCP server `chatgpt-bridge`; see **Install**, step 5. (On Brian's machine, `~/.bashrc` exports `CHATGPT_BRIDGE_TOKEN` from `~/.local/state/chatgpt-bridge/token`, which holds the same value as `RENAMER_TOKEN`. If you rotate the token, update every place it was pasted.)
 
 It needs the broker running and at least one ChatGPT tab open with the extension connected.
 
@@ -339,7 +340,7 @@ The **content script** does call ChatGPT's own same-origin conversation-read end
 
 The broker may write only its configured archive directory. Browser actions are allow-listed in the content script. Treat `RENAMER_TOKEN` as a secret.
 
-## Live verification (2026-08-19)
+## Live verification of archiving (2026-08-19, historical)
 
 The critical completeness gate has been run against real, logged-in chatgpt.com conversations (not synthetic fixtures):
 
@@ -357,7 +358,7 @@ Not yet live-verified: Assign Project / Number-Sequence buttons end-to-end again
 1. **The same-origin conversation endpoint (and its `/api/auth/session` bearer-token dependency) is private and undocumented.** It can change without notice; the DOM fallback exists for exactly that case but is best-effort only (scroll-to-top mitigation, not a completeness guarantee).
 2. **Attachments are not archived as bytes.** Metadata is captured when present in the API response (content type, name, asset pointer).
 3. **Only the currently-selected branch is captured**, matching what the user would see; sibling/rejected edit branches are not archived. Full branch-topology capture is a possible future enhancement, not attempted here.
-4. **ChatGPT Projects mirroring is not implemented.** Archive-side projects already work and are intentionally independent.
+4. **Archive projects and ChatGPT Projects are separate.** `move_current_chat_to_project` files a chat into a native ChatGPT Project; `assign_current_chat_project` sets the archive-side project. Neither mirrors the other automatically.
 5. **No vector DB.** Deliberate, not missing infrastructure.
 6. **No automated wiki synthesis.** Checkpoints are tool-driven.
 7. **Visible-UI rename undo is not automated.** Prior titles are preserved in `*.history.jsonl` for manual/future restoration; archive-side metadata changes (project/sequence/status) do have `undo_last_organization_change`.
@@ -365,8 +366,7 @@ Not yet live-verified: Assign Project / Number-Sequence buttons end-to-end again
 
 ## Recommended next increments
 
-- Live-run Assign Project / Number-Sequence and the extension-reload UX check against a real conversation (the two items not covered in the verification pass above).
-- If the same-origin endpoint proves unreliable in practice, consider periodic background re-verification (compare DOM message count to API message count when both are available) as a cheap completeness cross-check.
+- **An ask that outlives the call.** Today a long ask holds the MCP call open for up to `timeout_seconds` (max 900). When that runs out, the caller collects the answer with `read_chatgpt_chat`. Next step: have `ask_chatgpt` return an ask id at once, with a `wait`/result call and a stored record per ask. That is the pattern steipete/oracle uses, and MCP 2025-11 "tasks" standardizes it. It would also let a caller resend safely with an idempotency key.
+- **Trusted input for large prompts.** Typing through `chrome.debugger` (`Input.insertText` and a real mouse click) instead of content-script events may stop ChatGPT ignoring the first click on very large prompts. The cost is Chrome's "being debugged" banner. Or send prompts over ~60k characters as a file attachment.
+- Live-run Assign Project / Number-Sequence and the extension-reload UX check against a real conversation.
 - Attachment byte archival, if a concrete need shows up.
-- ChatGPT Projects UI mirroring adapter.
-- LLM-assisted wiki reconciliation (v0.4 direction from the original spec).

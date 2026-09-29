@@ -19,6 +19,10 @@ genuinely different systems; confusing them (in either direction) has caused rea
 once — see `remote-mcp/docs/chatgpt-setup.md` for the other direction, and keep both directions
 straight in anything you write about this repo.
 
+## Whose machine this describes
+
+Several sections below describe **Brian's own deployment**, not the product: the `chmod 555` main checkout, the `chatgpt-bridge.service` systemd user unit, the Windows Task Scheduler launcher, and his Chrome profile. None of these ship in this repo. On anyone else's machine, the broker is started with `npm start` (see README "Install"), and a restart means stopping and re-running that command.
+
 ## Working in this repo
 
 - `.`, `server/`, and `tests/` in the **main checkout** are deliberately `chmod 555` (read-only) — a
