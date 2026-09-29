@@ -507,3 +507,40 @@ test('a tab that stalls AFTER taking the prompt is never abandoned for another t
     assert.equal(other.received.filter((m) => m.action === 'send_prompt').length, 0);
   } finally { other.close(); g.close(); await new Promise((r) => setTimeout(r, 50)); }
 });
+
+test('a new agent tab for an account is opened by the extension in a tab already signed into that account', async () => {
+  let opened = null;
+  // A human (non-agent) tab signed into the account.
+  const humanWs = new WebSocket(`${wsUrl}&tab=human-of-o`);
+  sockets.push(humanWs);
+  await new Promise((r) => humanWs.on('open', r));
+  humanWs.send(JSON.stringify({ type: 'identity', account: { email: 'o@example.com' } }));
+  await new Promise((r) => setTimeout(r, 50));
+  const human = { close: () => humanWs.close() };
+  humanWs.on('message', (buf) => {
+    const m = JSON.parse(buf.toString());
+    if (m.type !== 'command') return;
+    const reply = (extra) => humanWs.send(JSON.stringify({ type: 'command_result', id: m.id, tab: 'human-of-o', agent: false, ...extra }));
+    if (m.action === 'get_tab') return reply({ ok: true, tab: 'human-of-o', agent: false, busy: false, thread_id: null, account: { email: 'o@example.com' } });
+    if (m.action === 'open_agent_tab') {
+      reply({ ok: true, chrome_tab_id: 7 });
+      // The new tab appears in this profile and connects as an agent tab.
+      setTimeout(async () => { opened = await goodTab('opened-for-o', 'o@example.com'); }, 100);
+      return;
+    }
+    reply({ ok: false, error: `unhandled ${m.action}` });
+  });
+  try {
+    const r = await mod.askChatgpt({ text: 'open one for me', timeout_seconds: 10, pollMs: 20, account: 'o@example.com', openWaitMs: 5000 });
+    assert.equal(r.reply, 'answered by opened-for-o');
+  } finally { human.close(); opened?.close(); await new Promise((r) => setTimeout(r, 50)); }
+});
+
+test('with no tab of the account connected, the error says to open the agent tab in that account\'s profile', async () => {
+  await assert.rejects(mod.askChatgpt({ text: 'nobody home', timeout_seconds: 5, pollMs: 20, account: 'nobody@example.com', openWaitMs: 500 }), (err) => {
+    assert.match(err.message, /No agent ChatGPT tab/);
+    assert.match(err.message, /profile signed into nobody@example\.com/);
+    assert.equal(err.sent, false);
+    return true;
+  });
+});

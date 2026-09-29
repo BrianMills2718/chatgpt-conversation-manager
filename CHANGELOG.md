@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.9.17 (2026-09-29), extension 0.9.13
+
+### Agent tabs are opened in the right account's browser profile; setup steps use Chrome's exact wording
+
+- **What failed.** The first two-account check (C3) failed with nothing sent. Both asks tried to open an agent tab with `cmd.exe /c start "" chrome https://chatgpt.com/?ccm_agent=1`, which hit the flaky WSL interop call ("UtilAcceptVsock: accept4 failed 110") three times.
+  - Even when that command works, it opens Chrome's default or last-used profile. So it can never produce a tab for an account that lives in another profile. Brian's layout: brianmills2718 in his main profile, therakorski in a profile named "ChatGPT 2".
+  - Before the second profile existed, the second account had first been signed into the same profile. ChatGPT's account switcher then turned therakorski's agent tabs into brianmills2718 tabs as they reloaded (15:49-15:50Z). The broker saw those tabs as gone and set them aside, which is why the existing agent tabs were not claimed.
+- **Fix: open agent tabs from inside the profile.**
+  - The broker asks the extension in a tab already signed into the wanted account to open the agent tab (`open_agent_tab`, then `chrome.tabs.create` in that profile). It prefers a human tab, since it is not busy with an ask.
+  - The shell command is only a fallback, and it is refused when a specific account is requested, because it cannot choose the profile.
+  - With no tab of that account connected, the error says to open `https://chatgpt.com/?ccm_agent=1` in the profile signed into that account, and lists which agent tabs were checked first.
+  - This also removes the WSL interop call from the normal path.
+- **Setup steps.** Following the old wording, Brian ticked "Enable debug console logging" instead of the archive option. Install step 3 now quotes every label exactly:
+  - **Chrome's pages** (checked by loading the extension in Chromium and reading the pages): "Developer mode", "Load unpacked", the card "ChatGPT Conversation Manager Bridge", then "Details" and "Extension options".
+  - **The options page** (checked against `extension/options.html`): "Broker WebSocket URL", "Authentication token", "Automatically archive open conversations", "Archive debounce (milliseconds)", "Enable debug console logging", and "Save".
+  - **Which boxes to leave alone**, and to type the URL by hand and paste only the token.
+  - **"Several accounts and browsers at once"** now requires one Chrome profile per account, and walks through adding one ("Add", "Stay signed out", as Brian's Chrome showed them).
+- **Test hardening.** The concurrency test now checks structurally that both prompts reached their tabs before either ask finished. The old wall-time bound failed on a loaded machine.
+
 ## v0.9.16 (2026-09-29), extension 0.9.12
 
 ### One rule for "this tab is gone": set it aside and move the ask; agent tabs exempt from discarding; lifecycle evidence

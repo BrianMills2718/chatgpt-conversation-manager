@@ -702,9 +702,37 @@ async function runOpenCommand(cmd, { attempts = 3, delayMs = 3000, exec = (c) =>
   }
   throw new Error(`opening the agent tab failed ${attempts} times: ${errors.join(" | ")}`);
 }
-let openAgentTab = async () => {
+// Opening an agent tab. First choice: ask the extension in a tab already
+// signed into the wanted account to open it (chrome.tabs.create). That tab's
+// browser profile is by construction the one holding that account, and it
+// works on any OS with no shell command. A shell command (AGENT_TAB_OPEN_CMD /
+// SYNC_OPEN_CHATGPT_CMD) opens Chrome's default profile, so it cannot reach an
+// account living in another profile (the 2026-09-29 two-account check failed
+// that way, on top of a flaky WSL interop call); it is only the fallback when
+// no tab of that account is connected.
+async function openAgentTabViaExtension(account) {
+  const candidates = [...extensionSockets]
+    .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && (!account || accountMatches(ws.account, account)))
+    .sort((a, b) => Number(a.agentTab) - Number(b.agentTab)); // prefer a human tab: it is not busy with an ask
+  const errors = [];
+  for (const ws of candidates) {
+    try {
+      const r = await dispatchToExtension({ action: "open_agent_tab", url: AGENT_TAB_URL }, 10000, { tab: ws.tabToken });
+      if (r.ok !== false) return { via: ws.tabToken.slice(0, 8) };
+      errors.push(`${ws.tabToken.slice(0, 8)}: ${r.reason}`);
+    } catch (err) { errors.push(`${ws.tabToken.slice(0, 8)}: ${err.message}`); }
+  }
+  return { via: null, errors, candidates: candidates.length };
+}
+let openAgentTab = async ({ account = null } = {}) => {
+  const viaExtension = await openAgentTabViaExtension(account);
+  if (viaExtension.via) return;
+  const why = viaExtension.candidates ? `the extension could not open one (${viaExtension.errors.join("; ")})` : `no tab${account ? ` signed into ${account}` : ''} is connected to open it from`;
   if (!AGENT_TAB_OPEN_CMD || !AGENT_TAB_OPEN_CMD.includes("ccm_agent=1")) {
-    throw new Error(`No agent ChatGPT tab is open, and the broker cannot open one (set AGENT_TAB_OPEN_CMD or SYNC_OPEN_CHATGPT_CMD). Open ${AGENT_TAB_URL} in Chrome.`);
+    throw new Error(`No agent ChatGPT tab is open, and ${why}; no open command is set either (AGENT_TAB_OPEN_CMD or SYNC_OPEN_CHATGPT_CMD). Open ${AGENT_TAB_URL} in the browser profile signed into ${account || 'the account'}.`);
+  }
+  if (account) {
+    throw new Error(`No agent ChatGPT tab signed into ${account}, and ${why}. The open command would use Chrome's default profile, which may be another account, so it is not used. Open ${AGENT_TAB_URL} in the browser profile signed into ${account}.`);
   }
   await runOpenCommand(AGENT_TAB_OPEN_CMD);
 };
@@ -766,7 +794,8 @@ async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = nul
     const found = await findIdleAgentTab(seen, new Set(), account);
     if (found) return found;
   }
-  await openAgentTab({ account });
+  try { await openAgentTab({ account }); }
+  catch (err) { throw new Error(`${err.message} (agent tabs checked first: ${JSON.stringify(seen)})`); }
   const deadline = monoNow() + openWaitMs;
   while (monoNow() < deadline) {
     await sleep(1000);
@@ -1347,7 +1376,7 @@ app.post('/api/undo', async (req, res) => {
 });
 
 function createMcpServer() {
-  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.16" });
+  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.17" });
 
   mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),

@@ -78,7 +78,20 @@ This is the exact request the chatgpt.com web app itself issues, from the same p
 
 ### Several accounts and browsers at once
 
-Every chatgpt.com tab with the extension installed connects to the broker and reports which ChatGPT account it is signed into. To reach another account, install the extension (load unpacked from `extension/`, set the same broker URL and token in its options) in a browser profile signed into that account — a separate Chrome profile, or Microsoft Edge, which runs Chrome extensions unchanged — and keep one chatgpt.com tab open there. No refresh is needed: on install or update the extension injects itself into tabs that are already open, and it reloads itself within about a minute whenever a newer version is on disk (the broker's `/health` reports it; bump `version` in `extension/manifest.json` with every extension change). One connected tab per account is enough to **read** any of that account's chats, including ones started in the ChatGPT desktop app (which cannot run extensions itself). To **send** into an account, open `https://chatgpt.com/?ccm_agent=1` once in that profile so the account has an agent tab.
+Each ChatGPT account needs its own Chrome profile. Signing a second account into the same profile does not work: ChatGPT's account switcher changes the account for every tab in that profile the next time it loads. On 2026-09-29 this silently turned agent tabs of one account into tabs of the other.
+
+To add a second account:
+1. **New profile.** In Chrome, click your profile picture at the top right, then **"Add"**. Chrome's wording can vary between versions; this is what Brian's Chrome showed on 2026-09-29. On the next screen choose **"Stay signed out"**, unless you want Chrome sync for that profile. Give the profile a name, for example "ChatGPT 2".
+2. **Sign in.** In the new profile's window, sign in to https://chatgpt.com with the second account.
+3. **Install the extension there.** Repeat Install step 3 in that window: extensions are per profile. Use the same **"Broker WebSocket URL"** and the same **"Authentication token"**.
+4. **Leave one ChatGPT tab open.** Keep at least one chatgpt.com tab open in that profile. The broker asks the extension in that tab to open agent tabs there, so they land in the right profile.
+
+Microsoft Edge also runs the extension unchanged, and can hold a second account in the same way.
+
+Check it with `list_chatgpt_connections`. It lists each tab with its account, so both accounts should appear. Pass `account` (an email) to `ask_chatgpt`, `read_chatgpt_chat` and `list_chatgpt_chats` to choose one.
+
+- **Reading.** One connected tab per account is enough to *read* any of that account's chats, including ones started in the ChatGPT desktop app.
+- **Updates.** The extension reloads itself within about a minute when a newer version is on disk. Bump `version` in `extension/manifest.json` with every extension change.
 
 ### Important distinction: archive projects vs ChatGPT Projects
 
@@ -173,13 +186,19 @@ You need Node.js 22 or newer (the test suite does not exit on Node 20), Google C
 
    `curl http://localhost:8787/health` should print `"ok":true`.
 
-3. **Load the extension.**
-   - In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and pick this repo's `extension/` folder.
-   - Open the extension's **Options**. Set the broker URL to `ws://localhost:8787/extension`, changing the port if you changed `PORT`; it must say `localhost`, not `127.0.0.1`. Paste the token from `.env`, then click **Save**.
+3. **Load the extension.** The names in quotes below are exactly what Chrome and the extension show. They were checked against Chrome's extensions pages and `extension/options.html` on 2026-09-29.
+   - In Chrome, type `chrome://extensions` into the address bar. Turn on the **"Developer mode"** switch (top right). Click **"Load unpacked"** and choose this repo's `extension` folder.
+   - A card named **"ChatGPT Conversation Manager Bridge"** appears. On it, click **"Details"**, scroll down, and click **"Extension options"**. A page titled **"ChatGPT Conversation Manager"** opens.
+   - **"Broker WebSocket URL"**: type `ws://localhost:8787/extension` by hand. Use your port if you changed `PORT`. It must say `localhost`, not `127.0.0.1`.
+   - **"Authentication token"**: paste the token, and nothing else. It is the part after `RENAMER_TOKEN=` in `.env`; `grep ^RENAMER_TOKEN= .env | cut -d= -f2` prints it. Type the URL above by hand rather than copying it: copying the URL after the token replaces the token on your clipboard, and you would paste the URL into the token box.
+   - Leave these as they are:
+     - **"Automatically archive open conversations"** (ticked): it saves each chat you open into `data/`. Untick it only if you don't want that.
+     - **"Archive debounce (milliseconds)"**.
+     - **"Enable debug console logging"** (unticked). It only adds browser console output.
+   - Click **"Save"**. The word "Saved" appears briefly.
    - Open https://chatgpt.com, signed in. `curl http://localhost:8787/health` should now show `"extension_connections"` of 1 or more; each open ChatGPT tab counts.
-   - The extension also archives each chat you open into `data/` ("Auto archive" in its options). Switch that off there if you don't want it.
 
-4. **Open the agent tab.** Open `https://chatgpt.com/?ccm_agent=1` and leave it open, in its own window if you can. An orange "Agent tab" badge appears. Agents type only into this tab, never into the chatgpt.com tabs you use yourself. If `SYNC_OPEN_CHATGPT_CMD` is set, the broker opens this tab itself when none is open.
+4. **Open the agent tab.** In the same Chrome profile, open `https://chatgpt.com/?ccm_agent=1` and leave it open. A small orange label reading "Agent tab — Claude Code / Codex type here" appears at the bottom left. Agents type only into this tab, never into the chatgpt.com tabs you use yourself. When none is open, the broker asks the extension in one of your connected ChatGPT tabs to open one in that same profile.
 
 5. **Connect your coding agent.** Both commands read the token from `.env` without printing it.
 

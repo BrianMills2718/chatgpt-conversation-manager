@@ -1338,6 +1338,11 @@ async function handleCommand(msg) {
     location.href = "https://chatgpt.com/";
     return { navigated: true };
   }
+  if (msg.action === "open_agent_tab") {
+    // Opened by this tab's own extension instance, so it lands in this
+    // browser profile -- the one signed into this tab's account.
+    return chrome.runtime.sendMessage({ type: "ccm-open-agent-tab", url: String(msg.url || "https://chatgpt.com/?ccm_agent=1") });
+  }
   if (msg.action === "retry_send_click") return retrySendClick(String(msg.expected || ""), msg.thread_before || null, msg.messages_before ?? null, msg.exclude_threads || []);
   if (msg.action === "send_prompt") return sendPrompt(msg.text, msg.exclude_threads || [], msg.messages_before_hint ?? null);
   if (msg.action === "get_reply") return getReply(msg.dom_before, msg.messages_before, msg.expected ?? null, msg.exclude_threads || [], msg.thread_hint || null);
