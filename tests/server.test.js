@@ -210,7 +210,9 @@ function fakeTab(tab, { busy = false, thread = null, agent = false, onCommand })
   const open = () => new Promise((resolve) => {
     const ws = new WebSocket(`${wsUrl}&tab=${tab}${agent ? '&agent=1' : ''}`);
     state.ws = ws;
-    ws.on('open', resolve);
+    // A real tab reports its account right after connecting (content.js
+    // reportIdentity); these fakes report none.
+    ws.on('open', () => { ws.send(JSON.stringify({ type: 'identity', account: null })); resolve(); });
     ws.on('message', async (buf) => {
       const msg = JSON.parse(buf.toString());
       if (msg.type !== 'command') return;

@@ -690,7 +690,8 @@ async function accountOfTab(tab, waitMs = 5000) {
   for (;;) {
     const ws = [...extensionSockets].find((w) => w.tabToken === tab && w.readyState === w.OPEN);
     const key = accountKey(ws?.account);
-    if (key || Date.now() >= deadline) return key || null;
+    // undefined: the tab has not reported yet; null: it reported no account.
+    if (key || ws?.account !== undefined || Date.now() >= deadline) return key || null;
     await sleep(200);
   }
 }
