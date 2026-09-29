@@ -1,12 +1,12 @@
 {
   "name": "chatgpt-conversation-manager",
-  "version": "0.3.0",
+  "version": "0.8.2",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node --watch server/index.js",
-    "check": "node --check server/index.js && node --check server/archive.js && node --check scripts/bridge-observation-report.js && node --check extension/content.js && node --check extension/lib/title.js && node --check extension/lib/normalize.js && node --check extension/lib/api-capture.js && node --check extension/lib/send-confirm.js && node --check extension/lib/wait-for.js && node --check extension/lib/background-ping.js && node --check extension/popup.js && node --check extension/options.js && node --check extension/background.js",
+    "start": "node --env-file=.env server/index.js",
+    "dev": "node --env-file=.env --watch server/index.js",
+    "check": "node --check server/index.js && node --check server/archive.js && node --check server/sync.js && node --check scripts/bridge-observation-report.js && node --check extension/content.js && node --check extension/lib/title.js && node --check extension/lib/normalize.js && node --check extension/lib/api-capture.js && node --check extension/lib/send-confirm.js && node --check extension/lib/wait-for.js && node --check extension/lib/background-ping.js && node --check extension/popup.js && node --check extension/options.js && node --check extension/background.js",
     "test": "node --test"
   },
   "dependencies": {
