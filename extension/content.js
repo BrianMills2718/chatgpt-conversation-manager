@@ -811,15 +811,27 @@ async function sendPrompt(text, excludeThreads = []) {
   };
   let plainMode = null;
   let typedOk = false;
-  for (let attempt = 1; attempt <= 2 && !typedOk; attempt++) {
-    if (attempt > 1) await sleep(1000);
+  // Right after a page load or navigation the composer element can be on the
+  // page before React has hydrated it: the fill then finds "no React fiber
+  // above the composer" (cm3 resend 2026-09-29 08:41Z: attempt 1 failed that
+  // way, attempt 2 a second later succeeded). Wait for the composer to be
+  // live -- up to 20s, re-finding the element each time in case hydration
+  // replaced it -- and allow two genuine fill mismatches.
+  const notReady = (r) => /no React fiber|controller not found|no composer editor/.test(String(r?.reason || ""));
+  const fillDeadline = Date.now() + 20000;
+  let mismatches = 0;
+  for (let attempt = 1; !typedOk && mismatches < 2 && Date.now() < fillDeadline; attempt++) {
+    if (attempt > 1) await sleep(500);
+    const current = findFirst(COMPOSER_SELECTORS, visible)?.el;
+    if (current && current !== el) { el = current; el.setAttribute("data-ccm-composer", marker); }
     plainMode = await composerMainWorldRequest({ op: "fill", text: body, plain: true, marker });
+    if (!plainMode?.ok && notReady(plainMode)) { fillDetail = { attempt, reason: plainMode?.reason }; continue; }
     // Judged by what ChatGPT itself would submit, not by reading the DOM (on
     // cm3 the DOM read said 0 characters while something else was sent).
     const check = plainMode?.ok ? await composerMainWorldRequest({ op: "gettext", marker }) : null;
     const mismatch = plainMode?.ok ? verbatimMismatch(check?.ok ? check.text : null, body, check?.reason) : null;
     typedOk = Boolean(plainMode?.ok) && !mismatch;
-    if (!typedOk) fillDetail = plainMode?.ok ? { attempt, would_send: mismatch, dom: describeMismatch(), fill: plainMode } : { attempt, reason: plainMode?.reason };
+    if (!typedOk) { mismatches++; fillDetail = plainMode?.ok ? { attempt, would_send: mismatch, dom: describeMismatch(), fill: plainMode } : { attempt, reason: plainMode?.reason }; }
   }
   // No typed fallback. Typing was slow (minutes for large prompts) and, on
   // cm3 2026-09-29, sent a truncated prompt wrapped in a code fence. If the
@@ -901,7 +913,7 @@ async function sendPrompt(text, excludeThreads = []) {
   const threadId = threadBefore || serverThreadId || (confirmedBy ? await waitFor(() => realThreadId(), 60000, 250).catch(() => null) : realThreadId());
   return { thread_id: threadId, dom_before: domBefore, messages_before: messagesBefore,
            send_confirmed: Boolean(confirmedBy), confirmed_by: confirmedBy,
-           plain_text_mode: plainMode?.ok ? true : (plainMode?.reason || "failed"), typing_ms: typingMs, fill_mode: fillMode, fill_detail: fillDetail,
+           plain_text_mode: plainMode?.ok ? true : (plainMode?.reason || "failed"), typing_ms: typingMs, fill_mode: fillMode, fill_detail: typedOk ? (fillDetail ? { recovered_after: fillDetail } : null) : fillDetail,
            server_check_error: serverCheckError,
            visibility: document.visibilityState, has_focus: document.hasFocus(),
            composer_selector: composer.selector, send_selector: button.selector };
