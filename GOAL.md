@@ -261,3 +261,9 @@ non_gating_utility_review:
     The server-gated re-click path is covered by unit tests only.
   - **Shared client bug found and fixed.** In `weekly-plans`, `chatgpt_dispatch_client.sent_thread_id` had matched only the pre-v0.7.2 wording "The message was sent". SentWithoutReply recovery therefore never fired from 2026-09-26 until weekly-plans PR #178 (merged `204bd73`), which reads the structured `sent`/`thread_id` fields.
   - **C3/C4 still open.** A second account (brianmills2718@gmail.com) was being connected on 2026-09-29, but `list_chatgpt_connections` still showed only therakorski at 05:20Z. Once it appears, run `weekly-plans/scripts/verify_multi_account_dispatch.py`.
+- **C3/C4 PASSED (2026-09-29 16:05Z, bridge v0.9.17 / extension 0.9.13).**
+  - **Command.** `weekly-plans/scripts/verify_multi_account_dispatch.py --account-a therakorski@gmail.com --account-b brianmills2718@gmail.com`: one concurrent `dispatch_many` call, both asks started 16:05:23.
+  - **C3.** Both returned `verified`. The transcripts were read back directly: `6abbe1ce` under therakorski and `6abbe1cf` under brianmills2718, each "latest reply: finished". Reading `6abbe1ce` under brianmills2718 gave HTTP 404, so the two are distinct accounts.
+  - **C4.** `data/observations/agent-pacer-state.json` has independent `therakorski@gmail.com` and `brianmills2718@gmail.com` entries.
+  - **Prerequisite (v0.9.17).** Agent tabs are opened by the extension inside the account's own Chrome profile, not by `cmd.exe ... chrome`, which always opened the default profile. Also, one account per Chrome profile: ChatGPT's account switcher changes every tab in a profile.
+  - All acceptance checks C1-C5 are now met.
