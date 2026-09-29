@@ -1403,11 +1403,16 @@ test('a reload that never brings the page back fails within its bound and still 
   });
   tab.pageId = 'page-1';
   await tab.open();
+  // An earlier test's opener would open its own fake tab; here no tab opens.
+  setAgentTabOpener(async () => {});
   try {
-    const err = await askChatgpt({ text: 'continue please', thread_id: 'cont-thread-5', timeout_seconds: 5, pollMs: 10 }).then(() => null, (e) => e);
+    // openWaitMs: after this tab is given up there is no other one to move to.
+    const err = await askChatgpt({ text: 'continue please', thread_id: 'cont-thread-5', timeout_seconds: 5, pollMs: 10, openWaitMs: 500 }).then(() => null, (e) => e);
     assert.ok(err, 'expected a failure');
     assert.match(err.message, /Reloading the tab to recover failed/);
     assert.match(err.message, /Nothing was typed or sent/);
+    assert.match(err.message, /No other agent tab became available/);
+    assert.equal(err.sent, false);
     assert.deepEqual(tab.received.filter((a) => a !== 'get_tab'), ['send_prompt', 'reload_tab']);
   } finally {
     tab.ws.close();

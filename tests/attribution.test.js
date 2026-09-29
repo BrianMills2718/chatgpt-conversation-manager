@@ -69,6 +69,7 @@ before(async () => {
   process.env.RETRY_CLICK_AFTER_MS = '60,120';
   process.env.NAV_WAIT_MS = '4000';
   process.env.NAV_DEAD_MS = '1500';
+  process.env.TAB_RECONNECT_WAIT_MS = '800';
   mod = await import('../server/index.js');
   server = mod.server;
   await new Promise((resolve) => (server.listening ? resolve() : server.listen(0, resolve)));
@@ -452,4 +453,57 @@ test('a continuation carries the message count seen by the previous ask, so the 
     assert.equal(sends[0].messages_before_hint, null);
     assert.equal(sends[1].messages_before_hint, 2);
   } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
+});
+
+
+// Every "this tab is gone" path moves the ask to another tab (shared rule
+// tabGone in server/index.js), never one where something may have been sent.
+function goneTab(token, email, onCommand) {
+  return agentTab(token, email, {}).then((t) => {
+    t.ws.removeAllListeners('message');
+    t.ws.on('message', (buf) => {
+      const m = JSON.parse(buf.toString());
+      if (m.type !== 'command') return;
+      const reply = (extra) => t.ws.send(JSON.stringify({ type: 'command_result', id: m.id, tab: token, agent: true, ...extra }));
+      onCommand(m, reply, t);
+    });
+    return t;
+  });
+}
+function goodTab(token, email) {
+  return agentTab(token, email, {
+    navigate_to_thread: () => ({ navigated: false }),
+    send_prompt: (m) => ({ thread_id: 'conv-g', dom_before: 0, messages_before: null, send_confirmed: true }),
+    get_reply: () => ({ done: true, source: 'api', end_turn: true, reply: `answered by ${token}`, thread_id: 'conv-g' }),
+  });
+}
+
+test('gone-tab path: no composer, and the reload never brings the page back -> another tab answers', async () => {
+  const g = await goneTab('gone-reload', 'g1@example.com', (m, reply, t) => {
+    if (m.action === 'get_tab') return reply({ ok: true, tab: 'gone-reload', agent: true, busy: false, thread_id: null, page_id: 'p1', account: { email: 'g1@example.com' } });
+    if (m.action === 'send_prompt') return reply({ ok: false, error: 'no ChatGPT composer found; nothing was typed or sent.', stage: 'no_composer', nothing_sent: true, page_id: 'p1' });
+    if (m.action === 'reload_tab') { reply({ ok: true }); setTimeout(() => t.ws.close(), 5); return; }
+    reply({ ok: false, error: `unhandled ${m.action}` });
+  });
+  const ok = await goodTab('good-after-reload', 'g1@example.com');
+  try {
+    const r = await mod.askChatgpt({ text: 'move after reload', timeout_seconds: 30, pollMs: 20, account: 'g1@example.com' });
+    assert.equal(r.reply, 'answered by good-after-reload');
+  } finally { ok.close(); await new Promise((r) => setTimeout(r, 50)); }
+});
+
+test('a tab that stalls AFTER taking the prompt is never abandoned for another tab (it may have sent)', async () => {
+  const g = await goneTab('stall-after-take', 'g3@example.com', (m, reply) => {
+    if (m.action === 'get_tab') return reply({ ok: true, tab: 'stall-after-take', agent: true, busy: false, thread_id: 'conv-s', account: { email: 'g3@example.com' } });
+    // send_prompt: never answers
+  });
+  const other = await goodTab('never-used', 'g3@example.com');
+  try {
+    await assert.rejects(mod.askChatgpt({ text: 'stall', thread_id: 'conv-s', timeout_seconds: 10, pollMs: 20, sendTimeoutMs: 300, account: 'g3@example.com' }), (err) => {
+      assert.match(err.message, /stopped responding/);
+      assert.equal(err.sent, null);
+      return true;
+    });
+    assert.equal(other.received.filter((m) => m.action === 'send_prompt').length, 0);
+  } finally { other.close(); g.close(); await new Promise((r) => setTimeout(r, 50)); }
 });

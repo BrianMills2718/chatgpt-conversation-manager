@@ -219,7 +219,7 @@ Never run two starters. A second one can take the port while the first is restar
 
 ### Using it well
 
-- **Every ask uses your real ChatGPT quota.** Sends, reads and backup all count against the same account-wide rate limit that your own ChatGPT use does. The broker paces requests per account (`data/observations/request-timing.jsonl`). Don't loop hundreds of asks without watching for `rate_limited`.
+- **Every ask uses your real ChatGPT quota.** Sends, reads and backup all count against the same account-wide rate limit that your own ChatGPT use does. The broker paces requests per account (`data/observations/request-timing.jsonl`). Don't loop hundreds of asks without watching for `rate_limited`. When ChatGPT refuses a request (HTTP 429), it says only `{"detail":"Too many requests"}`, with no `Retry-After` and no limit headers. So the bridge backs off based on the refusals it sees.
 - **When an ask fails, read the last line of the error:** `[sent=yes|no|unknown conversation=<id> account=<email>]`.
   - `sent=yes`: the prompt reached ChatGPT. Do **not** resend it; collect the answer later with `read_chatgpt_chat` on that conversation.
   - `sent=no`: nothing was sent, so retrying is safe.
