@@ -487,3 +487,14 @@ test('nextReplyCheckGapMs backs off only on 429 and honours Retry-After', () => 
   assert.equal(nextReplyCheckGapMs(60000, { status: null }), 10000);
   assert.equal(nextReplyCheckGapMs(60000, { status: 500 }), 10000);
 });
+
+test('a refused conversation read reports its rate-limit headers and body', async () => {
+  const { rateLimitDetail } = await import('../extension/lib/api-capture.js');
+  const res = new Response('{"detail":"Too many requests"}', { status: 429, headers: { 'retry-after': '120', 'x-ratelimit-remaining': '0', 'content-type': 'application/json' } });
+  const d = await rateLimitDetail(res);
+  assert.equal(d.status, 429);
+  assert.equal(d.headers['retry-after'], '120');
+  assert.equal(d.headers['x-ratelimit-remaining'], '0');
+  assert.equal(d.headers['content-type'], undefined);
+  assert.match(d.body, /Too many requests/);
+});

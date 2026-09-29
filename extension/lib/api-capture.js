@@ -76,11 +76,26 @@ export async function fetchConversationTree(threadId, { fetchImpl = fetch, acces
     throw Object.assign(new Error(`backend-api conversation fetch failed: HTTP ${res.status}`), {
       status: res.status,
       retryAfterMs: parseRetryAfter(res.headers?.get?.("retry-after")),
+      limitDetail: await rateLimitDetail(res),
     });
   }
   const data = await res.json();
   if (!looksLikeConversationTree(data)) throw new Error("backend-api conversation response did not look like a conversation tree (schema may have changed)");
   return data;
+}
+
+// What a refused request says about the limit, so the limits can be learned
+// from evidence rather than guessed: every rate-limit-ish header, and the
+// start of the body. Only for failed responses; never throws.
+export async function rateLimitDetail(res) {
+  if (!res || res.ok) return null;
+  const headers = {};
+  try {
+    res.headers?.forEach?.((v, k) => { if (/retry|rate|limit|reset|quota|cf-ray/i.test(k)) headers[k] = String(v).slice(0, 120); });
+  } catch {}
+  let body = null;
+  try { body = (await (res.clone ? res.clone() : res).text()).slice(0, 300); } catch {}
+  return { status: res.status, headers, body };
 }
 
 function extractText(message) {
@@ -224,11 +239,16 @@ export function replyFromTree(data, beforeCount, { expected = null } = {}) {
     if (want) {
       const firstUser = added.find((m) => m.role === "user");
       if (!firstUser) return { done: false, role, status: "prompt_not_in_tree", message_count: messages.length };
-      if (!ourPrompt(firstUser.text, expected)) {
+      // A stale baseline hint (turns were added since the broker last saw the
+      // conversation) puts older turns before ours: look further along.
+      const ours = added.findIndex((m) => m.role === "user" && ourPrompt(m.text, expected));
+      if (ours >= 0 && added[ours] !== firstUser) added = added.slice(ours);
+      const opener = ours >= 0 ? added[0] : firstUser;
+      if (!ourPrompt(opener.text, expected)) {
         return { done: false, role, status: "prompt_mismatch", message_count: messages.length,
                  found_prompt_head: normText(firstUser.text).slice(0, 200), found_prompt_chars: normText(firstUser.text).length };
       }
-      ourTurn = firstUser;
+      ourTurn = opener;
     }
   }
   const replies = added.filter((m) => m.role === "assistant");
@@ -354,7 +374,7 @@ export async function listConversationsPage({ offset = 0, limit = 28, fetchImpl 
     credentials: "same-origin",
     headers,
   });
-  if (!res.ok) throw new Error(`conversations list fetch failed: HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(`conversations list fetch failed: HTTP ${res.status}`), { status: res.status, retryAfterMs: parseRetryAfter(res.headers?.get?.("retry-after")), limitDetail: await rateLimitDetail(res) });
   const data = await res.json();
   if (!looksLikeConversationList(data)) throw new Error("conversations list response did not look like the expected shape (schema may have changed)");
   return data; // { items: [{id, title, create_time, update_time, ...}], total, limit, offset }
