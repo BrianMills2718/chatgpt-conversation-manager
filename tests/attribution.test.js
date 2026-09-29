@@ -235,3 +235,55 @@ test('an unconfirmed send that never shows up times out as sent=unknown, not sen
     });
   } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
 });
+
+// Live case (wz6, 2026-09-29 05:31Z, chat 6abb4dcf): ChatGPT stored the sent
+// prompt markdown-escaped -- "\###", "\`\`\`", "\_", leading spaces as
+// "&#x20;", bare URLs turned into [url](url) links. 91 of 273 archived audit
+// prompts were stored this way. It is our prompt; exact comparison refused it
+// as another ask's (prompt_mismatch) and the ask failed with sent=unknown.
+const SENT = [
+  `${HEAD}wizmap (pipeline).`,
+  '### FILE: wizmap_pipeline.py',
+  '```',
+  '#!/usr/bin/env python3',
+  '# Open: https://poloclub.github.io/wizmap/?dataURL=http://localhost:8080/data.ndjson&gridURL=http://localhost:8080/grid.json',
+  'def main():',
+  '    if __name__ == "__main__" and x < 3 * y:',
+  '        return {"a": [1, 2]}',
+  '```',
+].join('\n');
+const STORED = [
+  `${HEAD}wizmap (pipeline).`,
+  '\\### FILE: wizmap\\_pipeline.py',
+  '\\`\\`\\`',
+  '\\#!/usr/bin/env python3',
+  '\\# Open: [https://poloclub.github.io/wizmap/?dataURL=http://localhost:8080/data.ndjson&gridURL=http://localhost:8080/grid.json](https://poloclub.github.io/wizmap/?dataURL=http://localhost:8080/data.ndjson&gridURL=http://localhost:8080/grid.json)',
+  'def main():',
+  '&#x20;   if \\_\\_name\\_\\_ == "\\_\\_main\\_\\_" and x \\< 3 \\* y:',
+  '&#x20;       return {"a": \\[1, 2]}',
+  '\\`\\`\\`',
+].join('\n');
+
+test('a prompt ChatGPT stored markdown-escaped is still recognized as ours, and flagged', () => {
+  assert.equal(samePrompt(SENT, STORED), true);
+  const r = replyFromTree(tree([msg('u1', 'user', STORED), msg('a1', 'assistant', 'findings', finished)]), 0, { expected: SENT });
+  assert.equal(r.done, true);
+  assert.equal(r.reply, 'findings');
+  assert.equal(r.prompt_escaped, true);
+  const plain = replyFromTree(tree([msg('u1', 'user', SENT), msg('a1', 'assistant', 'findings', finished)]), 0, { expected: SENT });
+  assert.equal(plain.prompt_escaped, undefined);
+});
+
+test('escaping tolerance does not blur two different prompts', () => {
+  assert.equal(samePrompt(SENT, STORED.replace('wizmap (pipeline)', 'never-absolute (a library)')), false);
+  assert.equal(samePrompt(SENT, STORED.replace('x \\< 3', 'x \\> 3')), false);
+});
+
+test('real backslashes and entities in the prompt survive the comparison (regex, HTML-escape map)', () => {
+  // As sent: a shell regex and a JS escape map. As stored: ChatGPT escaped the
+  // backslashes and the autolinked URL's "&" but left "&#39;" alone.
+  const sent = `${HEAD}x.\ngit config --get-regexp '^submodule\\..*\\.path$'\nmap = {"'": "&#39;"}\nsee https://a.example/?p=1&q=2 now`;
+  const stored = `${HEAD}x.\ngit config --get-regexp '^submodule\\\\..\\*\\\\.path$'\nmap = {"'": "&#39;"}\nsee [https://a.example/?p=1&q=2](https://a.example/?p=1\\&q=2) now`;
+  assert.equal(samePrompt(sent, stored), true);
+  assert.equal(samePrompt(stored, sent), true);
+});

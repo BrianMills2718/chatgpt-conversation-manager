@@ -19,6 +19,8 @@
 // fetched fresh per call from /api/auth/session (same origin, same session
 // endpoint the page itself calls) — see getAccessToken() below.
 
+import { samePrompt } from "./send-confirm.js";
+
 export function looksLikeConversationTree(data) {
   return Boolean(data && typeof data === "object" && data.mapping && typeof data.mapping === "object" && typeof data.current_node === "string");
 }
@@ -191,6 +193,8 @@ export async function captureViaApi(threadId, { fetchImpl = fetch, accessToken }
 // `end_turn` is reported so the broker can accept the backend's own "this
 // turn is over" without spending a second read to confirm it.
 function normText(s) { return String(s ?? "").replace(/\s+/g, " ").trim(); }
+// Our turn, possibly as ChatGPT's markdown-escaped copy (send-confirm.js).
+function ourPrompt(text, expected) { return samePrompt(text, expected); }
 
 export function replyFromTree(data, beforeCount, { expected = null } = {}) {
   const node = data?.mapping?.[data?.current_node];
@@ -201,12 +205,14 @@ export function replyFromTree(data, beforeCount, { expected = null } = {}) {
   const messages = linearizeMapping(data);
   const want = normText(expected);
   let added;
+  let ourTurn = null;
   if (beforeCount == null) {
     let lastUser = -1;
     for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { lastUser = i; break; }
-    if (lastUser < 0 || (want && normText(messages[lastUser].text) !== want)) {
+    if (lastUser < 0 || (want && !ourPrompt(messages[lastUser].text, expected))) {
       return { done: false, role, status: lastUser < 0 ? status : "prompt_not_in_tree", message_count: messages.length };
     }
+    ourTurn = messages[lastUser];
     added = messages.slice(lastUser + 1);
   } else {
     added = messages.slice(beforeCount);
@@ -218,10 +224,11 @@ export function replyFromTree(data, beforeCount, { expected = null } = {}) {
     if (want) {
       const firstUser = added.find((m) => m.role === "user");
       if (!firstUser) return { done: false, role, status: "prompt_not_in_tree", message_count: messages.length };
-      if (normText(firstUser.text) !== want) {
+      if (!ourPrompt(firstUser.text, expected)) {
         return { done: false, role, status: "prompt_mismatch", message_count: messages.length,
                  found_prompt_head: normText(firstUser.text).slice(0, 200), found_prompt_chars: normText(firstUser.text).length };
       }
+      ourTurn = firstUser;
     }
   }
   const replies = added.filter((m) => m.role === "assistant");
@@ -229,9 +236,11 @@ export function replyFromTree(data, beforeCount, { expected = null } = {}) {
     return { done: false, role, status, message_count: messages.length };
   }
   const images = replies.flatMap((m) => (m.attachments || []).filter(isImageAttachment));
+  // ChatGPT stored (and so the model read) an escaped copy of the prompt.
+  const escaped = want && ourTurn && normText(ourTurn.text) !== want ? true : undefined;
   return { done: true, reply: replies.map((m) => m.text).join("\n\n"), message_count: messages.length,
            model: replies[replies.length - 1].model || null, end_turn: message?.end_turn === true,
-           images: images.length ? images : undefined };
+           images: images.length ? images : undefined, prompt_escaped: escaped };
 }
 
 // Exchanges an asset_pointer (file-service://file-XXXX or sediment://file_XXXX)

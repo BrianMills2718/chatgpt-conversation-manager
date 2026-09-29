@@ -43,9 +43,28 @@ export function sendEvidenceFromCounts(countNow, countBefore) {
 // 40-character prefix check let a new ask skip typing and click Send on the
 // previous ask's leftover text (28 of ~195 audit replies were another
 // prompt's answer).
+//
+// ChatGPT sometimes stores a prompt markdown-escaped: a backslash before
+// markdown punctuation ("\#", "\`", "\_", "\<", "\&"), leading spaces as
+// "&#x20;", and bare URLs as "[url](url)" links. 91 of 273 audit prompts,
+// 2026-09-26..29, in no pattern of tab, size or mode; after
+// unescapeChatgptPrompt all 91 equal the prompt file that was sent. So a turn
+// is ours if it equals the prompt either as stored or once unescaped. Only
+// the stored side is unescaped: the prompt itself may hold real backslashes
+// (a regex "\.") and entities ("&#39;") that must stay as they are.
+const MD_ESCAPE = /\\([!-\/:-@[-`{-~])/g;
+const unescapeMd = (t) => t.replace(MD_ESCAPE, "$1");
+export function unescapeChatgptPrompt(s) {
+  return String(s ?? "")
+    .replace(/(?<!\\)\[([^\]\s]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, text, url) => (unescapeMd(text) === unescapeMd(url) ? text : m))
+    .replace(/&#x(20|9);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(MD_ESCAPE, "$1");
+}
+
 export function samePrompt(a, b) {
-  const x = norm(a);
-  return x !== "" && x === norm(b);
+  const x = norm(a), y = norm(b);
+  if (x === "" || y === "") return false;
+  return x === y || norm(unescapeChatgptPrompt(a)) === y || x === norm(unescapeChatgptPrompt(b));
 }
 
 // First differing position after normalization, for error messages.
