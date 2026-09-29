@@ -520,7 +520,7 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: result?.tab?.slice(0, 8) ?? null, agent_tab: result?.agent ?? null, incognito: result?.incognito ?? null,
         api_checked: result?.api_checked ?? null, api_status: result?.api_status ?? null,
-        ...(command.action === 'send_prompt' ? { send_confirmed: result?.send_confirmed ?? null, confirmed_by: result?.confirmed_by ?? null, visibility: result?.visibility ?? null, plain_text_mode: result?.plain_text_mode ?? null } : {}),
+        ...(command.action === 'send_prompt' ? { send_confirmed: result?.send_confirmed ?? null, confirmed_by: result?.confirmed_by ?? null, visibility: result?.visibility ?? null, plain_text_mode: result?.plain_text_mode ?? null, typing_ms: result?.typing_ms ?? null, plain_mode_ms: result?.plain_mode_ms ?? null } : {}),
         in_flight: agentRequestsInFlight, ...recordAndCountWindow(Date.now()),
       });
     }
@@ -923,9 +923,16 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         // real thread id, the send happened; recover that identity and poll the
         // answer instead of falsely failing (and tempting callers to duplicate
         // the prompt). This recovery is intentionally new-thread-only.
-        if (conversationMode !== 'new' || !/Timed out waiting for the browser extension/i.test(err.message)) throw err;
-        const currentTab = await dispatchToExtension({ action: "get_tab" }, 5000, { tab });
-        if (!currentTab.thread_id) throw err;
+        const stalled = () => Object.assign(new Error(`The ChatGPT agent tab stopped responding while typing or sending this ${body.length}-character prompt (no answer from the tab in ${Math.round((sendTimeoutMs ?? promptDispatchTimeoutMs(timeout_seconds)) / 1000)}s; it may have frozen or reloaded). Whether the prompt reached ChatGPT is unknown: check list_chatgpt_chats${resolvedThreadId ? ` or read_chatgpt_chat("${resolvedThreadId}")` : ''} before resending.`), { sent_unknown: true, tab_stalled: true });
+        if (!/Timed out waiting for the browser extension/i.test(err.message)) throw err;
+        // The tab took the prompt but never answered. A new chat's first send
+        // can navigate the page and drop the answer (recovered below);
+        // otherwise the tab froze or reloaded while typing or sending
+        // (2026-09-29: large prompts froze it for 5 minutes). Say so, instead
+        // of a bare timeout.
+        if (conversationMode !== 'new') throw stalled();
+        const currentTab = await dispatchToExtension({ action: "get_tab" }, 5000, { tab }).catch(() => ({}));
+        if (!currentTab.thread_id) throw stalled();
         sent = { thread_id: currentTab.thread_id, dom_before: 0, messages_before: 0, recovered_after_navigation: true };
       }
       // The extension reports send_confirmed:false when Send was clicked but no
@@ -1006,7 +1013,12 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         const threadId = last.thread_id || sentThreadId || resolvedThreadId || null;
         noteAttributedThread(threadId);
         appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Date.now() - startedMs, outcome: 'success', account: usedAccount || null, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+        // The caller must know when the model did not get the prompt verbatim.
+        // Evidence, not the switch's own report: the stored turn is compared with
+        // the prompt (replyFromTree's prompt_escaped).
+        const verbatim = !last.prompt_escaped;
         return { thread_id: threadId, url: threadId ? `https://chatgpt.com/c/${threadId}` : null, reply: last.reply, images: last.images, account: usedAccount || null,
+          prompt_verbatim: verbatim, ...(sent.plain_text_mode !== true && sent.plain_text_mode != null ? { plain_text_mode_error: String(sent.plain_text_mode) } : {}),
           ...(last.prompt_escaped ? { prompt_escaped: true } : {}) };
       }
       throw new Error(askTimeoutMessage({ timeout_seconds, sendSeen, threadId: last?.thread_id || sent.thread_id || resolvedThreadId || null, last, sent }));
@@ -1196,7 +1208,7 @@ app.post('/api/undo', async (req, res) => {
 });
 
 function createMcpServer() {
-  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.2" });
+  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.3" });
 
   mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),
@@ -1210,7 +1222,10 @@ function createMcpServer() {
       const r = await askChatgpt({ text, thread_id: thread_id || null, thread_title: thread_title || null, timeout_seconds: timeout_seconds || 180, fresh_tab: Boolean(fresh_tab), account: account || null });
       // ChatGPT stored the prompt markdown-escaped (code fences as \`\`\`,
       // indentation as &#x20;), so the model read that form, not the raw text.
-      const escapedNote = r.prompt_escaped ? ' — note: ChatGPT stored this prompt markdown-escaped (code fences and indentation escaped), so the model read the escaped form' : '';
+      // Put a failed verbatim send in front of the caller, not only in the log.
+      const escapedNote = r.prompt_verbatim === false
+        ? ` — WARNING: this prompt did NOT reach ChatGPT verbatim${r.plain_text_mode_error ? ` (the bridge could not switch ChatGPT's composer to plain-text mode: ${r.plain_text_mode_error})` : ''}; ChatGPT stored it as escaped Markdown (\\#, \\\`, &#x20;), so the model read code and indentation mangled. The reply is still the answer to this prompt. See README "If prompts stop arriving verbatim".`
+        : r.plain_text_mode_error ? ` — note: the bridge could not switch ChatGPT's composer to plain-text mode (${r.plain_text_mode_error}); this prompt still arrived verbatim, but one containing a link would not. See README "If prompts stop arriving verbatim".` : '';
       const content = [{ type: 'text', text: `${r.reply}\n\n[conversation ${r.thread_id} — ${r.url}${r.account ? ` — account ${r.account}` : ''}${escapedNote}]` }];
       // Images ChatGPT generated or returned inline (see extension/lib/api-capture.js
       // resolveFileDownloadUrl and content.js resolveReplyImages) arrive already
