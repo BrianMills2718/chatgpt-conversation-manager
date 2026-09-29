@@ -82,3 +82,17 @@ export function samePrompt(a, b) {
 
 // First differing position after normalization, for error messages.
 export function promptHead(s, n = 80) { return norm(s).slice(0, n); }
+
+// Fail-closed gate before Send: `wouldSend` is ChatGPT's own getText() (what a
+// click would submit), or null when it could not be read. Returns null when
+// that is the prompt verbatim (trailing whitespace aside, which ChatGPT trims),
+// otherwise a diagnostic. Deliberately exact: no whitespace normalization, no
+// unescaping -- anything else would let an altered prompt through.
+export function verbatimMismatch(wouldSend, prompt, readError = null) {
+  if (wouldSend === null || wouldSend === undefined) return { reason: `could not read what ChatGPT would send: ${readError}` };
+  const got = String(wouldSend).trimEnd(), want = String(prompt).trimEnd();
+  if (got === want) return null;
+  let i = 0;
+  while (i < got.length && i < want.length && got[i] === want[i]) i++;
+  return { would_send_chars: got.length, prompt_chars: want.length, first_diff: i, would_send_at: got.slice(i, i + 60), prompt_at: want.slice(i, i + 60) };
+}

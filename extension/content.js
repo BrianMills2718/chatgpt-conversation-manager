@@ -7,7 +7,7 @@
 (async () => {
 const { cleanDocumentTitle, selectTitle, isSameOriginPageAnchor } = await import(chrome.runtime.getURL("lib/title.js"));
 const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getURL("lib/normalize.js"));
-const { sendEvidence, sendEvidenceFromCounts, samePrompt } = await import(chrome.runtime.getURL("lib/send-confirm.js"));
+const { sendEvidence, sendEvidenceFromCounts, samePrompt, verbatimMismatch } = await import(chrome.runtime.getURL("lib/send-confirm.js"));
 const { waitFor: waitForLib } = await import(chrome.runtime.getURL("lib/wait-for.js"));
 const { pingBackground } = await import(chrome.runtime.getURL("lib/background-ping.js"));
 const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, parseRemoteTime, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats, nextReplyCheckGapMs, REPLY_CHECK_MIN_GAP_MS } = await import(chrome.runtime.getURL("lib/api-capture.js"));
@@ -814,39 +814,38 @@ async function sendPrompt(text, excludeThreads = []) {
   for (let attempt = 1; attempt <= 2 && !typedOk; attempt++) {
     if (attempt > 1) await sleep(1000);
     plainMode = await composerMainWorldRequest({ op: "fill", text: body, plain: true, marker });
-    typedOk = Boolean(plainMode?.ok) && samePrompt(composerText(), body);
-    if (!typedOk) fillDetail = plainMode?.ok ? { attempt, ...describeMismatch() } : { attempt, reason: plainMode?.reason };
+    // Judged by what ChatGPT itself would submit, not by reading the DOM (on
+    // cm3 the DOM read said 0 characters while something else was sent).
+    const check = plainMode?.ok ? await composerMainWorldRequest({ op: "gettext", marker }) : null;
+    const mismatch = plainMode?.ok ? verbatimMismatch(check?.ok ? check.text : null, body, check?.reason) : null;
+    typedOk = Boolean(plainMode?.ok) && !mismatch;
+    if (!typedOk) fillDetail = plainMode?.ok ? { attempt, would_send: mismatch, dom: describeMismatch(), fill: plainMode } : { attempt, reason: plainMode?.reason };
   }
+  // No typed fallback. Typing was slow (minutes for large prompts) and, on
+  // cm3 2026-09-29, sent a truncated prompt wrapped in a code fence. If the
+  // one-step fill fails, nothing is sent and the caller is told why.
+  const typingMs = Date.now() - typingStarted;
   if (!typedOk) {
-    // Typing is the fallback. It is slow for large prompts, and its result is
-    // NOT switched to plain-text mode: switching after typing made ChatGPT
-    // send the whole prompt wrapped in a ```` code fence (ats4, 2026-09-29).
-    // So this prompt goes out as ChatGPT's Markdown -- escaped if it has
-    // links -- and the reply says prompt_verbatim:false.
-    await log("warn", `one-transaction fill failed (${JSON.stringify(fillDetail)}); typing instead`);
-    fillMode = "typed";
-    await requestPlainTextMode(false);
-    typedOk = await waitFor(() => {
-      el = findFirst(COMPOSER_SELECTORS, visible)?.el || el;
-      if (samePrompt(composerText(), body)) return true;
-      setComposerText(el, body);
-      return samePrompt(composerText(), body) ? true : null;
-    }, 8000, 400).catch(() => false);
-    plainMode = { ok: false, reason: `fill failed, typed instead: ${JSON.stringify(fillDetail)}` };
-  }
-  if (!typedOk) {
-    const heldChars = composerText().length;
     clearComposer(el);
     throw Object.assign(
-      new Error(`the composer did not end up holding exactly this prompt after retrying for 8s (it held ${heldChars} characters, the prompt has ${body.length}); the composer was cleared and nothing was sent.`),
-      { reply: { stage: "not_typed", nothing_sent: true, page_id: PAGE_ID } },
+      new Error(`could not put the prompt into ChatGPT's composer (${JSON.stringify(fillDetail)}); the composer was cleared and nothing was sent.`),
+      { reply: { stage: "fill_failed", nothing_sent: true, page_id: PAGE_ID, fill_detail: fillDetail } },
     );
   }
-  const typingMs = Date.now() - typingStarted;
-  // Not fatal if plain-text mode is unavailable -- the send goes ahead and the
-  // model reads the escaped form -- but the result says so (plain_text_mode),
-  // and the broker tells the caller.
-  if (!plainMode?.ok) await log("warn", `could not switch the composer to plain-text mode: ${plainMode?.reason}`);
+  // FAIL CLOSED: Send is clicked only if the exact text ChatGPT will submit
+  // (its own getText(), read from the page) is the prompt, verbatim apart
+  // from trailing whitespace. A partial or altered prompt reaching ChatGPT
+  // costs quota and returns an answer to the wrong question -- worse than any
+  // error (cm3, 2026-09-29: ~240 of 58,204 characters were sent).
+  const submit = await composerMainWorldRequest({ op: "gettext", marker });
+  const verify = verbatimMismatch(submit?.ok ? submit.text : null, body, submit?.reason);
+  if (verify) {
+    clearComposer(el);
+    throw Object.assign(
+      new Error(`refusing to click Send: ChatGPT would not send this prompt verbatim (${JSON.stringify(verify)}); the composer was cleared and nothing was sent.`),
+      { reply: { stage: "not_verbatim", nothing_sent: true, page_id: PAGE_ID, verify } },
+    );
+  }
   const button = await waitFor(() => findFirst(SEND_BUTTON_SELECTORS, (b) => visible(b) && !b.disabled), 8000)
     .catch(() => null);
   if (!button) {

@@ -70,6 +70,10 @@ function composerMainWorld(req) {
     view.dispatch(view.state.tr.replaceWith(0, view.state.doc.content.size, paragraphs));
     return { ok: true, fill_ms: Math.round(performance.now() - t0), plain_text_mode: controller.plainTextMode === Boolean(req.plain), paragraphs: paragraphs.length };
   }
+  if (req.op === "gettext") {
+    // Exactly what ChatGPT will submit when Send is clicked (its own getText).
+    return { ok: true, text: controller.getText(), plain_text_mode: Boolean(controller.plainTextMode), editor_connected: Boolean(controller.view?.dom?.isConnected) };
+  }
   return { ok: false, reason: `unknown op ${req.op}` };
 }
 
