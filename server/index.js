@@ -1086,9 +1086,11 @@ app.post('/api/debug/type-timing', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   let tab = null;
   try {
-    const seen = []; const found = await findIdleAgentTab(seen);
+    const wanted = req.body?.tab ? [...extensionSockets].find((ws) => ws.tabToken?.startsWith(req.body.tab) && ws.readyState === ws.OPEN) : null;
+    const seen = []; const found = wanted ? { tab: wanted.tabToken } : await findIdleAgentTab(seen);
     if (!found) throw new Error(`no idle agent tab (${JSON.stringify(seen)})`);
     tab = found.tab;
+    if (wanted) { if (claimedTabs.has(tab)) throw new Error('tab busy'); claimedTabs.add(tab); }
     res.json(await dispatchToExtension({ action: 'debug_type_timing', text: req.body?.text, plain: req.body?.plain, fill: req.body?.fill }, 180000, { tab }));
   } catch (err) { res.status(503).json({ error: err.message }); }
   finally { if (tab) claimedTabs.delete(tab); }
