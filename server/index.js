@@ -520,7 +520,7 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: result?.tab?.slice(0, 8) ?? null, agent_tab: result?.agent ?? null, incognito: result?.incognito ?? null,
         api_checked: result?.api_checked ?? null, api_status: result?.api_status ?? null,
-        ...(command.action === 'send_prompt' ? { send_confirmed: result?.send_confirmed ?? null, confirmed_by: result?.confirmed_by ?? null, visibility: result?.visibility ?? null } : {}),
+        ...(command.action === 'send_prompt' ? { send_confirmed: result?.send_confirmed ?? null, confirmed_by: result?.confirmed_by ?? null, visibility: result?.visibility ?? null, plain_text_mode: result?.plain_text_mode ?? null } : {}),
         in_flight: agentRequestsInFlight, ...recordAndCountWindow(Date.now()),
       });
     }

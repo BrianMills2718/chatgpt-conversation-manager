@@ -758,6 +758,13 @@ async function sendPrompt(text, excludeThreads = []) {
         { reply: { stage: "no_composer", nothing_sent: true, page_id: PAGE_ID, visible_error: banner } },
       );
     });
+  // Before typing: put this tab's composer in ChatGPT's plain-text mode, so
+  // the prompt is sent verbatim. Otherwise a link or other formatting in it
+  // makes ChatGPT send the whole draft as escaped Markdown (lib/plain-text-mode.js).
+  // Not fatal if it fails -- the send still works, the model just reads the
+  // escaped form -- but the result says so (plain_text_mode).
+  const plainMode = await requestPlainTextMode(true);
+  if (!plainMode?.ok) await log("warn", `could not switch the composer to plain-text mode: ${plainMode?.reason}`);
   const threadBefore = realThreadId();
   // Counted on the page, not through the conversation API: that endpoint is
   // rate-limited for the whole account (HTTP 429) whenever archiving has run.
@@ -862,6 +869,7 @@ async function sendPrompt(text, excludeThreads = []) {
   const threadId = threadBefore || serverThreadId || (confirmedBy ? await waitFor(() => realThreadId(), 60000, 250).catch(() => null) : realThreadId());
   return { thread_id: threadId, dom_before: domBefore, messages_before: messagesBefore,
            send_confirmed: Boolean(confirmedBy), confirmed_by: confirmedBy,
+           plain_text_mode: plainMode?.ok ? true : (plainMode?.reason || "failed"),
            server_check_error: serverCheckError,
            visibility: document.visibilityState, has_focus: document.hasFocus(),
            composer_selector: composer.selector, send_selector: button.selector };
