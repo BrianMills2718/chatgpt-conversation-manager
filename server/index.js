@@ -766,6 +766,15 @@ async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = nul
 
 // Every socket the broker has held for this tab since `reference`, with when
 // it connected (ms after reference; negative = before) and its state.
+// The reconnect is read when the wait ends: a get_tab can itself wait for the
+// reconnecting page (waitForTargetTab), so a poll-time check misses it.
+function finishNavDiag(diag, tab, reference) {
+  diag.sockets = tabSocketsDiag(tab, reference);
+  const after = diag.sockets.filter((x) => x.state === 1 && x.connected_ms > 0).map((x) => x.connected_ms);
+  if (diag.reconnected_after_ms === null && after.length) diag.reconnected_after_ms = Math.max(...after);
+  return diag;
+}
+
 function tabSocketsDiag(tab, reference) {
   return [...extensionSockets].filter((w) => w.tabToken === tab)
     .map((w) => ({ connected_ms: Math.round((w.connectedAtMono ?? NaN) - reference), state: w.readyState }));
@@ -786,12 +795,12 @@ async function waitForTab(tab, predicate, timeoutMs, what, { onPoll = null, sinc
     try {
       const info = await dispatchToExtension({ action: "get_tab" }, 3000, { tab });
       diag.last_thread_id = info.thread_id ?? null; diag.last_page_id = info.page_id ?? null; diag.last_error = null;
-      if (predicate(info)) return { info, diag: { ...diag, elapsed_ms: Math.round(monoNow() - startedAt), sockets: tabSocketsDiag(tab, reference) } };
+      if (predicate(info)) return { info, diag: finishNavDiag({ ...diag, elapsed_ms: Math.round(monoNow() - startedAt) }, tab, reference) };
     } catch (err) { diag.last_error = err.message; /* reconnecting after navigation */ }
     if (onPoll) await onPoll(diag, monoNow() - startedAt);
   }
   diag.elapsed_ms = Math.round(monoNow() - startedAt);
-  diag.sockets = tabSocketsDiag(tab, reference);
+  finishNavDiag(diag, tab, reference);
   const where = diag.last_thread_id === undefined ? 'never answered' : `still showed ${diag.last_thread_id ? `conversation ${diag.last_thread_id}` : 'no conversation'}`;
   const reload = diag.reconnected_after_ms === null ? 'no page reload was seen' : `it reconnected after ${diag.reconnected_after_ms}ms`;
   const seen = `the tab ${where} (${reload}; ${diag.polls} checks${diag.last_error ? `; last error: ${diag.last_error}` : ''})`;
