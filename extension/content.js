@@ -891,6 +891,14 @@ async function retrySendClick(expected, threadBefore, messagesBefore, excludeThr
   return { clicked: true, visibility: document.visibilityState };
 }
 
+// Ask the background worker to switch this tab's composer to ChatGPT's own
+// plain-text mode, so the prompt is sent verbatim rather than serialized as
+// escaped Markdown (lib/plain-text-mode.js explains why).
+async function requestPlainTextMode(on = true) {
+  try { return await chrome.runtime.sendMessage({ type: "ccm-plain-text-mode", on }); }
+  catch (err) { return { ok: false, reason: String(err?.message || err) }; }
+}
+
 function setComposerText(el, text) {
   el.focus();
   if (el.tagName === "TEXTAREA") {
@@ -1270,6 +1278,7 @@ async function handleCommand(msg) {
     location.href = "https://chatgpt.com/";
     return { navigated: true };
   }
+  if (msg.action === "debug_plain_text_mode") return requestPlainTextMode(msg.on !== false);
   if (msg.action === "debug_storage_keys") {
     // Temporary (2026-09-29): list this origin's localStorage/sessionStorage
     // keys matching a pattern, with short values. Read-only.

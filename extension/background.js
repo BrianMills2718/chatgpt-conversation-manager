@@ -82,6 +82,22 @@ ensureAlarm().catch((err) => console.warn(`[ccm] could not create the update ala
 chrome.runtime.onInstalled.addListener(() => { injectIntoOpenTabs(); runCheck("installed"); });
 chrome.runtime.onStartup.addListener(() => { runCheck("startup"); });
 chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === ALARM) runCheck("alarm"); });
+// A failure here must not stop the worker: it also keeps the extension
+// updating itself (see the top of this file).
+try { importScripts("lib/plain-text-mode.js"); } catch (err) { console.warn(`[ccm] plain-text-mode helper not loaded: ${err.message}`); }
+
+// A content script cannot reach the page's own JavaScript objects (it runs in
+// an isolated world), so the plain-text switch runs in the page's main world
+// from here, only for the tab that asked (lib/plain-text-mode.js).
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type !== "ccm-plain-text-mode" || !sender.tab?.id) return;
+  Promise.resolve()
+    .then(() => chrome.scripting.executeScript({ target: { tabId: sender.tab.id, frameIds: [sender.frameId ?? 0] }, world: "MAIN", func: self.setComposerPlainTextMode, args: [msg.on !== false] }))
+    .then((results) => sendResponse(results?.[0]?.result ?? { ok: false, reason: "no result from the page" }))
+    .catch((err) => sendResponse({ ok: false, reason: String(err?.message || err) }));
+  return true;
+});
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type !== "ccm-update-check") return;
   // Answer before checking: a reload would end this worker before a later reply.
