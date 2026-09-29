@@ -1284,6 +1284,19 @@ async function handleCommand(msg) {
     const markSamples = [...el.querySelectorAll("a, code, pre, strong, em, h1, h2, h3, li")].slice(0, 8).map((n) => `${n.tagName}:${(n.textContent || "").slice(0, 40)}`);
     const out = { tag: el.tagName, cls: String(el.className).slice(0, 120), selector: c.selector, counts, markSamples,
       same_text: samePrompt(el.value ?? el.innerText ?? "", msg.text), html_head: el.innerHTML.slice(0, Number(msg.html_chars) || 800) };
+    // What ChatGPT's editor serializes the content to: a synthetic copy event
+    // with our own DataTransfer, which ProseMirror fills from its serializers.
+    try {
+      el.focus();
+      document.execCommand("selectAll", false, null);
+      const dt = new DataTransfer();
+      el.dispatchEvent(new ClipboardEvent("copy", { clipboardData: dt, bubbles: true, cancelable: true }));
+      out.copy_types = [...dt.types];
+      const plain = dt.getData("text/plain");
+      out.copy_plain_head = plain.slice(0, Number(msg.html_chars) || 800);
+      out.copy_plain_equals_text = plain === String(msg.text || "");
+      out.copy_plain_escaped = /\\[#`_*<]|&#x20;/.test(plain);
+    } catch (err) { out.copy_error = err.message; }
     if (!msg.keep) setComposerText(el, "");
     return out;
   }
