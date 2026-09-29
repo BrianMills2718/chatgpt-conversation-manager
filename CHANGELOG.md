@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.9.16 (2026-09-29), extension 0.9.12
+
+### One rule for "this tab is gone": set it aside and move the ask; agent tabs exempt from discarding; lifecycle evidence
+
+- **What happened.** kw3 (14:37Z, tab `9bbe1e65`) navigated to its conversation, found no composer in a hidden page that had rendered 0 messages, reloaded the tab once, and the tab never came back. The ask failed `sent=no` while another agent tab (`82e7de0a`) was alive: v0.9.14 moved asks to another tab only after a failed *navigation*, not after a failed reload. sbl3 (14:39Z, tab `36f8bb42`) failed its fill with "no composer editor on the page". gw3, also a continuation, went through fine in between, so this was intermittent, not a regression from v0.9.15.
+- **Class fix.** Every path that ends with a tab that never answers, or never comes back from a page load or reload, is marked `tab_dead`. One rule, `tabGone`, decides whether to move on: the tab is dead AND nothing was typed or dispatched to it. The whole stretch from claiming a tab to handing it the prompt (navigation, send, composer recovery, reload) runs per tab. A gone tab is set aside and the ask starts again on another idle or freshly opened agent tab: at most 3 tabs, one ask per tab. If no other tab becomes available, the ask fails with the original reason plus "No other agent tab became available". A tab that stalls *after* taking the prompt is never abandoned, because it may have sent (`sent=unknown`).
+- **Tests.** One per path: dead after navigation, dead after the no-composer reload, and the negative case of a stall after taking the prompt.
+- **Why background agent tabs die (evidence gathering, plus one mitigation).** A hidden page that loads with 0 messages and no composer, then never reconnects, fits Chrome discarding or freezing background tabs (Memory Saver, and freezing under Energy Saver).
+  - **Mitigation.** Each agent tab now asks the extension's background worker to mark it `autoDiscardable: false`, which exempts it from Memory Saver discarding.
+  - **Evidence.** Each page records `document.wasDiscarded`, and counts Chrome `freeze`/`resume` events. These are reported in `get_tab` and on no-composer and fill failures, and logged in `request-timing.jsonl` (`lifecycle`, `stage`, `fill_detail`).
+  - **Not proven.** Whether discarding or freezing is the cause. Chrome offers extensions no switch to stop freezing. The next failure's `lifecycle` shows which it is.
+- **What ChatGPT says when it rate-limits** (first `api_limit_detail`, 14:41:33Z, a reply check): HTTP 429, body `{"detail":"Too many requests"}`, no `Retry-After` and no `x-ratelimit-*` headers, only `cf-ray`. ChatGPT does not advertise its limits. They can only be inferred from observed refusals, which is why the pacer learns from 429s rather than from advertised values.
+- `duration_ms` in `request-timing.jsonl` is rounded again.
+
 ## v0.9.15 (2026-09-29), extension 0.9.11
 
 ### Continuations no longer read the whole conversation before sending; rate-limit evidence is recorded

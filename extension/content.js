@@ -762,7 +762,7 @@ async function sendPrompt(text, excludeThreads = [], messagesBeforeHint = null) 
         + `checked ${waitErr.checks ?? "?"} times over ${Math.round((waitErr.waited_ms ?? 0) / 1000)}s`;
       throw Object.assign(
         new Error(`no ChatGPT composer found (tried ${COMPOSER_SELECTORS.join(", ")}) within 15s (${page}); nothing was typed or sent.`),
-        { reply: { stage: "no_composer", nothing_sent: true, page_id: PAGE_ID, visible_error: banner } },
+        { reply: { stage: "no_composer", nothing_sent: true, page_id: PAGE_ID, visible_error: banner, lifecycle } },
       );
     });
   const threadBefore = realThreadId();
@@ -830,7 +830,7 @@ async function sendPrompt(text, excludeThreads = [], messagesBeforeHint = null) 
     clearComposer(el);
     throw Object.assign(
       new Error(`could not put the prompt into ChatGPT's composer (${JSON.stringify(fillDetail)}); the composer was cleared and nothing was sent.`),
-      { reply: { stage: "fill_failed", nothing_sent: true, page_id: PAGE_ID, fill_detail: fillDetail } },
+      { reply: { stage: "fill_failed", nothing_sent: true, page_id: PAGE_ID, fill_detail: fillDetail, lifecycle, page_age_s: Math.round((Date.now() - PAGE_STARTED_AT) / 1000), visibility: document.visibilityState } },
     );
   }
   // FAIL CLOSED: Send is clicked only if the exact text ChatGPT will submit
@@ -1289,7 +1289,7 @@ async function handleCommand(msg) {
     const page = await listConversationsPage({ offset: 0, limit });
     return { chats: page.items.map((c) => ({ id: c.id, title: c.title || "", update_time: c.update_time ?? null })), total: page.total ?? null };
   }
-  if (msg.action === "get_tab") return { tab: TAB_TOKEN, page_id: PAGE_ID, agent: AGENT_TAB, busy: bulkArchiving, thread_id: currentThreadId(), account: tabIdentity };
+  if (msg.action === "get_tab") return { tab: TAB_TOKEN, page_id: PAGE_ID, agent: AGENT_TAB, busy: bulkArchiving, thread_id: currentThreadId(), account: tabIdentity, lifecycle, page_age_s: Math.round((Date.now() - PAGE_STARTED_AT) / 1000), visibility: document.visibilityState };
   if (msg.action === "list_project_chats") {
     const perProject = Math.min(Math.max(Number(msg.per_project) || 20, 1), 100);
     return { projects: await listProjectChats({ perProject }) };
@@ -1449,6 +1449,22 @@ async function reportIdentity() {
 // Wakes the background worker so it checks for a new extension version now
 // (not only on its minute alarm), and tells the broker whether it answered:
 // without a worker the extension cannot reload itself, and nothing else notices.
+// Page-lifecycle evidence for agent tabs, which run in the background: was
+// this page reloaded after Chrome discarded it, and how often has Chrome
+// frozen it. Reported with get_tab and with send failures, so a tab that
+// loads with no composer can be told apart from a frozen or discarded one.
+const lifecycle = { was_discarded: Boolean(document.wasDiscarded), freezes: 0, last_freeze_at: null, last_resume_at: null, keepalive: null };
+document.addEventListener("freeze", () => { lifecycle.freezes++; lifecycle.last_freeze_at = new Date().toISOString(); });
+document.addEventListener("resume", () => { lifecycle.last_resume_at = new Date().toISOString(); });
+
+// Agent tabs are asked to be exempt from Chrome's automatic tab discarding
+// (Memory Saver), which unloads long-idle background tabs.
+async function keepAgentTabAlive() {
+  if (!AGENT_TAB) return;
+  try { lifecycle.keepalive = await chrome.runtime.sendMessage({ type: "ccm-agent-tab-keepalive" }); }
+  catch (err) { lifecycle.keepalive = { ok: false, reason: String(err?.message || err) }; }
+}
+
 async function reportBackground() {
   const status = await pingBackground((msg) => chrome.runtime.sendMessage(msg));
   if (!status.ok && handlePossibleContextInvalidation(status.error)) return;
@@ -1485,6 +1501,7 @@ async function connect() {
     scheduleArchive();
     reportIdentity();
     reportBackground();
+    keepAgentTabAlive();
   };
   socket.onmessage = async (event) => {
     let msg;

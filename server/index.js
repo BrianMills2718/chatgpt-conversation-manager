@@ -407,7 +407,7 @@ function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { singl
   }
   if (tab) {
     sockets = sockets.filter((ws) => ws.tabToken === tab);
-    if (!sockets.length) throw refuse(`ChatGPT tab ${tab.slice(0, 8)} is not connected (closed, or still reloading).`);
+    if (!sockets.length) throw Object.assign(refuse(`ChatGPT tab ${tab.slice(0, 8)} is not connected (closed, or still reloading).`), { tab_dead: true });
   } else {
     // Untargeted commands ("current chat", bulk archive) belong to Brian's own
     // tabs; the agent tab gets them only when it is the only tab open.
@@ -442,7 +442,7 @@ function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { singl
           // send_prompt's pre-typing failures (content.js sendPrompt): which
           // step failed, that nothing was typed, which page instance it was,
           // and whether ChatGPT's rate-limit banner was showing.
-          stage: msg.stage, nothing_sent: msg.nothing_sent, page_id: msg.page_id, visible_error: msg.visible_error,
+          stage: msg.stage, nothing_sent: msg.nothing_sent, page_id: msg.page_id, visible_error: msg.visible_error, lifecycle: msg.lifecycle, fill_detail: msg.fill_detail,
         });
         remaining--;
         if (remaining <= 0) {
@@ -524,7 +524,7 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
       if (rateLimited) applyRateLimit(retryAfterMsOf(null, result), pacerKey); else entry.pacer.onSuccess();
       saveAgentPacerState();
       appendRequestTiming({
-        action: command.action, ok: true, duration_ms: monoNow() - startedMs, rate_limited: rateLimited, spacing_ms: entry.pacer.spacingMs,
+        action: command.action, ok: true, duration_ms: Math.round(monoNow() - startedMs), rate_limited: rateLimited, spacing_ms: entry.pacer.spacingMs,
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: result?.tab?.slice(0, 8) ?? null, agent_tab: result?.agent ?? null, incognito: result?.incognito ?? null,
         api_checked: result?.api_checked ?? null, api_status: result?.api_status ?? null, ...(result?.api_limit_detail ? { api_limit_detail: result.api_limit_detail } : {}),
@@ -540,10 +540,10 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
       const rateLimited = isRateLimitSignal(err, null);
       if (rateLimited) { applyRateLimit(retryAfterMsOf(err, null), pacerKey); saveAgentPacerState(); }
       appendRequestTiming({
-        action: command.action, ok: false, duration_ms: monoNow() - startedMs, rate_limited: rateLimited, error: err.message, spacing_ms: entry.pacer.spacingMs,
+        action: command.action, ok: false, duration_ms: Math.round(monoNow() - startedMs), rate_limited: rateLimited, error: err.message, spacing_ms: entry.pacer.spacingMs,
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: err?.tab?.slice(0, 8) ?? null, agent_tab: err?.agent ?? null, incognito: err?.incognito ?? null,
-        api_status: err?.api_status ?? null, ...(err?.api_limit_detail ? { api_limit_detail: err.api_limit_detail } : {}), in_flight: agentRequestsInFlight, ...recordAndCountWindow(monoNow()),
+        api_status: err?.api_status ?? null, ...(err?.api_limit_detail ? { api_limit_detail: err.api_limit_detail } : {}), ...(err?.stage ? { stage: err.stage } : {}), ...(err?.lifecycle ? { lifecycle: err.lifecycle } : {}), ...(err?.fill_detail ? { fill_detail: err.fill_detail } : {}), in_flight: agentRequestsInFlight, ...recordAndCountWindow(monoNow()),
       });
     }
     throw err;
@@ -827,6 +827,13 @@ async function waitForTab(tab, predicate, timeoutMs, what, { onPoll = null, sinc
 // navigation (request-timing.jsonl action "navigate") with its timings on the
 // steady clock.
 const NAV_WAIT_MS = Number(process.env.NAV_WAIT_MS || 60000);
+// One rule for every path that ends with "this tab is gone": it never answered
+// or never came back from a page load/reload, AND nothing was typed or even
+// dispatched to it. Such an ask moves to another tab (askChatgpt); anything
+// that may have reached ChatGPT never does.
+function tabGone(err) {
+  return err?.tab_dead === true && (err.nothing_sent === true || err.not_dispatched === true) && err.sent_unknown !== true;
+}
 const NAV_DEAD_MS = Number(process.env.NAV_DEAD_MS || 20000);
 async function navigateAndWait(tab, { threadId = null, account = null }) {
   const command = threadId ? { action: "navigate_to_thread", thread_id: threadId } : { action: "navigate_home" };
@@ -948,37 +955,11 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       // the ask moves to another idle agent tab, or opens a fresh one: at most
       // three tabs, one ask per tab (claimedTabs), nothing sent meanwhile.
       let tab = null;
-      const tabsGivenUp = [];
-      for (let attempt = 1; ; attempt++) {
-        const picked = await pickIdleTab({ openWaitMs, forceNew: fresh_tab, account: requestedAccount });
-        tab = picked.tab;
-        claimedTab = tab;
-        const current = picked.thread_id;
-        // Pace and log under the account the tab is actually signed into, even
-        // when the caller named none (issue #28: every audit send was logged
-        // account:null and shared the default pacer bucket).
-        account = requestedAccount || picked.account || await accountOfTab(tab);
-        usedAccount = account;
-        // Loading a conversation page makes ChatGPT fetch that conversation --
-        // a real request on the account -- so the pacer's gap is waited out
-        // BEFORE navigating, not between the page load and the send. Both
-        // 2026-09-27 "no composer" failures navigated 10-13s after an HTTP 429
-        // and then sat ~2 min in the pacer on a page that never showed a
-        // composer. The send below then needs no second wait.
-        if (current !== resolvedThreadId) await waitForPacerGap(account);
-        try {
-          if (resolvedThreadId && current !== resolvedThreadId) await navigateAndWait(tab, { threadId: resolvedThreadId, account });
-          else if (!resolvedThreadId && current) await navigateAndWait(tab, { account });
-          break;
-        } catch (err) {
-          if (!err.tab_dead || attempt >= 3) throw err;
-          setTabAside(tab);
-          tabsGivenUp.push(tab.slice(0, 8));
-          appendRequestTiming({ action: 'tab_set_aside', tab: tab.slice(0, 8), reason: err.message.slice(0, 200) });
-          claimedTabs.delete(tab);
-          claimedTab = null;
-        }
-      }
+      // Everything from claiming a tab to the prompt being handed to it. If the
+      // tab turns out to be gone (it never answers, or never comes back from a
+      // page load or reload) before anything was typed, the ask sets it aside
+      // and starts over on another tab: see tabGone below.
+      const sendOnTab = async () => {
       const sendPrompt = () => dispatchToExtension(
         { action: "send_prompt", text: body, exclude_threads: [...attributedThreads], messages_before_hint: resolvedThreadId ? (threadMessageCounts.get(resolvedThreadId) ?? null) : null },
         sendTimeoutMs ?? promptDispatchTimeoutMs(timeout_seconds),
@@ -1017,7 +998,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
             // socket. The new page instance reporting in is the real signal.
             dispatchToExtension({ action: "reload_tab" }, 5000, { tab }).catch(() => {});
             await waitForTab(tab, (i) => Boolean(i.page_id) && i.page_id !== err.page_id && onTargetPage(i), 20000, "reloaded the conversation page")
-              .catch((reloadErr) => { throw Object.assign(new Error(`${err.message} Reloading the tab to recover failed: ${reloadErr.message} ${nothingSent}`), { nothing_sent: true }); });
+              .catch((reloadErr) => { throw Object.assign(new Error(`${err.message} Reloading the tab to recover failed: ${reloadErr.message} ${nothingSent}`), { nothing_sent: true, tab_dead: reloadErr.navigation_diag?.last_thread_id === undefined }); });
           }
           try {
             sent = await sendPrompt();
@@ -1047,6 +1028,50 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         const currentTab = await dispatchToExtension({ action: "get_tab" }, 5000, { tab }).catch(() => ({}));
         if (!currentTab.thread_id) throw stalled();
         sent = { thread_id: currentTab.thread_id, dom_before: 0, messages_before: 0, recovered_after_navigation: true };
+      }
+        return sent;
+      };
+      let sent;
+      const tabsGivenUp = [];
+      let lastGoneErr = null;
+      for (let attempt = 1; ; attempt++) {
+        let picked;
+        try {
+          picked = await pickIdleTab({ openWaitMs, forceNew: fresh_tab, account: requestedAccount });
+        } catch (pickErr) {
+          // No other tab to move to: report why the previous one was given up.
+          if (!lastGoneErr) throw pickErr;
+          throw Object.assign(lastGoneErr, { message: `${lastGoneErr.message} No other agent tab became available (${pickErr.message})` });
+        }
+        tab = picked.tab;
+        claimedTab = tab;
+        const current = picked.thread_id;
+        // Pace and log under the account the tab is actually signed into, even
+        // when the caller named none (issue #28: every audit send was logged
+        // account:null and shared the default pacer bucket).
+        account = requestedAccount || picked.account || await accountOfTab(tab);
+        usedAccount = account;
+        // Loading a conversation page makes ChatGPT fetch that conversation --
+        // a real request on the account -- so the pacer's gap is waited out
+        // BEFORE navigating, not between the page load and the send. Both
+        // 2026-09-27 "no composer" failures navigated 10-13s after an HTTP 429
+        // and then sat ~2 min in the pacer on a page that never showed a
+        // composer. The send below then needs no second wait.
+        if (current !== resolvedThreadId) await waitForPacerGap(account);
+        try {
+          if (resolvedThreadId && current !== resolvedThreadId) await navigateAndWait(tab, { threadId: resolvedThreadId, account });
+          else if (!resolvedThreadId && current) await navigateAndWait(tab, { account });
+          sent = await sendOnTab();
+          break;
+        } catch (err) {
+          if (!tabGone(err) || attempt >= 3) throw err;
+          lastGoneErr = err;
+          setTabAside(tab);
+          tabsGivenUp.push(tab.slice(0, 8));
+          appendRequestTiming({ action: 'tab_set_aside', tab: tab.slice(0, 8), reason: err.message.slice(0, 200) });
+          claimedTabs.delete(tab);
+          claimedTab = null;
+        }
       }
       // The extension reports send_confirmed:false when Send was clicked but no
       // consequence was observable yet (typically a hidden tab: see
@@ -1126,7 +1151,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         const threadId = last.thread_id || sentThreadId || resolvedThreadId || null;
         noteAttributedThread(threadId);
         if (threadId && Number.isInteger(last.message_count) && last.source === 'api') threadMessageCounts.set(threadId, last.message_count);
-        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: monoNow() - startedMs, outcome: 'success', account: usedAccount || null, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'success', account: usedAccount || null, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
         // The caller must know when the model did not get the prompt verbatim.
         // Evidence, not the switch's own report: the stored turn is compared with
         // the prompt (replyFromTree's prompt_escaped).
@@ -1143,7 +1168,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       err.sent = err.sent_unknown ? null : (err.nothing_sent || !sendDispatched) ? false : sendSeen ? true : null;
       err.thread_id = last?.thread_id || sentThreadId || resolvedThreadId || null;
       err.account = usedAccount || null;
-      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: monoNow() - startedMs, outcome: 'failed', account: usedAccount || null, sent: err.sent, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'failed', account: usedAccount || null, sent: err.sent, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
       throw err;
     } finally {
       if (claimedTab) claimedTabs.delete(claimedTab);
@@ -1322,7 +1347,7 @@ app.post('/api/undo', async (req, res) => {
 });
 
 function createMcpServer() {
-  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.15" });
+  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.16" });
 
   mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),

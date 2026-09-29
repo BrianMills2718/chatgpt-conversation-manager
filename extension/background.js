@@ -99,6 +99,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true;
 });
 
+// Exempt the asking agent tab from automatic discarding (Memory Saver).
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type !== "ccm-agent-tab-keepalive" || !sender.tab?.id) return;
+  chrome.tabs.update(sender.tab.id, { autoDiscardable: false })
+    .then((t) => sendResponse({ ok: true, auto_discardable: t?.autoDiscardable ?? null, discarded: t?.discarded ?? null, frozen: t?.frozen ?? null }))
+    .catch((err) => sendResponse({ ok: false, reason: String(err?.message || err) }));
+  return true;
+});
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type !== "ccm-update-check") return;
   // Answer before checking: a reload would end this worker before a later reply.
