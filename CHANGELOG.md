@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.8.3 (2026-09-29)
+
+### Fixed: false "Refusing to return a reply" on markdown-escaped prompts, and asks failing while the agent tab reloads
+
+Root-caused and built by the audit-owner agent (branch `fix/tab-reconnect-wait`), then reviewed and landed by the bridge owner.
+
+- **False refusal.** v0.8.0's attribution check compared the stored user turn exactly with the sent prompt. But ChatGPT sometimes stores a prompt markdown-escaped:
+  - `\#`, `` \` ``, `\_` and similar backslash escapes;
+  - leading spaces as `&#x20;`;
+  - bare URLs as `[url](url)`.
+
+  This affected 119 of 291 archived audit prompts. On 2026-09-29 it made the bridge refuse the answer to audit prompt wz6 (conversation `6abb4dcf`), which had reached ChatGPT once. A turn now counts as ours if it equals the prompt either as stored or with ChatGPT's escapes undone. Undoing them on the 91 escaped prompts the audit-owner checked gave the sent prompt file exactly. Only the stored side is unescaped, so a prompt's own real backslashes still count. Replies to an escaped prompt carry `prompt_escaped: true`, because the model read the escaped form.
+- **Tab reconnect.** A command aimed at an agent tab now waits, up to `TAB_RECONNECT_WAIT_MS` (20s), for that tab to reconnect and report its account. Before, it failed at once with `tab … is not connected` while a continuation's page was reloading. That happened to audit ask pm2 at 05:30:37: the prompt was dispatched 65 ms before the reloaded tab identified itself.
+- **Sent flag before any send.** A failure before `send_prompt` reached a tab now reports `sent=no`.
+- **Still open:** why ChatGPT escapes some prompts and not others. The same prompt text is escaped, or not, every time it is sent, so the cause is in the content, not timing or tab. The model receives the escaped text, with code fences and indentation mangled. See the next entry once found.
+- Extension manifest 0.8.1 -> 0.8.3.
+
 ## v0.8.2 (2026-09-29)
 
 ### Setup a teammate can follow, and a broker that is safe by default
