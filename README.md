@@ -4,7 +4,7 @@ Lets Claude Code or Codex talk to ChatGPT in your own logged-in browser (`ask_ch
 
 A narrow browser-extension + MCP bridge for managing and preserving ChatGPT conversations without stealing browser session cookies or calling undocumented private APIs from a *server*.
 
-## History: what v0.3 added over v0.2
+## History: what v0.3 added over v0.2 (the current version is in `CHANGELOG.md`)
 
 - **Fixed title extraction.** The "Skip to content" bug is fixed at the root cause (see `CHANGELOG.md`), not papered over with a string exclusion. Title selection is a pure, unit-tested function with an explicit priority order.
 - **Reliable long-conversation capture.** The content script now reads the full conversation via the same-origin endpoint ChatGPT's own web app uses to hydrate the page, instead of relying solely on whatever is currently mounted in the (virtualized) DOM. DOM scraping remains as a fallback, explicitly flagged as possibly-incomplete when used.
@@ -127,7 +127,7 @@ runs `SYNC_OPEN_CHATGPT_CMD` first and waits up to 90s for one.
   `last_error`, `failed_threads`.
 - Run one now: `POST /api/sync`. Incremental manual run: `POST /api/archive-all`
   with body `{"mode":"incremental"}`.
-- Start at Windows logon (WSL): `scripts/install-windows-startup.sh` writes a
+- Start at Windows logon (WSL): `scripts/install-windows-startup.sh` (only if nothing else starts the broker; see "Keeping the broker running") writes a
   hidden launcher to the Startup folder that runs `scripts/run-server.sh`
   (skips if the broker is already up; logs to `data/logs/server.log`).
 
@@ -146,7 +146,7 @@ the list endpoint this uses; if they do not, they are not backed up.
 
 ## Install
 
-You need Node.js 20.6 or newer, Google Chrome (or Microsoft Edge), and a ChatGPT account. About ten minutes.
+You need Node.js 22 or newer (the test suite does not exit on Node 20), Google Chrome (or Microsoft Edge), and a ChatGPT account. About ten minutes.
 
 1. **Get the code and a token.** The token is the password that the extension and your coding agents use to talk to the broker.
 
@@ -159,7 +159,11 @@ You need Node.js 20.6 or newer, Google Chrome (or Microsoft Edge), and a ChatGPT
    sed -i.bak "s/^RENAMER_TOKEN=.*/RENAMER_TOKEN=$(openssl rand -hex 24)/" .env && rm .env.bak
    ```
 
-   Open `.env` and check it. The broker listens only on this computer (`HOST=127.0.0.1`). It refuses to start without a real token. If you want the broker to open ChatGPT tabs by itself, set `SYNC_OPEN_CHATGPT_CMD` (examples for macOS, Linux and WSL are in the file). Otherwise you open them yourself (step 4).
+   Open `.env` and check it:
+   - The broker listens only on this computer (`HOST=127.0.0.1`), and it refuses to start without a real token.
+   - **Port.** It uses `PORT=8787`. If something else already uses that port, change `PORT=` here, and use your port wherever 8787 appears below.
+   - **Backup is off** (`SYNC_INTERVAL_MINUTES=0`). If you turn it on, the first run downloads every chat you have. That takes hours and uses the same ChatGPT rate limit as your agents' asks.
+   - **Opening tabs.** To let the broker open ChatGPT tabs by itself, set `SYNC_OPEN_CHATGPT_CMD`; the file has examples for macOS, Linux and WSL. Otherwise you open them yourself (step 4).
 
 2. **Start the broker.** Leave this running:
 
@@ -172,7 +176,8 @@ You need Node.js 20.6 or newer, Google Chrome (or Microsoft Edge), and a ChatGPT
 3. **Load the extension.**
    - In Chrome, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and pick this repo's `extension/` folder.
    - Open the extension's **Options**. Set the broker URL to `ws://localhost:8787/extension`, changing the port if you changed `PORT`; it must say `localhost`, not `127.0.0.1`. Paste the token from `.env`, then click **Save**.
-   - Open https://chatgpt.com, signed in. `curl http://localhost:8787/health` should now show `"extension_connections":1`.
+   - Open https://chatgpt.com, signed in. `curl http://localhost:8787/health` should now show `"extension_connections"` of 1 or more; each open ChatGPT tab counts.
+   - The extension also archives each chat you open into `data/` ("Auto archive" in its options). Switch that off there if you don't want it.
 
 4. **Open the agent tab.** Open `https://chatgpt.com/?ccm_agent=1` and leave it open, in its own window if you can. An orange "Agent tab" badge appears. Agents type only into this tab, never into the chatgpt.com tabs you use yourself. If `SYNC_OPEN_CHATGPT_CMD` is set, the broker opens this tab itself when none is open.
 
@@ -184,7 +189,7 @@ You need Node.js 20.6 or newer, Google Chrome (or Microsoft Edge), and a ChatGPT
      -H "Authorization: Bearer $(grep ^RENAMER_TOKEN= .env | cut -d= -f2)"
    ```
 
-   For Codex, add this to `~/.codex/config.toml`, and export `CHATGPT_BRIDGE_TOKEN` in your shell profile, set to the same token:
+   For Codex, add this to `~/.codex/config.toml`:
 
    ```toml
    [mcp_servers.chatgpt-bridge]
@@ -192,11 +197,25 @@ You need Node.js 20.6 or newer, Google Chrome (or Microsoft Edge), and a ChatGPT
    bearer_token_env_var = "CHATGPT_BRIDGE_TOKEN"
    ```
 
+   Then put the token in your shell profile. Run this from the repo folder; use `~/.zshrc` on macOS:
+
+   ```bash
+   echo "export CHATGPT_BRIDGE_TOKEN=$(grep ^RENAMER_TOKEN= .env | cut -d= -f2)" >> ~/.bashrc
+   ```
+
 6. **Check it end to end.** Ask your agent to:
-   - call `list_chatgpt_connections`. It should show your account, one tab marked `agent`, and extension `0.8.1` or newer. This sends nothing to ChatGPT.
+   - call `list_chatgpt_connections`. It should show your account, one tab marked `agent`, and the same extension version as `extension_version` in `/health`. This sends nothing to ChatGPT.
    - call `ask_chatgpt` with `Reply with the single word: pong`. It should return `pong` with a `[conversation … — account …]` line.
 
-The broker must be running for agents to reach ChatGPT; nothing restarts it for you. Start it again with `npm start` after a reboot. On WSL, `scripts/install-windows-startup.sh` starts it at Windows logon.
+### Keeping the broker running
+
+**The supported way is `npm start` in a terminal you leave open.** Nothing restarts it for you: start it again after a reboot. `scripts/run-server.sh` does the same, adds a log file, and skips starting when a broker already answers on the port.
+
+**Only one thing may start the broker.** If you want it started automatically, pick exactly one starter:
+- a Linux/WSL systemd user service that runs `npm start` in the repo folder, with `Restart=always`;
+- or, on WSL, `scripts/install-windows-startup.sh`, which runs `scripts/run-server.sh` at Windows logon.
+
+Never run two starters. A second one can take the port while the first is restarting, and then an old copy of the broker keeps running while the new one crash-loops. Brian's machine hit exactly this on 2026-09-29, and fixes he had merged silently did not take effect. If the broker exits with "port … is already in use", something else already runs it.
 
 ### Using it well
 
@@ -228,7 +247,7 @@ The plain-text switch reaches into ChatGPT's own page code: its React tree, and 
 
 Each person runs their own broker and signs their own ChatGPT account into their own Chrome, following **Install** above. There is no shared or hosted broker. Brian decided this on 2026-09-25: a central broker would save only the server step, because every teammate's extension still has to be signed into their own account, and it would add a security surface.
 
-What a teammate gets is the MCP tools above, usable from Claude Code or Codex. Brian's own Python helpers (`chatgpt_dispatch_client.py` for parallel batches, and the weekly supervisor built on it) live in his private `weekly-plans` repo. They are optional and not needed to use the bridge.
+What a teammate gets is the MCP tools above, usable from Claude Code or Codex. Everything needed is in this repo.
 
 **What has actually been checked, and when:**
 
@@ -333,17 +352,11 @@ For ChatGPT to call it, expose the server through the MCP connectivity mechanism
 
 ### Agents on this machine (Claude Code and Codex)
 
-Both clients register the broker as the MCP server `chatgpt-bridge`; see **Install**, step 5. (On Brian's machine, `~/.bashrc` exports `CHATGPT_BRIDGE_TOKEN` from `~/.local/state/chatgpt-bridge/token`, which holds the same value as `RENAMER_TOKEN`. If you rotate the token, update every place it was pasted.)
+Both clients register the broker as the MCP server `chatgpt-bridge`; see **Install**, step 5. If you rotate the token, update every place it was pasted: `.env`, the extension's options, Claude Code, and your shell profile.
 
 It needs the broker running and at least one ChatGPT tab open with the extension connected.
 
-**This is one direction only: agent → ChatGPT.** The other direction — ChatGPT itself reaching this
-machine to run commands, edit files, or hand work to Claude Code/Codex — goes through the separate
-`remote-mcp` project (`~/code/remote-mcp`, `https://rmcp.brianmills.dev`), not this broker. remote-mcp
-is the self-hosted replacement for a third-party tool called "Desktop Commander"; if ChatGPT mentions
-that name, it means remote-mcp, not this repo. See `CLAUDE.md` for more on keeping the two straight,
-and `remote-mcp/docs/chatgpt-setup.md` for that side's setup (including the Windows Task Scheduler
-launcher this broker itself can run under, `remote-mcp/deploy/windows/chatgpt-bridge.ps1`).
+**This is one direction only: agent → ChatGPT.** Letting ChatGPT reach your machine (run commands, edit files) is not part of this project.
 
 ## Security model
 

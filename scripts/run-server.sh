@@ -6,7 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # The Startup launcher runs hidden, so send everything (including early errors) to a log.
 mkdir -p data/logs
-exec >> data/logs/launcher.log 2>&1
+# Run by hand in a terminal, show everything there too; launched hidden, log only.
+if [ -t 1 ]; then exec > >(tee -a data/logs/launcher.log) 2>&1; else exec >> data/logs/launcher.log 2>&1; fi
 echo "[$(date -Is)] run-server.sh starting"
 # Launched non-interactively (wsl.exe --exec), so nvm from ~/.bashrc is not loaded.
 if ! command -v node >/dev/null && [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
