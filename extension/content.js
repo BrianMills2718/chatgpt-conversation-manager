@@ -1270,6 +1270,24 @@ async function handleCommand(msg) {
     location.href = "https://chatgpt.com/";
     return { navigated: true };
   }
+  if (msg.action === "debug_bundle_search") {
+    // Temporary (2026-09-29): search ChatGPT's own loaded JS for a string,
+    // returning short surrounding snippets. Read-only.
+    const needle = String(msg.needle || "");
+    const urls = [...new Set([...document.scripts].map((x) => x.src).filter(Boolean)
+      .concat(performance.getEntriesByType("resource").map((e) => e.name).filter((n) => /\.js(\?|$)/.test(n))))];
+    const hits = [];
+    for (const u of urls) {
+      if (hits.length >= (Number(msg.max_hits) || 6)) break;
+      let body; try { body = await (await fetch(u)).text(); } catch { continue; }
+      let i = body.indexOf(needle);
+      while (i >= 0 && hits.length < (Number(msg.max_hits) || 6)) {
+        hits.push({ url: u.slice(-60), at: i, snippet: body.slice(Math.max(0, i - (Number(msg.before) || 400)), i + (Number(msg.after) || 400)) });
+        i = body.indexOf(needle, i + needle.length);
+      }
+    }
+    return { scanned: urls.length, hits };
+  }
   if (msg.action === "debug_composer_probe") {
     // Temporary reconnaissance (2026-09-29): put text in the composer WITHOUT
     // sending, report what the editor turned it into, then empty it. Used to
