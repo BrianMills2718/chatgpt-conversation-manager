@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.8.2 (2026-09-29)
+
+### Setup a teammate can follow, and a broker that is safe by default
+
+- **The broker listens only on this computer.** It used to accept connections on every network interface. It now binds to `127.0.0.1` unless `HOST` says otherwise.
+- **It refuses to start without a real token.** A missing `RENAMER_TOKEN` used to fall back to `change-me`, which the extension also pre-fills, so anyone on the network could type into the account. The broker now also refuses a placeholder token or one shorter than 16 characters.
+- **`npm start` reads `.env`.** It uses `node --env-file=.env`, the same file that `scripts/run-server.sh` uses.
+- **README "Install" rewritten as a checked walkthrough.** A fresh-machine run of it found 17 problems: wrong folder name, token lost with the terminal, Windows-only open command, no agent-tab step, Brian-specific paths presented as setup, and no end-to-end check. The new version covers clone, `.env`, start, extension, agent tab, Claude Code and Codex registration, and an end-to-end check. It adds "Using it well", which covers quota, the `sent=` line and large prompts. "Sharing this with a teammate" now states what has and has not been checked.
+- **Clearer defaults.** `.env.example` gives macOS, Linux and WSL values for `SYNC_OPEN_CHATGPT_CMD`. CLAUDE.md now marks which sections describe Brian's own machine. `npm run check` also covers `server/sync.js`. `package.json` and the MCP server report the real version.
+
 ## v0.8.1 (2026-09-29)
 
 ### Fixed: very large prompts whose Send click ChatGPT drops

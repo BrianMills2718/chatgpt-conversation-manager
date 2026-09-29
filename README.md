@@ -193,7 +193,7 @@ You need Node.js 20.6 or newer, Google Chrome (or Microsoft Edge), and a ChatGPT
    ```
 
 6. **Check it end to end.** Ask your agent to:
-   - call `list_chatgpt_connections`. It should show your account, one tab marked `agent`, and extension `0.8.0` or newer. This sends nothing to ChatGPT.
+   - call `list_chatgpt_connections`. It should show your account, one tab marked `agent`, and extension `0.8.1` or newer. This sends nothing to ChatGPT.
    - call `ask_chatgpt` with `Reply with the single word: pong`. It should return `pong` with a `[conversation … — account …]` line.
 
 The broker must be running for agents to reach ChatGPT; nothing restarts it for you. Start it again with `npm start` after a reboot. On WSL, `scripts/install-windows-startup.sh` starts it at Windows logon.
@@ -208,7 +208,7 @@ The broker must be running for agents to reach ChatGPT; nothing restarts it for 
   The same fields come back from `POST /api/ask` as `sent`, `thread_id` and `account`.
 - **A reply is always the answer to your prompt.** The broker returns a reply only after checking that the user turn before it is exactly the prompt you sent. If something else was sent into that conversation, the ask fails with `Refusing to return a reply` instead of returning someone else's answer.
 - **Several asks can run at once**, one per agent tab (open more `?ccm_agent=1` tabs). For more than one ChatGPT account, see "Several accounts and browsers at once" above.
-- **Very large prompts (over about 60,000 characters) are where sends have failed.** ChatGPT sometimes ignores the first click on Send; the extension checks ChatGPT's server and clicks once more, then reports `sent=no`. Prompts over about 95,000 characters leave ChatGPT's Send button disabled, which fails with `sent=no`.
+- **Very large prompts (over about 60,000 characters) are where sends have failed.** In a background tab, ChatGPT sometimes ignores the click on Send. While the send is unconfirmed, the broker checks ChatGPT's server at 30, 75 and 135 seconds. If the prompt still has not arrived, it clicks Send again. If the prompt never shows up, the error says `sent=unknown`. Prompts over about 95,000 characters leave ChatGPT's Send button disabled, and the error says `sent=no`.
 
 ## Sharing this with a teammate
 
@@ -218,7 +218,12 @@ What a teammate gets is the MCP tools above, usable from Claude Code or Codex. B
 
 **What has actually been checked, and when:**
 
-- **One account, one or more agent tabs.** Used for about 350 real sends on 2026-09-25 through 09-28. That volume exposed the misattribution and "could not confirm" failures that v0.8.0 fixes; see CHANGELOG. The v0.8.0 fix has unit tests and a live check (see CHANGELOG), but has not yet run at that volume.
+- **One account, one or more agent tabs.** Used for about 350 real sends on 2026-09-25 through 09-28. That volume exposed the misattribution and "could not confirm" failures fixed in v0.8.0/v0.8.1; see CHANGELOG. The fixes have unit tests and live checks on 2026-09-29:
+  - a new chat with markdown, a code fence, tabs and non-ASCII text, confirming exact-match typing;
+  - a continuation, logged under the tab's account;
+  - a 73,212-character prompt in a hidden tab, which gave the right reply with exactly one prompt in the chat.
+
+  The server-checked re-click has only been exercised in unit tests; that live send was accepted on its first click. None of this has yet run at audit volume.
 - **Two accounts at once.** The per-account routing and pacing have mocked tests only. Two real, simultaneously connected accounts have not been checked yet.
 - **Setup on another operating system.** This walkthrough was followed on a fresh clone on Linux: `npm install`, `npm test`, broker start, MCP `initialize`/`tools/list`, and `list_chatgpt_connections` with no browser attached. The macOS and Windows-native paths have not been tried by a teammate yet.
 
