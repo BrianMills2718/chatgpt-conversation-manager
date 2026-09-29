@@ -520,7 +520,7 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
         account: pacerKey === DEFAULT_PACER_KEY ? null : pacerKey,
         tab: result?.tab?.slice(0, 8) ?? null, agent_tab: result?.agent ?? null, incognito: result?.incognito ?? null,
         api_checked: result?.api_checked ?? null, api_status: result?.api_status ?? null,
-        ...(command.action === 'send_prompt' ? { send_confirmed: result?.send_confirmed ?? null, confirmed_by: result?.confirmed_by ?? null, visibility: result?.visibility ?? null, plain_text_mode: result?.plain_text_mode ?? null, typing_ms: result?.typing_ms ?? null, plain_mode_ms: result?.plain_mode_ms ?? null } : {}),
+        ...(command.action === 'send_prompt' ? { send_confirmed: result?.send_confirmed ?? null, confirmed_by: result?.confirmed_by ?? null, visibility: result?.visibility ?? null, plain_text_mode: result?.plain_text_mode ?? null, typing_ms: result?.typing_ms ?? null, fill_mode: result?.fill_mode ?? null, fill_detail: result?.fill_detail ?? null } : {}),
         in_flight: agentRequestsInFlight, ...recordAndCountWindow(Date.now()),
       });
     }
@@ -1208,7 +1208,7 @@ app.post('/api/undo', async (req, res) => {
 });
 
 function createMcpServer() {
-  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.7" });
+  const mcp = new McpServer({ name: "chatgpt-conversation-manager", version: "0.9.8" });
 
   mcp.tool('ask_chatgpt', 'Send a message to ChatGPT in Brian\'s own logged-in browser and return its reply. Omit thread_id and thread_title to start a new chat; pass a conversation id, or a title that matches exactly one of the 100 most recent chats, to continue that conversation (a chatgpt.com/c/... link also works as thread_id). Pass account (email) to use an agent tab signed into that ChatGPT account; see list_chatgpt_connections. Types only into the dedicated agent tab (https://chatgpt.com/?ccm_agent=1, opened automatically), never into a tab Brian is using, and waits up to timeout_seconds for the reply to finish. Several calls may run at once (each claims its own agent tab). If the reply is not finished in time the error says whether the prompt was sent and names the conversation: do not resend then -- collect the late reply with read_chatgpt_chat on that conversation (it reports whether the latest reply is finished). Thinking models can take minutes even for short prompts, so prefer a generous timeout_seconds.', {
     text: z.string().min(1),
@@ -1224,7 +1224,7 @@ function createMcpServer() {
       // indentation as &#x20;), so the model read that form, not the raw text.
       // Put a failed verbatim send in front of the caller, not only in the log.
       const escapedNote = r.prompt_verbatim === false
-        ? ` — WARNING: this prompt did NOT reach ChatGPT verbatim${r.plain_text_mode_error ? ` (the bridge could not switch ChatGPT's composer to plain-text mode: ${r.plain_text_mode_error})` : ''}; ChatGPT stored it as escaped Markdown (\\#, \\\`, &#x20;), so the model read code and indentation mangled. The reply is still the answer to this prompt. See README "If prompts stop arriving verbatim".`
+        ? ` — WARNING: this prompt did NOT reach ChatGPT verbatim${r.plain_text_mode_error ? ` (the bridge could not switch ChatGPT's composer to plain-text mode: ${r.plain_text_mode_error})` : ''}; ChatGPT stored it changed (as escaped Markdown, or wrapped whole in a code fence), so the model read it in that form. The reply is still the answer to this prompt. See README "If prompts stop arriving verbatim".`
         : r.plain_text_mode_error ? ` — note: the bridge could not switch ChatGPT's composer to plain-text mode (${r.plain_text_mode_error}); this prompt still arrived verbatim, but one containing a link would not. See README "If prompts stop arriving verbatim".` : '';
       const content = [{ type: 'text', text: `${r.reply}\n\n[conversation ${r.thread_id} — ${r.url}${r.account ? ` — account ${r.account}` : ''}${escapedNote}]` }];
       // Images ChatGPT generated or returned inline (see extension/lib/api-capture.js

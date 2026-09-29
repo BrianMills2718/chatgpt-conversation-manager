@@ -310,3 +310,15 @@ test('the result says whether the prompt reached ChatGPT verbatim, and why not',
     assert.match(r.plain_text_mode_error, /controller not found/);
   } finally { t.close(); await new Promise((r) => setTimeout(r, 50)); }
 });
+
+test('a prompt ChatGPT stored wrapped whole in a longer code fence still counts as ours, and is not verbatim', () => {
+  const prompt = 'Audit this.\n\n### FILE: a.py\n```\ndef f():\n    return 1\n```\n';
+  const stored = '````\n' + prompt.replace(/\n$/, '') + '\n````';
+  assert.equal(samePrompt(stored, prompt), true);
+  const t = tree([msg('u1', 'user', stored), msg('a1', 'assistant', 'NO HIGH-CONFIDENCE BUGS', finished)]);
+  const r = replyFromTree(t, 0, { expected: prompt });
+  assert.equal(r.done, true);
+  assert.equal(r.prompt_escaped, true, 'a wrapped copy is not what was sent');
+  // A fence no longer than an inner run is content, not a wrapper.
+  assert.equal(samePrompt('```\n' + prompt + '\n```', prompt), false);
+});

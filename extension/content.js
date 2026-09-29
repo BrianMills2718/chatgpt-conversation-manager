@@ -801,12 +801,30 @@ async function sendPrompt(text, excludeThreads = []) {
   // back to typing, then switch to plain-text mode before Send.
   const typingStarted = Date.now();
   let fillMode = "transaction";
-  let plainMode = await composerMainWorldRequest({ op: "fill", text: body, plain: true });
-  let typedOk = Boolean(plainMode?.ok) && samePrompt(composerText(), body);
+  let fillDetail = null;
+  const marker = `m${Date.now().toString(36)}`;
+  el.setAttribute("data-ccm-composer", marker);
+  const describeMismatch = () => {
+    const a = composerText().replace(/\s+/g, " ").trim(), b = body.replace(/\s+/g, " ").trim();
+    let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    return { held_chars: a.length, prompt_chars: b.length, first_diff: i, held_at: a.slice(i, i + 60), prompt_at: b.slice(i, i + 60) };
+  };
+  let plainMode = null;
+  let typedOk = false;
+  for (let attempt = 1; attempt <= 2 && !typedOk; attempt++) {
+    if (attempt > 1) await sleep(1000);
+    plainMode = await composerMainWorldRequest({ op: "fill", text: body, plain: true, marker });
+    typedOk = Boolean(plainMode?.ok) && samePrompt(composerText(), body);
+    if (!typedOk) fillDetail = plainMode?.ok ? { attempt, ...describeMismatch() } : { attempt, reason: plainMode?.reason };
+  }
   if (!typedOk) {
-    if (plainMode?.ok) await log("warn", `one-transaction fill did not leave exactly the prompt in the composer (${composerText().length} vs ${body.length} characters); typing instead`);
-    else await log("warn", `one-transaction fill unavailable (${plainMode?.reason}); typing instead`);
-    fillMode = `typed (${plainMode?.ok ? "fill mismatch" : plainMode?.reason})`;
+    // Typing is the fallback. It is slow for large prompts, and its result is
+    // NOT switched to plain-text mode: switching after typing made ChatGPT
+    // send the whole prompt wrapped in a ```` code fence (ats4, 2026-09-29).
+    // So this prompt goes out as ChatGPT's Markdown -- escaped if it has
+    // links -- and the reply says prompt_verbatim:false.
+    await log("warn", `one-transaction fill failed (${JSON.stringify(fillDetail)}); typing instead`);
+    fillMode = "typed";
     await requestPlainTextMode(false);
     typedOk = await waitFor(() => {
       el = findFirst(COMPOSER_SELECTORS, visible)?.el || el;
@@ -814,7 +832,7 @@ async function sendPrompt(text, excludeThreads = []) {
       setComposerText(el, body);
       return samePrompt(composerText(), body) ? true : null;
     }, 8000, 400).catch(() => false);
-    plainMode = typedOk ? await requestPlainTextMode(true) : plainMode;
+    plainMode = { ok: false, reason: `fill failed, typed instead: ${JSON.stringify(fillDetail)}` };
   }
   if (!typedOk) {
     const heldChars = composerText().length;
@@ -884,7 +902,7 @@ async function sendPrompt(text, excludeThreads = []) {
   const threadId = threadBefore || serverThreadId || (confirmedBy ? await waitFor(() => realThreadId(), 60000, 250).catch(() => null) : realThreadId());
   return { thread_id: threadId, dom_before: domBefore, messages_before: messagesBefore,
            send_confirmed: Boolean(confirmedBy), confirmed_by: confirmedBy,
-           plain_text_mode: plainMode?.ok ? true : (plainMode?.reason || "failed"), typing_ms: typingMs, fill_mode: fillMode,
+           plain_text_mode: plainMode?.ok ? true : (plainMode?.reason || "failed"), typing_ms: typingMs, fill_mode: fillMode, fill_detail: fillDetail,
            server_check_error: serverCheckError,
            visibility: document.visibilityState, has_focus: document.hasFocus(),
            composer_selector: composer.selector, send_selector: button.selector };

@@ -25,7 +25,11 @@
 // frozen for over 5 minutes at 50-80k; measured 2026-09-29), so large
 // prompts are filled this way instead.
 function composerMainWorld(req) {
-  const editor = document.querySelector('div.ProseMirror[contenteditable="true"]');
+  // The content script marks the exact editor it checks and clicks for
+  // (data-ccm-composer; DOM attributes are shared between worlds), so both
+  // worlds act on the same element even when a page has several editors.
+  const editor = (req.marker && document.querySelector(`[data-ccm-composer="${req.marker}"]`))
+    || document.querySelector('div.ProseMirror[contenteditable="true"]');
   if (!editor) return { ok: false, reason: "no composer editor on the page" };
   const isController = (v) => v && typeof v === "object" && typeof v.setPlainTextMode === "function" && typeof v.getText === "function";
   const candidates = (v) => {
@@ -46,7 +50,8 @@ function composerMainWorld(req) {
   for (let depth = 0; fiber && depth < 200 && !controller; depth++, fiber = fiber.return) {
     const bags = [fiber.memoizedProps, fiber.stateNode];
     for (let h = fiber.memoizedState, i = 0; h && i < 80; i++, h = h.next) bags.push(h.memoizedState);
-    for (const bag of bags) { for (const c of candidates(bag)) { if (isController(c)) { controller = c; break; } } if (controller) break; }
+    // Only the controller whose view IS this editor.
+    for (const bag of bags) { for (const c of candidates(bag)) { if (isController(c) && (!c.view?.dom || c.view.dom === editor || c.view.dom.contains(editor) || editor.contains(c.view.dom))) { controller = c; break; } } if (controller) break; }
   }
   if (!controller) return { ok: false, reason: "composer controller not found in the React tree" };
   if (req.op === "plain") {

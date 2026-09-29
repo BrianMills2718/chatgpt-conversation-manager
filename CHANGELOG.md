@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.9.8 (2026-09-29)
+
+### Fixed: a false refusal, and a prompt delivered wrapped whole in a code fence
+
+- **What happened (ats4, 08:21Z).** The ask continued an older conversation (`6abb4cd7`) after navigating to it. The one-transaction fill did not leave the prompt in the composer, so the extension fell back to typing, which took 187 s for 72k characters. It then switched to plain-text mode. ChatGPT stored the prompt as ```` "````\n" + prompt + "\n````" ````, the whole prompt as one code block, and the bridge refused the reply as not ours. The model answered in the requested format ("NO HIGH-CONFIDENCE BUGS"), so it still read the instructions. But a prompt delivered as one quoted code block is not what was sent, and it can change how the model treats it. My 80k/60k proof (`6abb7399`) did not catch this because both of its sends used the fill path (typing 0.5-0.7 s). Its continuation also needed no navigation, since the tab was already on that conversation.
+- **Fix.**
+  - **Target the right editor.** The content script now marks the exact editor it uses (`data-ccm-composer`). The page-world fill targets that editor and accepts only the controller whose view is that editor. The likely cause, not yet proven, is that the fill hit a different editor or controller on a page that had just navigated.
+  - **Retry and log.** The fill is retried once. Each send logs `fill_mode` and, on a mismatch, `fill_detail`: the first differing position, with text from both sides.
+  - **Fallback without the wrap.** If filling fails, typing is still the fallback, but it no longer switches to plain-text mode. That combination is what produced the wrap. The prompt goes out as ChatGPT's Markdown, and the reply says `prompt_verbatim: false`.
+  - **Attribution.** A stored copy wrapped whole in a fence longer than any backtick run inside it now counts as ours, but is not verbatim.
+- Extension manifest -> 0.9.8.
+
 ## v0.9.7 (2026-09-29)
 
 ### Fixed at the root: large prompts froze the agent tab
