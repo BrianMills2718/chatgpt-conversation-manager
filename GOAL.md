@@ -58,7 +58,7 @@ governs while working in it.
   governs that, reused as-is); `weekly_chatgpt_supervisor.py`'s task-profile
   model itself (`autonomous`/`review_gated`/`hands_on`/`human_only` stays
   exactly as-is — only its dispatch internals move to the shared client).
-- Writes allowed: `chatgpt-conversation-manager-v0.2/{server,README.md,CLAUDE.md}`,
+- Writes allowed: `chatgpt-conversation-manager-v0.2/{GOAL.md,server/index.js,README.md,CLAUDE.md,extension/content.js,extension/manifest.json,extension/lib/api-request-observation.js,tests/api-request-observation.test.js,tests/server.test.js}`,
   `weekly-plans/scripts/{weekly_chatgpt_supervisor.py,chatgpt_dispatch_client.py,
   test_chatgpt_dispatch_client.py,review_sweep.py}`, and each affected repo's
   own `investigations/chatgpt-review-sweep-manifest.{tsv,md}`.
@@ -81,12 +81,53 @@ governs while working in it.
 | C4 | Pacer is per-account | Persisted pacer state file shows two independent account-keyed entries after C3's run, not one shared global entry |
 | C5 | Per-person deployment documented | The written README/CLAUDE.md section accurately describes what C1-C4 actually built, not an aspirational future state |
 | C6 | Adaptive account routing responds to account cooldowns | A broker-level test feeds a synthetic 429 to account A, verifies A's learned gap widens, then verifies an unpinned new ask selects idle account B with the earlier projected start; the route decision is joined to its ask outcome by `route_id` |
+| C7 | API timing evidence survives browser clock skew and delayed delivery | The extension sends page-relative request age at socket-send time; the broker reconstructs start/completion from that age and its receipt clocks, and rolling request counts use request-start times. Synthetic tests prove skewed/legacy wall timestamps are not trusted and buffered events retain their original timing window |
 
 C6 proves the scheduler behavior using controlled browser fakes. It does not
 prove ChatGPT's hidden account limits or claim that any fixed routing policy
 achieves a global throughput maximum. Live quota estimates must come from
 observed traffic and 429s, and are limited to activity visible in connected
 browser pages.
+
+### Exploratory readout of existing traffic (offline)
+
+- **Claim:** all stored `api_request` rows can describe HTTP request outcomes.
+  Legacy schema-version-2 rows support request rates only when clock-offset
+  checks pass; schema-version-3 rows use broker receipt time minus
+  page-relative request age and do not need cross-clock correction. Both
+  populations cover only activity visible in connected browser pages.
+- **Decision:** determine whether these historical rows support a descriptive
+  per-account request-rate range or only counts/statuses plus a need for future
+  observations. They do not directly measure completed prompts or task
+  throughput because API request rows have no `route_id` join.
+- **Unit and population:** one `event_type=api_request` row in
+  `data/observations/request-timing.jsonl`; include all endpoint classes and
+  report each separately. Exclude `broker_action` rows from API-request counts
+  to avoid double-counting, while retaining them for separate action outcomes.
+- **Validity check:** for legacy schema-version-2 rows, compare broker log time
+  `ts` with page `completed_at`. Report each tab's median offset, median
+  absolute deviation, and first-half versus second-half offset shift. Correct
+  per-tab page timestamps by that tab's median offset only when the deviation
+  is at most 1 second and the half-to-half shift at most 2 seconds; these
+  bounds allow the 200 ms extension flush interval plus local scheduling and
+  transport variation while rejecting unstable clocks or long buffering.
+  Otherwise do not combine that tab's start times across tabs. For
+  schema-version-3 rows, use the logged request-start time directly and retain
+  the `timing_basis`; the timestamp is reconstructed from the broker's receipt
+  clock and the page-relative age measured immediately before socket send.
+- **Readout:** per account and endpoint class, report event count, status mix,
+  429 share, and observed start-to-start request gaps only for timing-valid
+  tabs. Embedded rolling counts are best-effort counts of observations already
+  received, retained for requests up to five minutes old with a ten-minute
+  timestamp cache covering the preceding five-minute window; older observations
+  keep their raw timing/status but have null rolling counts. Recompute
+  historical windows from the event rows, accounting for telemetry gaps.
+  Treat missing status and invalid/unstable timing separately. No
+  causal, prompt-rate, hidden-quota, or global-maximum claim follows from this
+  retrospective analysis.
+- **Boundary:** no new ChatGPT traffic is generated. If timing validity fails,
+  stop at counts and status mix and use future schema-version-3 observations
+  from ordinary connected-page activity only if/when the broker is running.
 
 ## Increments
 
@@ -125,6 +166,12 @@ browser pages.
    explicit-account requests pinned and leave thread-targeted requests on the
    existing path. Record the candidate estimates and selected account, then
    link the resulting ask outcome (C6).
+7. **Added 2026-09-30 while continuing the measurement work.** Phase 6:
+   replace extension wall-clock API timestamps with page-relative request age,
+   reconstruct timings against broker receipt clocks, count buffered requests
+   by their start time, and version the observation record (C7). This improves
+   attribution but still cannot reveal ChatGPT's hidden quotas or prove a
+   global throughput maximum.
 
 ## Loop Bounds
 
@@ -166,11 +213,10 @@ non_gating_utility_review:
 
 - One progress authority: this document's "Current State" section, kept
   current at each phase boundary — not an append-only diary.
-- Active owners/claims: single active lane, this session/its continuations.
-  No coordination-claim tooling exists in `chatgpt-conversation-manager-v0.2`
-  (Brian's own single-writer personal tool) or `weekly-plans`; the *targets*
-  of the review-sweep (DIGIMON, OntoCanon) do have claim tooling and it is
-  used for any actual code changes there, unchanged from tonight's pattern.
+- Active owners/claims: the shared workspace claim registry governs linked
+  worktrees in the broker and `weekly-plans`; this goal currently has one
+  active broker lane. The review-sweep targets (DIGIMON, OntoCanon) use their
+  own claim tooling for any code changes there.
 - Authority transfer/reversion: per the machine block above. Given this
   session crashed and lost work repeatedly earlier tonight (WSL/disk
   instability, documented in `~/projects/.claude/DEVICES_AND_ACCOUNTS.md`),
@@ -179,15 +225,13 @@ non_gating_utility_review:
   this document's "Current State" section, the referenced plan file, and
   `git log` on both repos before resuming, not just this file's prose.
 - Worker reporting/status: single lane, no sub-workers. Report at each phase
-  acceptance-check boundary (C1-C6); no polling loop.
-- Pinned cross-repository dependencies: Phase 1 must land in
-  `chatgpt-conversation-manager-v0.2` before Phase 1's refactor of
-  `weekly-plans/scripts/weekly_chatgpt_supervisor.py` or Phase 2's
-  review-sweep rebuild can proceed.
-- Dependency-sensitive stop points: do not start Phase 3's pacer change until
-  Phase 1's client extraction is merged and C1 passes — the pacer fix and
-  the client extraction both touch dispatch-adjacent code and should not be
-  developed against a moving base.
+  acceptance-check boundary (C1-C7); no polling loop.
+- Pinned cross-repository dependencies: **resolved.** The shared client landed
+  in `weekly-plans` before the supervisor refactor and review-sweep rebuild;
+  C1/C2 pass, and the broker pacer work followed on that stable base.
+- Dependency-sensitive stop points: **resolved.** Phase 1's client extraction
+  was merged and C1 passed before Phase 3's pacer change began; that dependency
+  no longer blocks work.
 
 ## Non-Gating Next Actions
 
@@ -206,36 +250,42 @@ non_gating_utility_review:
   account pacer entries were verified on 2026-09-29 16:05Z. README documents
   per-person local deployment. The original plan remains at
   `/home/brian/.claude/plans/async-snuggling-thompson.md`.
-- **C6 implementation and controlled verification are complete in this
-  branch.** For unpinned new asks, the broker ranks identified accounts with
-  idle agent tabs by projected pacing start, accounting for each account's
-  spacing, in-flight asks, and pending assignments. Two parallel unpinned asks
-  reserve accounts before probing tabs, avoiding a same-account scheduling
-  pile-up. Explicit-account requests stay pinned; thread-targeted asks retain
-  their existing behavior. Route decisions are logged with candidate estimates
-  and linked to ask outcomes by `route_id`.
-- `npm test` passed 208 tests, including a synthetic 429 on account A followed
-  by an unpinned ask routed to B, parallel asks spread across A and B, and a
-  mixed pinned/automatic queue regression. This proves the scheduler's code
-  path, not a real ChatGPT quota limit or a maximum useful throughput.
-- PR #67 adds per-account broker-action and same-origin API telemetry, including
-  status, endpoint class, and timing, plus routing decisions linked to ask
-  outcomes. Once running, it will not observe ChatGPT native apps or activity
-  in unconnected browser profiles, and it does not expose all quota counters or
-  limits. Real usable rates remain an empirical estimate from activity this
-  broker can observe. Resource Timing observations are measurement-only: the
-  adaptive pacer currently reacts to 429s returned through broker operations,
-  not throttles seen only in ordinary page activity.
-- PR #67 on branch `fix/per-account-pacing` is still open and unmerged, so the
-  new router and telemetry are not live. Brian renewed authorization on
-  2026-09-29 for one bounded live validation. For that smoke, disable the
-  scheduled first-run sync so it does not add a second ChatGPT operation; send
-  no more than one unpinned ask and do not retry it if it times out or is
-  rate-limited.
-- **Still outstanding before calling the usage goal complete:** capture the
-  bounded live route and ask outcome, then use attributable per-account traffic
-  and 429 observations to estimate useful rates. Existing same-day logs show
-  reply-poll 429s alongside completed asks, so those events alone do not
-  establish a prompt-level throttle rate. Do not describe the scheduler as a
-  proven maximum throughput or share that claim before the evidence supports
-  it.
+- C6 is merged in broker commit
+  `34126e375cb08715c88e3ff04c380f0f1068d634`. For unpinned new asks, the broker
+  ranks identified accounts with idle agent tabs by projected pacing start,
+  accounting for each account's spacing, in-flight asks, and pending
+  assignments. Two parallel asks reserve accounts before probing tabs;
+  explicit-account asks stay pinned, thread-targeted asks keep their prior
+  path, and route decisions link to outcomes with `route_id`.
+- The merged `npm test` passed 208 tests, including a synthetic 429 on account
+  A followed by an unpinned ask routed to B, parallel asks spread across A and
+  B, and a mixed pinned/automatic queue regression. This proves the scheduler
+  path, not a real ChatGPT quota limit or maximum useful throughput.
+- One bounded live unpinned route smoke succeeded earlier (route event
+  `156a2f3d-80c7-4405-be1a-4a3fbd25dea3`), but it did not prove a 429-driven
+  account switch or an optimal useful rate. Do not describe the scheduler as a
+  proven global maximum.
+- The existing main-checkout log contains 4,039 historical `api_request` rows
+  from two accounts, including 160 HTTP 429s; 146 were `conversation_list`
+  responses, and 156 of the 160 came from one account. This confirms useful
+  API status and endpoint observations were collected. The old timestamps fail
+  the retrospective alignment check: all 16 tab groups have unstable
+  receipt-to-page-completion residuals (which combine clock skew and event
+  delivery delay), with median absolute deviation about 31-82 minutes and
+  first/second-half shifts over an hour. Many rows arrived in short broker-time
+  bursts. The history supports counts and status mix, but not trustworthy
+  account request rates or an optimal pacing interval.
+- **C7 timing-provenance repair is on branch `fix/request-timing-provenance`.**
+  New observations keep a page-relative start marker until socket send; the
+  broker reconstructs request timestamps from its receipt clocks and elapsed
+  age. Best-effort rolling counts use request-start time for observations sent
+  within five minutes, with a ten-minute timestamp cache to cover the preceding
+  five-minute window; older observations keep raw timing/status but have null
+  counts. Legacy client wall-clock events without relative age are dropped.
+  Extension version 0.9.16 triggers the existing background-worker
+  update/reinject flow; tabs without a working worker remain visibly stale and
+  require a manual reload. `npm test` passes 211 tests and `npm run check`
+  passes all 16 syntax checks on this revision.
+- This lane has sent no ChatGPT requests and the broker remains stopped. New
+  real observations and any per-account useful-rate estimate remain pending;
+  no claim of an optimal or globally maximal rate is supported.

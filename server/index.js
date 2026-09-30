@@ -138,6 +138,8 @@ let agentRequestsInFlight = 0;
 // each action can cause several HTTP requests, and normal ChatGPT page traffic
 // also reaches the same account's quota.
 const REQUEST_WINDOW_MS = 5 * 60 * 1000;
+const MAX_OBSERVED_API_REQUEST_AGE_FOR_COUNTS_MS = REQUEST_WINDOW_MS;
+const OBSERVED_API_REQUEST_COUNT_RETENTION_MS = MAX_OBSERVED_API_REQUEST_AGE_FOR_COUNTS_MS + REQUEST_WINDOW_MS;
 const recentAgentRequestTimestamps = [];
 const recentAgentRequestTimestampsByAccount = new Map();
 const agentRequestsInFlightByAccount = new Map();
@@ -168,25 +170,36 @@ function recordAndCountWindow(nowMs, account) {
   };
 }
 
-function recordAndCountObservedApiEvents(receivedAtMono, account) {
-  const cutoff = receivedAtMono - REQUEST_WINDOW_MS;
-  recentObservedApiEventTimestamps.push(receivedAtMono);
+function recordAndCountObservedApiEvents(requestStartedAtMono, account, receivedAtMono, requestAgeAtSendMs) {
+  recentObservedApiEventTimestamps.push(requestStartedAtMono);
   recentObservedApiEventTimestamps.sort((a, b) => a - b);
-  while (recentObservedApiEventTimestamps.length && recentObservedApiEventTimestamps[0] < cutoff) recentObservedApiEventTimestamps.shift();
+  const retentionCutoff = receivedAtMono - OBSERVED_API_REQUEST_COUNT_RETENTION_MS;
+  while (recentObservedApiEventTimestamps.length && recentObservedApiEventTimestamps[0] < retentionCutoff) recentObservedApiEventTimestamps.shift();
   let accountTimes = null;
   if (account) {
     const key = normalizePacerKey(account);
     accountTimes = recentObservedApiEventTimestampsByAccount.get(key);
     if (!accountTimes) { accountTimes = []; recentObservedApiEventTimestampsByAccount.set(key, accountTimes); }
-    accountTimes.push(receivedAtMono);
+    accountTimes.push(requestStartedAtMono);
     accountTimes.sort((a, b) => a - b);
-    while (accountTimes.length && accountTimes[0] < cutoff) accountTimes.shift();
+    while (accountTimes.length && accountTimes[0] < retentionCutoff) accountTimes.shift();
   }
+  const countWindowWithinRetention = requestAgeAtSendMs <= MAX_OBSERVED_API_REQUEST_AGE_FOR_COUNTS_MS;
   return {
-    api_events_received_last_60s: recentObservedApiEventTimestamps.filter((t) => t >= receivedAtMono - 60000).length,
-    api_events_received_last_300s: recentObservedApiEventTimestamps.length,
-    account_api_events_received_last_60s: accountTimes ? accountTimes.filter((t) => t >= receivedAtMono - 60000).length : null,
-    account_api_events_received_last_300s: accountTimes?.length ?? null,
+    request_count_window_status: countWindowWithinRetention ? 'age_within_retention' : 'age_exceeds_retention',
+    request_count_window_max_age_ms: MAX_OBSERVED_API_REQUEST_AGE_FOR_COUNTS_MS,
+    observed_api_requests_started_last_60s: countWindowWithinRetention
+      ? recentObservedApiEventTimestamps.filter((t) => t >= requestStartedAtMono - 60000 && t <= requestStartedAtMono).length
+      : null,
+    observed_api_requests_started_last_300s: countWindowWithinRetention
+      ? recentObservedApiEventTimestamps.filter((t) => t >= requestStartedAtMono - REQUEST_WINDOW_MS && t <= requestStartedAtMono).length
+      : null,
+    account_observed_api_requests_started_last_60s: countWindowWithinRetention && accountTimes
+      ? accountTimes.filter((t) => t >= requestStartedAtMono - 60000 && t <= requestStartedAtMono).length
+      : null,
+    account_observed_api_requests_started_last_300s: countWindowWithinRetention && accountTimes
+      ? accountTimes.filter((t) => t >= requestStartedAtMono - REQUEST_WINDOW_MS && t <= requestStartedAtMono).length
+      : null,
   };
 }
 
@@ -350,22 +363,32 @@ wss.on("connection", (ws, req) => {
       return;
     }
     if (msg?.type === 'api_request_observed') {
-      const startedAtMs = typeof msg.request_started_at === 'string' ? Date.parse(msg.request_started_at) : NaN;
-      const completedAtMs = typeof msg.completed_at === 'string' ? Date.parse(msg.completed_at) : NaN;
+      const receivedAtWallMs = Date.now();
+      const receivedAtMono = monoNow();
+      const requestAgeAtSendMs = msg.request_age_ms;
       const durationMs = msg.duration_ms;
       const apiStatus = Number.isInteger(msg.api_status) && msg.api_status >= 100 && msg.api_status <= 599 ? msg.api_status : null;
       if (msg.source !== 'performance_resource_timing' || !API_REQUEST_ENDPOINT_CLASSES.has(msg.endpoint_class)
-          || !Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs)
+          || !Number.isFinite(requestAgeAtSendMs) || requestAgeAtSendMs < 0
           || !Number.isFinite(durationMs) || durationMs < 0 || durationMs > 24 * 60 * 60 * 1000) return;
+      const startedAtMs = receivedAtWallMs - requestAgeAtSendMs;
+      const completedAtMs = startedAtMs + durationMs;
+      const dateLimitMs = 8.64e15;
+      if (!Number.isFinite(startedAtMs) || !Number.isFinite(completedAtMs)
+          || Math.abs(startedAtMs) > dateLimitMs || Math.abs(completedAtMs) > dateLimitMs) return;
+      const requestStartedAtMono = receivedAtMono - requestAgeAtSendMs;
+      if (!Number.isFinite(requestStartedAtMono)) return;
       const account = accountKey(ws.account);
       appendRequestTiming({
-        schema_version: 2, event_type: 'api_request', action: 'chatgpt_api_request',
+        schema_version: 3, event_type: 'api_request', action: 'chatgpt_api_request',
         source: msg.source, endpoint_class: msg.endpoint_class,
         request_started_at: new Date(startedAtMs).toISOString(), completed_at: new Date(completedAtMs).toISOString(),
+        request_age_at_send_ms: Math.round(requestAgeAtSendMs), broker_received_at: new Date(receivedAtWallMs).toISOString(),
+        timing_basis: 'broker_receipt_minus_page_monotonic_age', request_count_window_reference: 'request_started_at',
         duration_ms: Math.round(durationMs), api_status: apiStatus, rate_limited: apiStatus === 429,
         initiator_type: typeof msg.initiator_type === 'string' && /^[a-z0-9_-]{1,32}$/i.test(msg.initiator_type) ? msg.initiator_type : null,
         account, tab: ws.tabToken?.slice(0, 8) ?? null, agent_tab: ws.agentTab ?? null,
-        ...recordAndCountObservedApiEvents(monoNow(), account),
+        ...recordAndCountObservedApiEvents(requestStartedAtMono, account, receivedAtMono, requestAgeAtSendMs),
       });
       return;
     }
