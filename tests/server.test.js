@@ -1332,12 +1332,16 @@ test('observation report joins throttled broker actions only to unique ask outco
     { schema_version: 2, event_type: 'broker_action', action: 'send_prompt', ok: false, account: 'account-a', ask_id: 'ask-duplicate', rate_limited: true },
   ].map(JSON.stringify).join('\n') + '\n');
   fs.writeFileSync(path.join(observationDir, 'bridge-events.jsonl'), [
-    { schema_version: 1, outcome: 'failed', account: 'account-a', ask_id: 'ask-a', failure_kind: 'rate_limited' },
-    { schema_version: 1, outcome: 'failed', account: 'account-b', ask_id: 'ask-b' },
-    { schema_version: 1, outcome: 'success', account: 'account-c', ask_id: 'ask-no-action' },
-    { schema_version: 1, outcome: 'failed', account: 'account-a', ask_id: 'ask-duplicate' },
-    { schema_version: 1, outcome: 'failed', account: 'account-a', ask_id: 'ask-duplicate' },
-    { schema_version: 1, outcome: 'success', account: 'account-c' },
+    { schema_version: 1, outcome: 'failed', account: 'account-a', ask_id: 'ask-a', failure_kind: 'rate_limited', started_at: '2026-09-30T10:15:00.000Z' },
+    { schema_version: 1, outcome: 'failed', account: 'account-b', ask_id: 'ask-b', started_at: '2026-09-30T11:05:00.000Z' },
+    { schema_version: 1, outcome: 'success', account: 'account-c', ask_id: 'ask-no-action', started_at: '2026-09-30T10:05:00.000Z' },
+    { schema_version: 1, outcome: 'failed', account: 'account-a', ask_id: 'ask-duplicate', started_at: '2026-09-30T10:20:00.000Z' },
+    { schema_version: 1, outcome: 'failed', account: 'account-a', ask_id: 'ask-duplicate', started_at: '2026-09-30T10:21:00.000Z' },
+    { schema_version: 1, outcome: 'success', account: 'account-a', ask_id: 'ask-c', started_at: '2026-09-30T10:55:00.000Z' },
+    { schema_version: 1, outcome: 'success', account: 'account-a', ask_id: 'ask-d', started_at: '2026-09-30T11:01:00.000Z' },
+    { schema_version: 1, outcome: 'success', account: null, ask_id: 'ask-no-account', started_at: '2026-09-30T11:30:00.000Z' },
+    { schema_version: 1, outcome: 'success', account: 'account-a', ask_id: 'ask-invalid-time', started_at: 'not-a-time' },
+    { schema_version: 1, outcome: 'success', account: 'account-c', started_at: '2026-09-30T11:00:00.000Z' },
   ].map(JSON.stringify).join('\n') + '\n');
 
   const output = execFileSync(process.execPath, ['scripts/bridge-observation-report.js'], {
@@ -1347,17 +1351,17 @@ test('observation report joins throttled broker actions only to unique ask outco
   });
   const report = JSON.parse(output);
   const join = report.ask_action_join;
-  for (const id of ['ask-a', 'ask-b', 'ask-orphan', 'ask-no-action', 'ask-duplicate']) {
+  for (const id of ['ask-a', 'ask-b', 'ask-orphan', 'ask-no-action', 'ask-duplicate', 'ask-c', 'ask-d', 'ask-no-account', 'ask-invalid-time']) {
     assert.ok(!output.includes(id), `raw ask id ${id} must not appear in the report`);
   }
   assert.equal(report.request_timing.api_request_rows, 1, 'passive page requests remain separately counted');
   assert.equal(join.broker_action_rows, 6);
   assert.equal(join.broker_action_rows_without_ask_id, 1);
-  assert.equal(join.bridge_outcomes_with_ask_id, 5);
+  assert.equal(join.bridge_outcomes_with_ask_id, 9);
   assert.equal(join.bridge_outcomes_without_ask_id, 1);
   assert.equal(join.ask_ids_linked_to_one_outcome, 2);
   assert.equal(join.action_ask_ids_without_outcome, 1);
-  assert.equal(join.outcome_ask_ids_without_action, 1);
+  assert.equal(join.outcome_ask_ids_without_action, 5);
   assert.equal(join.ask_ids_with_multiple_outcomes, 1);
   assert.equal(join.linked_ask_outcomes_with_action_account_mismatch, 1);
   assert.equal(join.linked_ask_outcomes_with_rate_limited_action, 1);
@@ -1365,6 +1369,21 @@ test('observation report joins throttled broker actions only to unique ask outco
   assert.equal(join.rate_limited_broker_action_rows_unjoined, 3);
   assert.deepEqual(join.rate_limited_broker_actions_by_account_action, [
     { account: 'account_1', action: 'get_reply', outcome: 'failed', rate_limited: true, count: 1 },
+  ]);
+
+  const throughput = report.ask_outcome_throughput;
+  assert.equal(throughput.bridge_outcome_rows, 10);
+  assert.equal(throughput.outcomes_with_ask_id, 9);
+  assert.equal(throughput.outcomes_without_ask_id, 1);
+  assert.equal(throughput.ask_ids_with_multiple_outcomes, 1);
+  assert.equal(throughput.duplicate_outcome_rows_excluded, 2);
+  assert.equal(throughput.unique_tagged_ask_outcomes, 7);
+  assert.equal(throughput.unique_tagged_outcomes_without_account, 1);
+  assert.equal(throughput.unique_tagged_outcomes_without_valid_start_time, 1);
+  assert.deepEqual(throughput.by_account, [
+    { account: 'account_1', ask_outcomes: 3, successes: 2, failures: 1, other_outcomes: 0, rate_limited_outcomes: 1, active_utc_start_hours: 2, successful_asks_per_active_utc_start_hour: 1 },
+    { account: 'account_2', ask_outcomes: 1, successes: 0, failures: 1, other_outcomes: 0, rate_limited_outcomes: 0, active_utc_start_hours: 1, successful_asks_per_active_utc_start_hour: 0 },
+    { account: 'account_3', ask_outcomes: 1, successes: 1, failures: 0, other_outcomes: 0, rate_limited_outcomes: 0, active_utc_start_hours: 1, successful_asks_per_active_utc_start_hour: 1 },
   ]);
 });
 

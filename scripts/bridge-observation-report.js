@@ -307,6 +307,89 @@ function groupOutcomeCounts(events, accountField = 'account') {
   return [...groups.values()].sort((a, b) => a.account.localeCompare(b.account) || a.outcome.localeCompare(b.outcome));
 }
 
+function summarizeAskOutcomeThroughput(bridgeEvents) {
+  const outcomesByAskId = new Map();
+  let outcomesWithoutAskId = 0;
+  for (const outcome of bridgeEvents) {
+    if (typeof outcome.ask_id !== 'string' || !outcome.ask_id) {
+      outcomesWithoutAskId++;
+      continue;
+    }
+    if (!outcomesByAskId.has(outcome.ask_id)) outcomesByAskId.set(outcome.ask_id, []);
+    outcomesByAskId.get(outcome.ask_id).push(outcome);
+  }
+
+  const accountGroups = new Map();
+  let duplicateOutcomeIds = 0;
+  let duplicateOutcomeRowsExcluded = 0;
+  let uniqueTaggedOutcomes = 0;
+  let uniqueTaggedOutcomesWithoutAccount = 0;
+  let uniqueTaggedOutcomesWithoutValidStartTime = 0;
+  for (const outcomes of outcomesByAskId.values()) {
+    if (outcomes.length !== 1) {
+      duplicateOutcomeIds++;
+      duplicateOutcomeRowsExcluded += outcomes.length;
+      continue;
+    }
+    uniqueTaggedOutcomes++;
+    const [outcome] = outcomes;
+    if (typeof outcome.account !== 'string' || !outcome.account) {
+      uniqueTaggedOutcomesWithoutAccount++;
+      continue;
+    }
+    const startedAtMs = timestampMs(outcome.started_at);
+    if (startedAtMs === null) {
+      uniqueTaggedOutcomesWithoutValidStartTime++;
+      continue;
+    }
+
+    const group = accountGroups.get(outcome.account) || {
+      account: outcome.account,
+      ask_outcomes: 0,
+      successes: 0,
+      failures: 0,
+      other_outcomes: 0,
+      rate_limited_outcomes: 0,
+      activeUtcStartHours: new Set(),
+    };
+    group.ask_outcomes++;
+    if (outcome.outcome === 'success') group.successes++;
+    else if (outcome.outcome === 'failed') group.failures++;
+    else group.other_outcomes++;
+    if (outcome.outcome === 'failed' && outcome.failure_kind === 'rate_limited') group.rate_limited_outcomes++;
+    group.activeUtcStartHours.add(new Date(startedAtMs).toISOString().slice(0, 13));
+    accountGroups.set(outcome.account, group);
+  }
+
+  const byAccount = [...accountGroups.values()].map((group) => {
+    const activeUtcStartHours = group.activeUtcStartHours.size;
+    return {
+      account: group.account,
+      ask_outcomes: group.ask_outcomes,
+      successes: group.successes,
+      failures: group.failures,
+      other_outcomes: group.other_outcomes,
+      rate_limited_outcomes: group.rate_limited_outcomes,
+      active_utc_start_hours: activeUtcStartHours,
+      successful_asks_per_active_utc_start_hour: activeUtcStartHours
+        ? Math.round((group.successes / activeUtcStartHours) * 100) / 100
+        : null,
+    };
+  }).sort((a, b) => a.account.localeCompare(b.account));
+
+  return {
+    bridge_outcome_rows: bridgeEvents.length,
+    outcomes_with_ask_id: bridgeEvents.length - outcomesWithoutAskId,
+    outcomes_without_ask_id: outcomesWithoutAskId,
+    ask_ids_with_multiple_outcomes: duplicateOutcomeIds,
+    duplicate_outcome_rows_excluded: duplicateOutcomeRowsExcluded,
+    unique_tagged_ask_outcomes: uniqueTaggedOutcomes,
+    unique_tagged_outcomes_without_account: uniqueTaggedOutcomesWithoutAccount,
+    unique_tagged_outcomes_without_valid_start_time: uniqueTaggedOutcomesWithoutValidStartTime,
+    by_account: byAccount,
+  };
+}
+
 function summarizeBrokerActions(events) {
   const groups = new Map();
   for (const event of events) {
@@ -480,6 +563,7 @@ const report = {
   by_conversation_mode: countBy(events, 'conversation_mode'),
   by_thinking_level: countBy(events, 'thinking_level'),
   bridge_outcomes_by_account: groupOutcomeCounts(events),
+  ask_outcome_throughput: summarizeAskOutcomeThroughput(events),
   duration_ms: { median: oldPercentile(0.5), p95: oldPercentile(0.95) },
   rate_limited_events: events.filter((event) => event.failure_kind === 'rate_limited').map((event) => ({ started_at: event.started_at, ended_at: event.ended_at, thread_id: event.thread_id, conversation_mode: event.conversation_mode, history_message_count: event.history_message_count })),
   request_timing: {
@@ -497,6 +581,7 @@ const report = {
     'Passive api_request observations are account and endpoint evidence; they have no route_id and are not causally assigned to individual asks.',
     'route_id joins an automatic account_route decision to its broker ask outcome; ask_id joins broker_action rows to ask outcomes. Neither assigns passive API requests to individual asks.',
     'ask_action_join includes only broker_action events with a unique ask_id outcome; legacy or ambiguous rows remain unjoined.',
+    'ask_outcome_throughput reports successful tagged asks per distinct UTC start-hour containing an eligible ask outcome. It describes observed workload, not safe capacity or a global maximum.',
     'Request observations do not record HTTP method, so conversation endpoint 429s cannot be classified as prompt sends versus reads.',
     'Account, tab, and conversation identifiers are replaced with labels consistent only within this report; source file paths are reduced to basenames.',
     'These observations cover connected browser pages only and do not expose ChatGPT quota counters or activity outside those pages.',

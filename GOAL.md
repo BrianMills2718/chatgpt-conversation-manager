@@ -82,7 +82,7 @@ governs while working in it.
 | C5 | Per-person deployment documented | The written README/CLAUDE.md section accurately describes what C1-C4 actually built, not an aspirational future state |
 | C6 | Adaptive account routing responds to account cooldowns | A broker-level test feeds a synthetic 429 to account A, verifies A's learned gap widens, then verifies an unpinned new ask selects idle account B with the earlier projected start; the route decision is joined to its ask outcome by `route_id` |
 | C7 | API timing evidence survives browser clock skew and delayed delivery | The extension sends page-relative request age at socket-send time; the broker reconstructs start/completion from that age and its receipt clocks, and rolling request counts use request-start times. Synthetic tests prove skewed/legacy wall timestamps are not trusted and buffered events retain their original timing window |
-| C8 | Broker-visible throttles are attributable to individual asks | Each ask's broker actions and bridge outcome share one random `ask_id`; the offline report joins only to one unique outcome, reports rate-limited action counts plus missing/duplicate/account-mismatch counts, and never prints ask IDs. Legacy rows remain unjoined; passive `api_request` rows remain unassigned. A synthetic ask-level 429 test proves the join without live ChatGPT traffic |
+| C8 | Broker-visible throttles and useful ask throughput are attributable to individual asks | Each ask's broker actions and bridge outcome share one random `ask_id`; the offline report joins only to one unique outcome, reports rate-limited action counts plus missing/duplicate/account-mismatch counts, and never prints ask IDs. For unique tagged outcomes with an account and valid start time, it reports successes per distinct active UTC start-hour by account; untagged, duplicate, missing-account, and invalid-time outcomes are reported or excluded. This is descriptive observed workload, not a safe-rate or maximum-capacity estimate. Legacy rows remain unjoined; passive `api_request` rows remain unassigned. Synthetic cases prove the attribution and rate arithmetic without live ChatGPT traffic |
 
 C6 proves the scheduler behavior using controlled browser fakes. It does not
 prove ChatGPT's hidden account limits or claim that any fixed routing policy
@@ -133,11 +133,14 @@ browser pages.
   actions separate, pseudonymizes account, tab, and conversation identifiers
   within the report, reduces source paths to filenames, joins automatic route
   decisions to ask outcomes by `route_id`, and joins broker actions to ask
-  outcomes by `ask_id` when the outcome is unique. It reports missing and
-  mismatched joins without exposing raw ask IDs. It does not assign passive
-  page requests to individual asks. Request rows do not include HTTP method,
-  so `conversation` endpoint 429s cannot be classified as prompt sends versus
-  reads.
+  outcomes by `ask_id` when the outcome is unique. It also summarizes
+  successful uniquely tagged outcomes per account and per active UTC start-hour,
+  excluding ambiguous or incomplete outcomes from the rate. It reports missing
+  and mismatched joins without exposing raw ask IDs. This is a descriptive
+  rate under observed workloads, not a capacity or global-maximum estimate. It
+  does not assign passive page requests to individual asks. Request rows do not
+  include HTTP method, so `conversation` endpoint 429s cannot be classified as
+  prompt sends versus reads.
 - **Boundary:** observation does not send agent prompts or run scheduled archive
   sync. Connected ChatGPT tabs still make real API requests, which are recorded
   by the observer and count against those accounts. Do not treat passive page
@@ -367,3 +370,15 @@ non_gating_utility_review:
   routing behavior is unchanged. This work did not activate or restart the
   broker and made no live ChatGPT requests. Useful per-account capacity and a
   real throttle-driven account switch still require future live observations.
+- **Per-account tagged ask-throughput summary is implemented.** The offline
+  report counts successful, failed, rate-limited, and other unique tagged
+  outcomes by account, and reports successes per active UTC start-hour.
+  Untagged, duplicate, account-missing, and invalid-start-time outcomes are
+  counted or excluded explicitly. Synthetic tests cover multiple accounts,
+  outcomes, and hours and ensure raw ask IDs do not appear. The canonical
+  archive contains 681 bridge outcomes but none has an `ask_id`, so it yields
+  no eligible per-account rate; these historical outcomes cannot be
+  attributed retroactively. This is descriptive workload evidence, not safe
+  capacity or a maximum rate. This increment used saved files only and made no
+  live ChatGPT requests. A real throttle-driven account switch and useful
+  per-account capacity remain unproven.
