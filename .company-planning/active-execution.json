@@ -1,0 +1,58 @@
+{
+  "active_slice": {
+    "description": "Correlate broker-visible rate-limit actions to the ask outcome and report aggregate evidence without assigning passive page requests.",
+    "next_action": "Add ask_id to ask-scoped broker_action rows and outcomes; test an ask-level synthetic 429 and the offline report join.",
+    "requires_external_action": false,
+    "requires_spend": false,
+    "slice_id": "instrument-ask-level-broker-throttle-attribution",
+    "status": "executing",
+    "target_revision": "8ca6512f2bc1e497fbc649bbfb1a03aa96c532b8"
+  },
+  "authority": {
+    "external_action_authorized": false,
+    "human_decision": null,
+    "human_decision_required": false,
+    "implementation_authorized": true,
+    "spend_cap_usd": 0,
+    "spend_used_usd": 0
+  },
+  "circuit_breakers": {
+    "context_integrity_valid": true,
+    "max_same_boundary_failures": 3,
+    "runtime_integrity_valid": true
+  },
+  "completion": {
+    "evidence_revision": null,
+    "receipt_ref": null,
+    "remaining_ready_work": 1,
+    "requested": false,
+    "verifier_outcome": null
+  },
+  "cursor_id": "ask-throttle-attribution-20260930",
+  "cursor_revision": 1,
+  "failure_state": {
+    "boundary": null,
+    "last_failure_ref": null,
+    "same_boundary_failures": 0
+  },
+  "goal_ref": "goal:reduce-chatgpt-throttling-while-measuring-useful-per-account-throughput",
+  "lifecycle_state": "active",
+  "observations": [
+    {
+      "boundary": "broker ask and request-timing JSONL",
+      "evidence_ref": "At base e399b88: server/index.js logs broker_action and bridge outcomes independently; bridge-observation-report.js only joins account_route by route_id.",
+      "kind": "supporting_work",
+      "observation_id": "missing-ask-action-join",
+      "outcome": "pass"
+    }
+  ],
+  "plan_revision": "GOAL.md@6903f256bb5c4505f367f281830434c0f3733222;PlanningPathDecisionV1@5df3f780b3dad3e6f2ab23da04f5bf1da632fdc7",
+  "ready_alternatives": [],
+  "record_type": "plan_execution_cursor",
+  "schema_version": "1.0",
+  "target": {
+    "branch": "codex/ask-throttle-attribution",
+    "repository": "/home/brian/code/chatgpt-conversation-manager-v0.2",
+    "worktree": "/home/brian/code/chatgpt-conversation-manager-v0.2/worktrees/codex-ask-throttle-attribution"
+  }
+}
