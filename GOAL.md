@@ -275,7 +275,8 @@ non_gating_utility_review:
   first/second-half shifts over an hour. Many rows arrived in short broker-time
   bursts. The history supports counts and status mix, but not trustworthy
   account request rates or an optimal pacing interval.
-- **C7 timing-provenance repair is on branch `fix/request-timing-provenance`.**
+- **C7 timing-provenance repair is merged** in PR #68, broker commit
+  `8e062c54e64fcdbcb9e4febe9ba4ac7c83cafa4d`.
   New observations keep a page-relative start marker until socket send; the
   broker reconstructs request timestamps from its receipt clocks and elapsed
   age. Best-effort rolling counts use request-start time for observations sent
