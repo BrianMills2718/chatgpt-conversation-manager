@@ -115,25 +115,32 @@ browser pages.
   schema-version-3 rows, use the logged request-start time directly and retain
   the `timing_basis`; the timestamp is reconstructed from the broker's receipt
   clock and the page-relative age measured immediately before socket send.
-- **Readout:** per account and endpoint class, report event count, status mix,
-  429 share, and observed start-to-start request gaps only for timing-valid
-  tabs. Embedded rolling counts are best-effort counts of observations already
-  received, retained for requests up to five minutes old with a ten-minute
-  timestamp cache covering the preceding five-minute window; older observations
-  keep their raw timing/status but have null rolling counts. Recompute
-  historical windows from the event rows, accounting for telemetry gaps.
+- **Readout:** per account, `agent_tab` state, and endpoint class, report event
+  count, status mix, 429 share, and observed start-to-start request gaps only
+  for timing-valid rows. Embedded rolling counts are best-effort counts of
+  observations already received, retained for requests up to five minutes old
+  with a ten-minute timestamp cache covering the preceding five-minute window;
+  older observations keep their raw timing/status but have null rolling counts.
+  Recompute historical windows from the event rows, accounting for telemetry
+  gaps.
   Treat missing status and invalid/unstable timing separately. No
   causal, prompt-rate, hidden-quota, or global-maximum claim follows from this
   retrospective analysis.
 - `node scripts/bridge-observation-report.js` reads both observation logs,
-  reports API requests by account and endpoint, keeps broker actions separate,
-  pseudonymizes account, tab, and conversation identifiers within the report,
-  reduces source paths to filenames, and joins automatic route decisions to ask
-  outcomes only by `route_id`. It does not assign passive page requests to
-  individual asks.
-- **Boundary:** no new ChatGPT traffic is generated. If timing validity fails,
-  stop at counts and status mix and use future schema-version-3 observations
-  from ordinary connected-page activity only if/when the broker is running.
+  reports API requests by account, agent-tab state, and endpoint, keeps broker
+  actions separate, pseudonymizes account, tab, and conversation identifiers
+  within the report, reduces source paths to filenames, and joins automatic
+  route decisions to ask outcomes only by `route_id`. It does not assign
+  passive page requests to individual asks. Request rows do not include HTTP
+  method, so `conversation` endpoint 429s cannot be classified as prompt sends
+  versus reads.
+- **Boundary:** observation does not send agent prompts or run scheduled archive
+  sync. Connected ChatGPT tabs still make real API requests, which are recorded
+  by the observer and count against those accounts. Do not treat passive page
+  requests as routed ask volume or generate extra asks solely for measurement
+  without Brian's explicit authorization. If timing validity fails, stop at
+  counts and status mix and use schema-version-3 observations from connected
+  pages only while the broker is running.
 
 ## Increments
 
@@ -270,32 +277,37 @@ non_gating_utility_review:
   assignments. Two parallel asks reserve accounts before probing tabs;
   explicit-account asks stay pinned, thread-targeted asks keep their prior
   path, and route decisions link to outcomes with `route_id`.
-- The merged `npm test` passed 208 tests, including a synthetic 429 on account
-  A followed by an unpinned ask routed to B, parallel asks spread across A and
-  B, and a mixed pinned/automatic queue regression. This proves the scheduler
-  path, not a real ChatGPT quota limit or maximum useful throughput.
+- **Offline adaptive-routing evidence, 2026-09-30 14:28 UTC.** `npm test`
+  passed all 214 tests. `tests/multi-account.test.js` injects a synthetic 429
+  on account A, checks that A's pacer widens, and verifies the next automatic
+  ask routes to B using earliest projected start, with an `account_route`
+  record linked to its successful broker outcome. It also checks parallel
+  unpinned asks spread across A and B. The tests use fake tabs and prove the
+  mocked route path; they do not show a live account throttle causing a switch
+  or establish maximum useful throughput.
 - One bounded live unpinned route smoke succeeded earlier (route event
   `156a2f3d-80c7-4405-be1a-4a3fbd25dea3`), but it did not prove a 429-driven
   account switch or an optimal useful rate. Do not describe the scheduler as a
   proven global maximum.
-- **Observed traffic readout, 2026-09-30 13:42 UTC.** The archive now contains
-  19,516 `api_request` rows from two accounts: 4,039 schema-v2 rows whose
-  legacy clock alignment remains invalid, and 15,477 schema-v3 rows with valid
-  page-relative request starts. The schema-v3 request starts span
-  2026-09-29 16:41:59 through 2026-09-30 13:38:03 UTC, while the broker received
-  that batch between 13:32:43 and 13:38:05 UTC after the passive observer
-  started at 13:31:36. Most of this batch was therefore buffered page activity;
-  receipt-time bursts are not request-rate evidence. The timing reconstruction
-  preserves the earlier page start times.
-- In that sanitized report snapshot, account_1 had 3,418 requests and 6 HTTP
-  429s (0.18%); account_2 had 16,098 requests and 1,133 HTTP 429s (7.04%).
-  Of account_2's 429s, 1,105 were `conversation_list` responses (1,105 of
-  2,039 requests to that endpoint). The 15,477 timing-valid schema-v3 rows
-  include 2,476 for account_1 and 13,001 for account_2. Twenty-seven
-  schema-v3 requests started after the observer began, and none was a 429.
-  These are account-and-endpoint observations from connected browser pages;
+- **Observed traffic readout, 2026-09-30 14:28 UTC.** The archive contained
+  19,775 `api_request` rows from two accounts: 4,039 schema-v2 rows whose
+  legacy clock alignment remains invalid, and 15,736 schema-v3 rows with valid
+  page-relative request starts. Schema-v3 starts span 2026-09-29 16:41:59
+  through 2026-09-30 14:28:42 UTC, while the broker received them between
+  13:32:43 and 14:28:42 UTC after the passive observer started at 13:31:36.
+  15,450 starts predate the observer and arrived in buffered page observations;
+  286 started after it began, and none returned 429. Receipt-time bursts are
+  not request-rate evidence.
+- In that sanitized report snapshot, account_1 had 3,488 requests and 6 HTTP
+  429s (0.17%); account_2 had 16,287 requests and 1,133 HTTP 429s (6.96%).
+  Account_2 had 1,105 `conversation_list` 429s among 2,070 such requests. The
+  new `agent_tab` split shows 1,050 of those 429s on agent tabs (1,050/1,950)
+  and 55 on ordinary tabs (55/120), so the high list-endpoint 429 share is not
+  isolated to agent tabs. The 15,736 valid schema-v3 rows include 2,546 for
+  account_1 and 13,190 for account_2. These are connected-page observations;
   they are not causal prompt measurements and do not expose hidden quota
-  counters.
+  counters. Current rows do not record HTTP method, so 429s classified as
+  `conversation` cannot be distinguished as sends versus reads.
 - **C7 timing-provenance repair is merged** in PR #68, broker commit
   `8e062c54e64fcdbcb9e4febe9ba4ac7c83cafa4d`.
   New observations keep a page-relative start marker until socket send; the
@@ -311,25 +323,29 @@ non_gating_utility_review:
 - **Offline telemetry readout is available** through
   `node scripts/bridge-observation-report.js`. It uses schema-v3 request starts
   directly and validates legacy schema-v2 tab offsets before reporting gaps;
-  route decisions join ask outcomes by `route_id`. The current report contains
-  15,477 valid schema-v3 timings, but passive `api_request` rows have no
-  `route_id` and cannot be assigned to individual asks. The separate bridge
-  archive has 681 ask outcomes (505 successes, 176 failures), with 428 lacking
-  account attribution; one automatic route decision is linked one-to-one to a
-  successful ask outcome. The report does not show a rate-limited ask outcome.
-  Thus the logs now support descriptive per-account API request rates and
-  status mixes, but not useful routed tasks per hour or a causal comparison of
-  the pacing policy. [PR #73](https://github.com/BrianMills2718/chatgpt-conversation-manager/pull/73)
-  replaces account, tab, and conversation identifiers with report-local
-  labels and reduces source paths to filenames. A current scan of 24,898
-  archived rows found zero raw identifier or personal-path matches in report
+  route decisions join ask outcomes by `route_id`. It now splits request
+  summaries by account, `agent_tab` state, and endpoint;
+  [PR #73](https://github.com/BrianMills2718/chatgpt-conversation-manager/pull/73)
+  keeps account, tab, and conversation identifiers report-local and reduces
+  source paths to basenames. A privacy scan at 14:28 UTC against 25,155
+  archived rows found zero raw identifier or full-path matches in report
   output.
-- At this readout the broker is running for a bounded passive capture with
-  `SYNC_INTERVAL_MINUTES=0`; its expiry timer will stop it at 2026-09-30
-  14:31:36 UTC and clear the override. This session sent no agent prompts and
-  scheduled archive sync was disabled. The capture recorded ordinary
-  connected-page observations, including buffered events; zero of the 27
-  post-start request starts returned 429. The earlier live two-account
-  dispatch and unpinned route smoke still do not demonstrate a real
-  429-triggered account switch. Useful per-account task throughput and an
-  optimal or globally maximal rate remain unmeasured.
+- The separate bridge archive has 681 ask outcomes (505 successes, 176
+  failures), with 428 lacking account attribution; one automatic route
+  decision joins one-to-one to a successful ask outcome. Among attributed
+  outcomes, account_1 had 15 successful replies in 3 UTC start-hours (5.0 per
+  active start-hour), while account_2 had 208 in 14 (14.86 per active
+  start-hour). These are observed broker-success replies over different
+  workloads, not user-rated quality or a controlled capacity comparison. The
+  archive has no ask outcome classified as rate-limited, so the successful
+  reply rates cannot be paired with the passive API 429s or used to choose an
+  optimal pace.
+- At this readout the broker is running for bounded passive observation with
+  `SYNC_INTERVAL_MINUTES=0`; the expiry timer is due at 14:35:06 UTC and stops
+  the service and clears the override. This session sent no agent prompts and
+  disabled scheduled archive sync. Requests recorded from connected ChatGPT
+  tabs are still real account traffic; 286 page requests started after observer
+  launch, with zero 429s. The earlier live two-account dispatch and
+  unpinned route smoke still do not demonstrate a real 429-triggered account
+  switch. Useful per-account capacity and an optimal or globally maximal rate
+  remain unmeasured.

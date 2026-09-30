@@ -111,11 +111,14 @@ or trigger account selection.
 
 For a local summary of recorded traffic, run
 `node scripts/bridge-observation-report.js`. It reports API status and
-validated request gaps by account and endpoint, counts broker actions
-separately, and joins automatic route choices to ask outcomes by `route_id`.
-Account, tab, and conversation IDs are replaced with labels consistent within
-each report, and source paths are reduced to filenames. Passive API observations
-are not assigned to individual asks, and the report does not claim an optimal
+validated request gaps by account and endpoint, with an additional breakdown
+by whether each event came from an agent-managed tab, an ordinary tab, or an
+unknown tab. It counts broker actions separately and joins automatic route
+choices to ask outcomes by `route_id`. Account, tab, and conversation IDs are
+replaced with labels consistent within each report, and source paths are
+reduced to filenames. Passive API observations are not assigned to individual
+asks. They do not include HTTP method, so a `conversation` endpoint 429 cannot
+be classified as a prompt send or a read. The report does not claim an optimal
 rate.
 
 - **Reading.** One connected tab per account is enough to *read* any of that account's chats, including ones started in the ChatGPT desktop app.

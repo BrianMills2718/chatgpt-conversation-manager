@@ -1225,22 +1225,28 @@ test('observation report separates passive API traffic and joins automatic route
   const observationDir = path.join(archiveDir, 'observations');
   fs.mkdirSync(observationDir, { recursive: true });
   const start = Date.parse('2026-09-20T00:00:00.000Z');
-  const apiRequest = (offsetMs, apiStatus) => ({
-    schema_version: 3,
-    event_type: 'api_request',
-    action: 'chatgpt_api_request',
-    account: 'account-a',
-    tab: 'tab-a',
-    endpoint_class: 'conversation',
-    request_started_at: new Date(start + offsetMs).toISOString(),
-    completed_at: new Date(start + offsetMs + 100).toISOString(),
-    duration_ms: 100,
-    api_status: apiStatus,
-    timing_basis: 'broker_receipt_minus_page_monotonic_age',
-  });
+  const apiRequest = (offsetMs, apiStatus, agentTab) => {
+    const event = {
+      schema_version: 3,
+      event_type: 'api_request',
+      action: 'chatgpt_api_request',
+      account: 'account-a',
+      tab: 'tab-a',
+      endpoint_class: 'conversation',
+      request_started_at: new Date(start + offsetMs).toISOString(),
+      completed_at: new Date(start + offsetMs + 100).toISOString(),
+      duration_ms: 100,
+      api_status: apiStatus,
+      timing_basis: 'broker_receipt_minus_page_monotonic_age',
+    };
+    if (agentTab !== undefined) event.agent_tab = agentTab;
+    return event;
+  };
   fs.writeFileSync(path.join(observationDir, 'request-timing.jsonl'), [
-    apiRequest(0, 200),
-    apiRequest(10000, 429),
+    apiRequest(0, 200, true),
+    apiRequest(10000, 429, false),
+    apiRequest(20000, 429),
+    apiRequest(30000, 200, 'unexpected-private-state'),
     { schema_version: 2, event_type: 'account_route', route_id: 'route-a', selected_account: 'account-a' },
     { schema_version: 2, event_type: 'account_route', route_id: 'route-b', selected_account: 'account-a' },
     { schema_version: 2, event_type: 'account_route', route_id: 'route-missing', selected_account: 'account-a' },
@@ -1262,15 +1268,37 @@ test('observation report separates passive API traffic and joins automatic route
   assert.ok(!output.includes('account-a'), 'account identities are anonymized in the report');
   assert.ok(!output.includes('account-b'), 'all accounts use report-local labels');
   const [apiSummary] = report.request_timing.by_account_endpoint;
-  assert.equal(report.request_timing.api_request_rows, 2);
-  assert.equal(report.request_timing.by_account[0].request_count, 2);
-  assert.equal(report.request_timing.by_account[0].rate_limited_count, 1);
-  assert.deepEqual(apiSummary.status_counts, { 200: 1, 429: 1 });
+  assert.equal(report.request_timing.api_request_rows, 4);
+  assert.equal(report.request_timing.by_account[0].request_count, 4);
+  assert.equal(report.request_timing.by_account[0].rate_limited_count, 2);
+  assert.deepEqual(apiSummary.status_counts, { 200: 2, 429: 2 });
   assert.equal(apiSummary.rate_limited_share, 0.5);
-  assert.equal(apiSummary.valid_timing_rows, 2);
+  assert.equal(apiSummary.valid_timing_rows, 4);
   assert.deepEqual(apiSummary.observed_start_gaps_ms, {
-    count: 1, min_ms: 10000, median_ms: 10000, p95_ms: 10000, max_ms: 10000,
+    count: 3, min_ms: 10000, median_ms: 10000, p95_ms: 10000, max_ms: 10000,
   });
+  const agentTabGroups = report.request_timing.by_account_agent_tab_endpoint;
+  const agentTabCounts = agentTabGroups.reduce((counts, group) => {
+    const key = group.agent_tab === null ? 'unknown' : String(group.agent_tab);
+    counts[key] = group.request_count;
+    return counts;
+  }, {});
+  assert.deepEqual(agentTabCounts, { false: 1, true: 1, unknown: 2 });
+  assert.equal(
+    agentTabGroups.reduce((sum, group) => sum + group.request_count, 0),
+    report.request_timing.api_request_rows,
+  );
+  assert.deepEqual(
+    agentTabGroups.reduce((counts, group) => {
+      for (const [status, count] of Object.entries(group.status_counts)) {
+        counts[status] = (counts[status] || 0) + count;
+      }
+      return counts;
+    }, {}),
+    apiSummary.status_counts,
+  );
+  assert.ok(!output.includes('unexpected-private-state'));
+  assert.ok(report.limitations.some((item) => item.includes('HTTP method') && item.includes('conversation endpoint 429s')));
   assert.equal(report.request_timing.telemetry_gaps.dropped_observations, 3);
   assert.equal(report.broker_actions.event_rows, 1, 'broker actions are reported separately from API request rows');
   assert.equal(report.route_outcome_join.route_decisions, 3);
