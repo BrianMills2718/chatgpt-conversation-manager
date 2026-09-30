@@ -26,7 +26,7 @@ function readJsonl(file) {
     }
   });
   if (damagedLines.length) {
-    console.error(`warning: skipped ${damagedLines.length} damaged line(s) in ${file}: ${damagedLines.slice(0, 20).join(', ')}${damagedLines.length > 20 ? ', ...' : ''}`);
+    console.error(`warning: skipped ${damagedLines.length} damaged line(s) in ${path.basename(file)}: ${damagedLines.slice(0, 20).join(', ')}${damagedLines.length > 20 ? ', ...' : ''}`);
   }
   return { events, damagedLines, exists: true };
 }
@@ -355,25 +355,46 @@ function summarizeRoutes(requestEvents, bridgeEvents) {
   };
 }
 
-function anonymizeAccountFields(value, labels) {
-  if (Array.isArray(value)) return value.map((item) => anonymizeAccountFields(item, labels));
+function reportLabels(events, field, prefix) {
+  const identities = [...new Set(events
+    .map((event) => event[field])
+    .filter((identity) => typeof identity === 'string' && identity && identity !== 'unknown'))]
+    .sort((a, b) => a.localeCompare(b));
+  return new Map(identities.map((identity, index) => [identity, `${prefix}_${index + 1}`]));
+}
+
+function anonymizeReportIdentifiers(value, labels) {
+  if (Array.isArray(value)) return value.map((item) => anonymizeReportIdentifiers(item, labels));
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => {
-    if ((key === 'account' || key === 'selected_account') && typeof item === 'string') {
-      return [key, item === 'unknown' ? item : labels.get(item) || 'unknown'];
+    const identifierFields = {
+      account: { output: 'account', labels: labels.account },
+      selected_account: { output: 'selected_account', labels: labels.account },
+      tab: { output: 'tab_ref', labels: labels.tab },
+      thread_id: { output: 'thread_ref', labels: labels.thread },
+    };
+    const identifier = identifierFields[key];
+    if (identifier && typeof item === 'string') {
+      const label = item === 'unknown' ? item : identifier.labels.get(item) || 'unknown';
+      return [identifier.output, label];
     }
-    return [key, anonymizeAccountFields(item, labels)];
+    if (key === 'file' && typeof item === 'string') return [key, path.basename(item)];
+    return [key, anonymizeReportIdentifiers(item, labels)];
   }));
 }
 
 const bridgeLog = readJsonl(bridgeFile);
 const requestLog = readJsonl(requestTimingFile);
 const events = bridgeLog.events;
-const accountIdentities = [...new Set([...requestLog.events, ...events]
-  .flatMap((event) => [event.account, event.selected_account])
-  .filter((account) => typeof account === 'string' && account && account !== 'unknown'))]
-  .sort((a, b) => a.localeCompare(b));
-const accountLabels = new Map(accountIdentities.map((account, index) => [account, `account_${index + 1}`]));
+const allEvents = [...requestLog.events, ...events];
+const labels = {
+  account: reportLabels(allEvents.flatMap((event) => [
+    { account: event.account },
+    { account: event.selected_account },
+  ]), 'account', 'account'),
+  tab: reportLabels(allEvents, 'tab', 'tab'),
+  thread: reportLabels(allEvents, 'thread_id', 'conversation'),
+};
 const durations = events.map((event) => event.duration_ms).filter(Number.isFinite).sort((a, b) => a - b);
 const oldPercentile = (p) => durations.length ? durations[Math.min(durations.length - 1, Math.floor((durations.length - 1) * p))] : null;
 const brokerActions = requestLog.events.filter((event) => event.event_type === 'broker_action');
@@ -400,6 +421,7 @@ const report = {
   limitations: [
     'Passive api_request observations are account and endpoint evidence; they have no route_id and are not causally assigned to individual asks.',
     'route_id joins an automatic account_route decision to its broker ask outcome only; it does not claim that passive API requests came from that ask.',
+    'Account, tab, and conversation identifiers are replaced with labels consistent only within this report; source file paths are reduced to basenames.',
     'These observations cover connected browser pages only and do not expose ChatGPT quota counters or activity outside those pages.',
     'Observed counts and gaps do not establish a global optimal or maximum useful throughput rate.',
   ],
@@ -410,4 +432,4 @@ if (!bridgeLog.exists) {
     ? 'No bridge observations have been captured yet.'
     : 'No bridge or request-timing observations have been captured yet.';
 }
-console.log(JSON.stringify(anonymizeAccountFields(report, accountLabels), null, 2));
+console.log(JSON.stringify(anonymizeReportIdentifiers(report, labels), null, 2));
