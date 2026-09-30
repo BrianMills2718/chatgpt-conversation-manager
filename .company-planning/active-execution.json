@@ -1,12 +1,12 @@
 {
   "active_slice": {
     "description": "Make extension Resource Timing observations clock-skew-safe and retain broker-attributable timing for throughput analysis.",
-    "next_action": "Run focused producer and broker tests, then inspect timing-window and routing regressions before committing the repair.",
+    "next_action": "Run the full repository test suite, inspect the complete diff, update GOAL.md, then commit and perform the integration-boundary checks.",
     "requires_external_action": false,
     "requires_spend": false,
     "slice_id": "repair-page-relative-request-timing",
     "status": "verifying",
-    "target_revision": "0061693da8ec274d7658e986f3f56698f71d06e0"
+    "target_revision": "1120f7c92e224e919d3d5fb3083489d5d20477ec"
   },
   "authority": {
     "external_action_authorized": false,
@@ -29,7 +29,7 @@
     "verifier_outcome": null
   },
   "cursor_id": "request-timing-provenance-20260930",
-  "cursor_revision": 2,
+  "cursor_revision": 3,
   "failure_state": {
     "boundary": null,
     "last_failure_ref": null,
@@ -57,6 +57,13 @@
       "evidence_ref": "Working-tree implementation now sends page-relative age at socket send and reconstructs request start from broker wall/monotonic receipt; source edits are not yet verified.",
       "kind": "supporting_work",
       "observation_id": "relative-age-implementation",
+      "outcome": "pass"
+    },
+    {
+      "boundary": "extension producer and broker consumer timing tests",
+      "evidence_ref": "node --test tests/api-request-observation.test.js: 3 passed, 0 failed, exit 0; node --test --test-name-pattern=\"observed ChatGPT API requests|buffered API observations\" tests/server.test.js: 2 passed, 0 failed, exit 0.",
+      "kind": "supporting_work",
+      "observation_id": "focused-tests-pass",
       "outcome": "pass"
     }
   ],
