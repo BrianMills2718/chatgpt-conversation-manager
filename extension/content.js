@@ -11,7 +11,7 @@ const { sendEvidence, sendEvidenceFromCounts, samePrompt, verbatimMismatch } = a
 const { waitFor: waitForLib } = await import(chrome.runtime.getURL("lib/wait-for.js"));
 const { pingBackground } = await import(chrome.runtime.getURL("lib/background-ping.js"));
 const { apiRequestObservationFromResource, apiRequestObservationForSend } = await import(chrome.runtime.getURL("lib/api-request-observation.js"));
-const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, parseRemoteTime, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats, nextReplyCheckGapMs, REPLY_CHECK_MIN_GAP_MS } = await import(chrome.runtime.getURL("lib/api-capture.js"));
+const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, parseRemoteTime, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats, nextReplyCheckGapMs, REPLY_CHECK_MIN_GAP_MS, fatalArchiveErrorDetails } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
   brokerUrl: "ws://localhost:8787/extension",
@@ -1301,7 +1301,7 @@ function reportDomActivity(threadId, domKey, outcome) {
 async function archiveAllChats({ known = null } = {}) {
   if (bulkArchiving) throw new Error("A bulk archive is already running.");
   bulkArchiving = true;
-  const summary = { mode: known ? "incremental" : "full", listed: 0, total: 0, skipped: 0, archived: 0, failed: [], fatal_error: null, pacing: null };
+  const summary = { mode: known ? "incremental" : "full", listed: 0, total: 0, skipped: 0, archived: 0, failed: [], fatal_error: null, fatal_error_status: null, fatal_error_retry_after_ms: null, pacing: null };
   const pacer = new AdaptivePacer({ initialMs: await loadLearnedSpacing() });
   try {
     const accessToken = await getAccessToken();
@@ -1334,7 +1334,7 @@ async function archiveAllChats({ known = null } = {}) {
         // rate limit or a systemic error will not clear by trying the next one.
         // Unfetched conversations are simply picked up by the next incremental run.
         if (err.abortRun || consecutiveFailures >= 10) {
-          summary.fatal_error = err.abortRun ? err.message : `stopped after ${consecutiveFailures} consecutive failures; last: ${err.message}`;
+          Object.assign(summary, fatalArchiveErrorDetails(err, err.abortRun ? err.message : `stopped after ${consecutiveFailures} consecutive failures; last: ${err.message}`));
           break;
         }
       }
@@ -1346,7 +1346,7 @@ async function archiveAllChats({ known = null } = {}) {
       await sleep(pacer.spacingMs);
     }
   } catch (err) {
-    summary.fatal_error = err.message;
+    Object.assign(summary, fatalArchiveErrorDetails(err));
   } finally {
     bulkArchiving = false;
     summary.pacing = pacer.stats();

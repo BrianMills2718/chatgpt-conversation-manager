@@ -102,11 +102,16 @@ account-wide throttle mid-session, observed directly by Brian in his own ChatGPT
   `data/observations/request-timing.jsonl`) — read that log before assuming a fresh burst is safe, and
   after any live call check for `rate_limited: true` in it rather than only trusting the call's own
   return value.
-- A restarted broker triggers a full background sync ~60 seconds later
-  (`SyncScheduler`'s `firstRunMs`, `server/sync.js`) that makes its own real requests — count that as a
-  live call too when reasoning about request volume around a deploy, and check
-  the broker log (`journalctl --user -u chatgpt-bridge`, or `data/logs/server.log` when started via
-  `scripts/run-server.sh`) for `[sync] FAILED` after any restart.
+- When `SYNC_INTERVAL_MINUTES` is positive, a restarted broker honors a
+  still-future `next_run_at` from `data/metadata/sync-status.json`; without a
+  future deadline, its first background sync starts ~60 seconds later. Setting
+  the interval to `0` disables scheduled sync without disabling the broker. A
+  scheduled sync makes real requests. Count it as a live call when reasoning about request volume
+  around a deploy, and check the broker log (`journalctl --user -u
+  chatgpt-bridge`, or `data/logs/server.log` when started via
+  `scripts/run-server.sh`) for `[sync] FAILED` after any restart. A failed
+  HTTP 429 waits at least the configured interval or the server's
+  `Retry-After`, whichever is longer.
 
 ## Temporary debug surface (remove when done)
 

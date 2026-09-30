@@ -173,15 +173,22 @@ This separation means renaming or reorganizing a thread does not destroy the raw
 
 ## Automatic backup
 
-The broker can back up on a schedule. Every `SYNC_INTERVAL_MINUTES` it asks a
-connected chatgpt.com tab to list all conversations and fetch only those new or
-updated since their last capture (a full re-download of ~800 chats takes hours;
-an incremental run fetches the handful that changed). If no tab is connected it
-runs `SYNC_OPEN_CHATGPT_CMD` first and waits up to 90s for one.
+When `SYNC_INTERVAL_MINUTES` is positive, the broker can back up on a schedule.
+Each run asks a connected chatgpt.com tab to list all conversations and fetch
+only those new or updated since their last capture (a full re-download of ~800
+chats takes hours; an incremental run fetches the handful that changed). If no
+tab is connected it runs `SYNC_OPEN_CHATGPT_CMD` first and waits up to 90s.
 
 - Status of the last run: `GET /api/sync-status` (also written to
   `data/metadata/sync-status.json`): `last_success_at`, `last_result`,
-  `last_error`, `failed_threads`.
+  `last_error`, `last_error_status`, `last_error_retry_after_ms`,
+  `next_run_at`, and `failed_threads`.
+- After HTTP 429, the scheduler waits at least the configured interval or the
+  server's `Retry-After`, whichever is longer. That deadline is saved and a
+  restart honors it while it is still in the future. Other failures keep the
+  shorter retry behavior for issues such as a disconnected or outdated tab.
+- Set `SYNC_INTERVAL_MINUTES=0` to keep the broker available without scheduled
+  archive sync; manual sync remains available when explicitly requested.
 - Run one now: `POST /api/sync`. Incremental manual run: `POST /api/archive-all`
   with body `{"mode":"incremental"}`.
 - Start at Windows logon (WSL): `scripts/install-windows-startup.sh` (only if nothing else starts the broker; see "Keeping the broker running") writes a

@@ -1495,9 +1495,10 @@ test('a bulk archive tab that reconnects and still reports busy is not declared 
   await tab.open();                                  // same page, new socket
   await new Promise((r) => setTimeout(r, 600));      // well past the 200ms grace
   assert.equal(settled, false, 'a live archive was declared dead');
-  tab.ws.send(JSON.stringify({ type: 'bulk_archive_complete', total: 137, archived: 137, failed: [] }));
+  tab.ws.send(JSON.stringify({ type: 'bulk_archive_complete', total: 137, archived: 137, failed: [], fatal_error: 'conversations list fetch failed: HTTP 429', fatal_error_status: 429, fatal_error_retry_after_ms: 12000 }));
   const result = await completion;
-  assert.equal(result.fatal_error, undefined);
+  assert.equal(result.fatal_error_status, 429);
+  assert.equal(result.fatal_error_retry_after_ms, 12000);
   tab.ws.close();
 });
 
