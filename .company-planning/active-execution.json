@@ -1,12 +1,12 @@
 {
   "active_slice": {
     "description": "Make extension Resource Timing observations clock-skew-safe and retain broker-attributable timing for throughput analysis.",
-    "next_action": "Implement page-relative age at socket send, reconstruct at broker receipt, and verify producer, consumer, and existing routing behavior with synthetic tests.",
+    "next_action": "Run focused producer and broker tests, then inspect timing-window and routing regressions before committing the repair.",
     "requires_external_action": false,
     "requires_spend": false,
     "slice_id": "repair-page-relative-request-timing",
-    "status": "ready",
-    "target_revision": "1102b012287b984d79e79c6ad3f242e6c26c8049"
+    "status": "verifying",
+    "target_revision": "0061693da8ec274d7658e986f3f56698f71d06e0"
   },
   "authority": {
     "external_action_authorized": false,
@@ -29,7 +29,7 @@
     "verifier_outcome": null
   },
   "cursor_id": "request-timing-provenance-20260930",
-  "cursor_revision": 1,
+  "cursor_revision": 2,
   "failure_state": {
     "boundary": null,
     "last_failure_ref": null,
@@ -50,6 +50,13 @@
       "evidence_ref": "Source inspection: extension/content.js derives absolute timestamps and server/index.js:352-368 trusts and logs them.",
       "kind": "supporting_work",
       "observation_id": "event-contract-inspection",
+      "outcome": "pass"
+    },
+    {
+      "boundary": "extension-to-broker timing contract",
+      "evidence_ref": "Working-tree implementation now sends page-relative age at socket send and reconstructs request start from broker wall/monotonic receipt; source edits are not yet verified.",
+      "kind": "supporting_work",
+      "observation_id": "relative-age-implementation",
       "outcome": "pass"
     }
   ],
