@@ -364,25 +364,43 @@ non_gating_utility_review:
   outcome, and surfaces missing, duplicate, and account-mismatched joins
   without emitting the raw IDs. The synthetic ask-level 429 and report tests
   pass; the complete suite reports 215 passed, 0 failed, 0 skipped, exit 0,
-  and the syntax check reports 16 passed, 0 failed, 0 skipped, exit 0. A
-  read-only report of the canonical archive found 681 outcomes and 3 broker
-  actions without `ask_id`, with no joined asks; those historical rows cannot
-  be attributed retroactively. Passive page requests remain unassigned, and
-  routing behavior is unchanged. This work did not activate or restart the
-  broker and made no live ChatGPT requests. Useful per-account capacity and a
-  real throttle-driven account switch still require future live observations.
+  and the syntax check reports 16 passed, 0 failed, 0 skipped, exit 0. At the
+  C8 implementation snapshot, a read-only report of the canonical archive
+  found 681 outcomes and 3 broker actions without `ask_id`, with no joined
+  asks; those historical rows cannot be attributed retroactively. Passive
+  page requests remain unassigned, and
+  routing behavior is unchanged. The C8 implementation itself used saved
+  files only and did not activate or restart the broker or make live ChatGPT
+  requests. The bounded live trial below added one tagged outcome, but useful
+  per-account capacity and a real throttle-driven account switch remain
+  unproven.
 - **Per-account tagged ask-throughput summary is implemented.** The offline
   report counts successful, failed, rate-limited, and other unique tagged
   outcomes by account, and reports successes per active UTC start-hour.
   Untagged, duplicate, account-missing, and invalid-start-time outcomes are
   counted or excluded explicitly. Synthetic tests cover multiple accounts,
-  outcomes, and hours and ensure raw ask IDs do not appear. The canonical
-  archive contains 681 bridge outcomes but none has an `ask_id`, so it yields
-  no eligible per-account rate; these historical outcomes cannot be
-  attributed retroactively. This is descriptive workload evidence, not safe
-  capacity or a maximum rate. This increment used saved files only and made no
-  live ChatGPT requests. A real throttle-driven account switch and useful
-  per-account capacity remain unproven.
+  outcomes, and hours and ensure raw ask IDs do not appear. The baseline archive
+  contained 681 bridge outcomes without an `ask_id`; those historical outcomes
+  cannot be attributed retroactively. A later bounded live ask added one tagged
+  outcome (below). This is descriptive workload evidence, not safe
+  capacity or a maximum rate. The instrumentation increment used saved files
+  only and made no live ChatGPT requests. A real throttle-driven account switch
+  and useful per-account capacity remain unproven.
+- **Bounded live throttle trial, 2026-09-30.** With Brian's authorization, one
+  new ask was pinned to the connected account shown as `account_2` in the
+  sanitized report, which had recent passive 429 observations (latest before
+  the ask: 20:30:43 UTC). The bridge returned the requested reply at 22:53:40
+  UTC; a direct transcript read confirmed the user prompt and finished
+  assistant reply. The ask did not receive a 429, so the approved stop
+  condition applied and no second unpinned ask was sent. The post-trial report
+  contains 682 bridge outcomes: one uniquely tagged `account_2` success in one
+  active UTC start-hour, zero rate-limited ask outcomes, and three broker
+  actions linked to that outcome, all successful and not rate-limited. The
+  pinned ask has no `route_id`; this trial verifies live ask execution and
+  attribution, not automatic switching after a throttle. C6 remains unproven
+  under a real 429, and this single observation does not estimate safe or
+  optimal throughput. The bridge was already active; scheduled sync remained
+  disabled with `SYNC_INTERVAL_MINUTES=0`.
 - **C9 structured sync backoff is merged in broker PR #82** at
   `5057cdfe7c67263e504af509cebba9acafa4afc8`. The extension completion
   preserves HTTP status and `Retry-After`; the scheduler stores them, waits at
