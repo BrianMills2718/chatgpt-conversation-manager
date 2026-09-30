@@ -322,6 +322,21 @@ npm test        # node --test — unit + light integration tests, no browser req
 
 Covers: title selection (including the exact "Skip to content" regression), snapshot normalization/dedup, same-origin API-tree linearization (branch selection, cycles, system-message filtering), archive store (content-hash history dedup, sequence allocation/collision, undo, lineage/status, search filters, wiki generation), and server auth/error-surfacing.
 
+### Focused offline adaptive-routing demo
+
+Run the synthetic two-account throttle case without sending anything to
+ChatGPT:
+
+```bash
+node --test --test-name-pattern='an observed 429 routes the next unpinned new ask' tests/multi-account.test.js
+```
+
+The test injects an HTTP 429 into account A's fake tab, verifies that A's
+pacing gap widens, then checks that the next unpinned ask is routed to account
+B and recorded with its successful outcome. It demonstrates the mocked
+routing path only; it does not prove a live ChatGPT throttle or a maximum useful
+throughput rate.
+
 ## Manual browser smoke test (required — cannot be automated safely)
 
 Automated testing cannot exercise a real, logged-in chatgpt.com session (that would require either simulating login, which is out of scope/unsafe, or an already-authenticated real browser). Run this manually after loading the extension:
