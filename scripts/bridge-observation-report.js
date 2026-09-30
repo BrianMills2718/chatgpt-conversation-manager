@@ -77,16 +77,21 @@ function summarizeGaps(starts) {
 function summarizeRequestTiming(events) {
   const apiEvents = events.filter((event) => event.event_type === 'api_request');
   const groups = new Map();
+  const groupsByAgentTab = new Map();
   const states = new Map();
   const legacyTabs = new Map();
   const invalidWithoutTab = [];
 
-  const groupFor = (event) => {
+  const groupFor = (event, includeAgentTab = false) => {
     const account = event.account || 'unknown';
     const endpointClass = event.endpoint_class || 'unknown';
-    const key = JSON.stringify([account, endpointClass]);
-    if (!groups.has(key)) {
-      groups.set(key, {
+    const agentTab = event.agent_tab === true ? true : event.agent_tab === false ? false : null;
+    const targetGroups = includeAgentTab ? groupsByAgentTab : groups;
+    const key = JSON.stringify(includeAgentTab
+      ? [account, agentTab, endpointClass]
+      : [account, endpointClass]);
+    if (!targetGroups.has(key)) {
+      const group = {
         account,
         endpoint_class: endpointClass,
         events: [],
@@ -95,18 +100,22 @@ function summarizeRequestTiming(events) {
         timing_basis_counts: {},
         invalid_timing_reason_counts: {},
         valid_timing_rows: 0,
-      });
+      };
+      if (includeAgentTab) group.agent_tab = agentTab;
+      targetGroups.set(key, group);
     }
-    return groups.get(key);
+    return targetGroups.get(key);
   };
 
   for (const event of apiEvents) {
-    const group = groupFor(event);
-    group.events.push(event);
+    const eventGroups = [groupFor(event), groupFor(event, true)];
     const status = event.api_status == null ? 'missing' : String(event.api_status);
-    group.status_counts[status] = (group.status_counts[status] || 0) + 1;
     const basis = event.timing_basis || `schema_v${event.schema_version ?? 'unknown'}_legacy_or_unset`;
-    group.timing_basis_counts[basis] = (group.timing_basis_counts[basis] || 0) + 1;
+    for (const group of eventGroups) {
+      group.events.push(event);
+      group.status_counts[status] = (group.status_counts[status] || 0) + 1;
+      group.timing_basis_counts[basis] = (group.timing_basis_counts[basis] || 0) + 1;
+    }
     states.set(event, { valid: false, startMs: null, reason: null });
 
     if (Number(event.schema_version) === 3) {
@@ -195,20 +204,21 @@ function summarizeRequestTiming(events) {
 
   for (const event of apiEvents) {
     const state = states.get(event);
-    const group = groupFor(event);
-    if (state.valid) {
-      group.valid_timing_rows++;
-      group.starts.push(state.startMs);
-    } else {
-      const reason = state.reason || 'invalid_timing';
-      group.invalid_timing_reason_counts[reason] = (group.invalid_timing_reason_counts[reason] || 0) + 1;
+    for (const group of [groupFor(event), groupFor(event, true)]) {
+      if (state.valid) {
+        group.valid_timing_rows++;
+        group.starts.push(state.startMs);
+      } else {
+        const reason = state.reason || 'invalid_timing';
+        group.invalid_timing_reason_counts[reason] = (group.invalid_timing_reason_counts[reason] || 0) + 1;
+      }
     }
   }
 
-  const byAccountEndpoint = [...groups.values()].map((group) => {
+  const summarizeEndpointGroup = (group) => {
     const requestCount = group.events.length;
     const rateLimitedCount = group.status_counts['429'] || 0;
-    return {
+    const summary = {
       account: group.account,
       endpoint_class: group.endpoint_class,
       request_count: requestCount,
@@ -222,7 +232,15 @@ function summarizeRequestTiming(events) {
       invalid_timing_reason_counts: Object.fromEntries(Object.entries(group.invalid_timing_reason_counts).sort(([a], [b]) => a.localeCompare(b))),
       observed_start_gaps_ms: summarizeGaps(group.starts),
     };
-  }).sort((a, b) => a.account.localeCompare(b.account) || a.endpoint_class.localeCompare(b.endpoint_class));
+    if (Object.hasOwn(group, 'agent_tab')) summary.agent_tab = group.agent_tab;
+    return summary;
+  };
+  const byAccountEndpoint = [...groups.values()].map(summarizeEndpointGroup)
+    .sort((a, b) => a.account.localeCompare(b.account) || a.endpoint_class.localeCompare(b.endpoint_class));
+  const byAccountAgentTabEndpoint = [...groupsByAgentTab.values()].map(summarizeEndpointGroup)
+    .sort((a, b) => a.account.localeCompare(b.account)
+      || String(a.agent_tab).localeCompare(String(b.agent_tab))
+      || a.endpoint_class.localeCompare(b.endpoint_class));
 
   const accountGroups = new Map();
   for (const endpointGroup of byAccountEndpoint) {
@@ -268,6 +286,7 @@ function summarizeRequestTiming(events) {
     damaged_lines_skipped: 0,
     by_account: byAccount,
     by_account_endpoint: byAccountEndpoint,
+    by_account_agent_tab_endpoint: byAccountAgentTabEndpoint,
     legacy_tab_clock_validation: tabClockValidation.sort((a, b) => a.account.localeCompare(b.account) || a.tab.localeCompare(b.tab)),
     legacy_rows_without_tab_or_account: invalidWithoutTab.length,
     telemetry_gaps: {
@@ -421,6 +440,7 @@ const report = {
   limitations: [
     'Passive api_request observations are account and endpoint evidence; they have no route_id and are not causally assigned to individual asks.',
     'route_id joins an automatic account_route decision to its broker ask outcome only; it does not claim that passive API requests came from that ask.',
+    'Request observations do not record HTTP method, so conversation endpoint 429s cannot be classified as prompt sends versus reads.',
     'Account, tab, and conversation identifiers are replaced with labels consistent only within this report; source file paths are reduced to basenames.',
     'These observations cover connected browser pages only and do not expose ChatGPT quota counters or activity outside those pages.',
     'Observed counts and gaps do not establish a global optimal or maximum useful throughput rate.',
