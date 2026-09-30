@@ -323,6 +323,61 @@ function summarizeBrokerActions(events) {
     || a.action.localeCompare(b.action) || a.outcome.localeCompare(b.outcome));
 }
 
+function summarizeAskActionJoin(requestEvents, bridgeEvents) {
+  const actions = requestEvents.filter((event) => event.event_type === 'broker_action');
+  const actionsWithAskId = actions.filter((event) => typeof event.ask_id === 'string' && event.ask_id);
+  const outcomesWithAskId = bridgeEvents.filter((event) => typeof event.ask_id === 'string' && event.ask_id);
+  const actionsByAskId = new Map();
+  const outcomesByAskId = new Map();
+  for (const action of actionsWithAskId) {
+    if (!actionsByAskId.has(action.ask_id)) actionsByAskId.set(action.ask_id, []);
+    actionsByAskId.get(action.ask_id).push(action);
+  }
+  for (const outcome of outcomesWithAskId) {
+    if (!outcomesByAskId.has(outcome.ask_id)) outcomesByAskId.set(outcome.ask_id, []);
+    outcomesByAskId.get(outcome.ask_id).push(outcome);
+  }
+
+  let accountMismatches = 0;
+  const linkedOutcomes = [];
+  const linkedActions = [];
+  for (const [askId, askActions] of actionsByAskId) {
+    const askOutcomes = outcomesByAskId.get(askId) || [];
+    if (askOutcomes.length !== 1) continue;
+    const [outcome] = askOutcomes;
+    linkedOutcomes.push(outcome);
+    linkedActions.push(...askActions);
+    if (outcome.account && askActions.some((action) => action.account && action.account !== outcome.account)) {
+      accountMismatches++;
+    }
+  }
+
+  const duplicateOutcomeIds = [...outcomesByAskId.values()].filter((group) => group.length > 1).length;
+  const actionIdsWithoutOutcome = [...actionsByAskId.keys()].filter((askId) => !outcomesByAskId.has(askId)).length;
+  const outcomeIdsWithoutAction = [...outcomesByAskId.keys()].filter((askId) => !actionsByAskId.has(askId)).length;
+  const joinedRateLimitedActions = linkedActions.filter((action) => action.rate_limited === true);
+  const joinedRateLimitedAskIds = new Set(joinedRateLimitedActions.map((action) => action.ask_id));
+  const allRateLimitedActions = actions.filter((action) => action.rate_limited === true);
+
+  return {
+    broker_action_rows: actions.length,
+    broker_action_rows_with_ask_id: actionsWithAskId.length,
+    broker_action_rows_without_ask_id: actions.length - actionsWithAskId.length,
+    bridge_outcomes_with_ask_id: outcomesWithAskId.length,
+    bridge_outcomes_without_ask_id: bridgeEvents.length - outcomesWithAskId.length,
+    ask_ids_linked_to_one_outcome: linkedOutcomes.length,
+    action_ask_ids_without_outcome: actionIdsWithoutOutcome,
+    outcome_ask_ids_without_action: outcomeIdsWithoutAction,
+    ask_ids_with_multiple_outcomes: duplicateOutcomeIds,
+    linked_ask_outcomes_with_action_account_mismatch: accountMismatches,
+    linked_ask_outcomes_with_rate_limited_action: joinedRateLimitedAskIds.size,
+    rate_limited_broker_action_rows_for_linked_asks: joinedRateLimitedActions.length,
+    rate_limited_broker_action_rows_unjoined: allRateLimitedActions.length - joinedRateLimitedActions.length,
+    rate_limited_broker_actions_by_account_action: summarizeBrokerActions(joinedRateLimitedActions),
+    linked_ask_outcomes_by_account: groupOutcomeCounts(linkedOutcomes),
+  };
+}
+
 function summarizeRoutes(requestEvents, bridgeEvents) {
   const decisions = requestEvents.filter((event) => event.event_type === 'account_route');
   const routedOutcomes = bridgeEvents.filter((event) => event.route_id);
@@ -436,10 +491,12 @@ const report = {
     event_rows: brokerActions.length,
     by_account_action_outcome: summarizeBrokerActions(brokerActions),
   },
+  ask_action_join: summarizeAskActionJoin(requestLog.events, events),
   route_outcome_join: summarizeRoutes(requestLog.events, events),
   limitations: [
     'Passive api_request observations are account and endpoint evidence; they have no route_id and are not causally assigned to individual asks.',
-    'route_id joins an automatic account_route decision to its broker ask outcome only; it does not claim that passive API requests came from that ask.',
+    'route_id joins an automatic account_route decision to its broker ask outcome; ask_id joins broker_action rows to ask outcomes. Neither assigns passive API requests to individual asks.',
+    'ask_action_join includes only broker_action events with a unique ask_id outcome; legacy or ambiguous rows remain unjoined.',
     'Request observations do not record HTTP method, so conversation endpoint 429s cannot be classified as prompt sends versus reads.',
     'Account, tab, and conversation identifiers are replaced with labels consistent only within this report; source file paths are reduced to basenames.',
     'These observations cover connected browser pages only and do not expose ChatGPT quota counters or activity outside those pages.',

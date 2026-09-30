@@ -353,3 +353,15 @@ non_gating_utility_review:
   zero recorded 429s do not establish a safe send rate. A live throttle-driven
   account switch has not been demonstrated. Useful per-account capacity and
   any optimal or globally maximal rate remain unmeasured.
+- **C8 ask/action attribution is implemented as a candidate increment.** Each
+  ask now has one random `ask_id` shared by its broker-action events and final
+  outcome. The offline report aggregates rate-limited broker actions only for
+  IDs with exactly one outcome, and surfaces missing, duplicate, and
+  account-mismatched joins without emitting the raw IDs. The synthetic
+  ask-level 429 and report tests pass; the complete suite reports 215 passed,
+  0 failed, 0 skipped, exit 0, and the syntax check reports 16 passed, 0
+  failed, 0 skipped, exit 0. This does not assign passive page requests to
+  asks or change routing behavior. Historical rows without `ask_id` cannot be
+  joined retroactively, and this increment made no live ChatGPT requests.
+  Useful per-account capacity and a real throttle-driven account switch still
+  require future live observations.

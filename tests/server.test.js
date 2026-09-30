@@ -1028,7 +1028,7 @@ test('ask_chatgpt classifies a visible ChatGPT too-many-requests error', async (
     agent: true,
     onCommand: async (msg, state, reply) => {
       if (msg.action === 'send_prompt') return reply({ ok: true, thread_id: 'rate-thread', dom_before: 0 });
-      if (msg.action === 'get_reply') return reply({ ok: true, done: false, thread_id: 'rate-thread', message_count: 2, visible_error: 'too_many_requests' });
+      if (msg.action === 'get_reply') return reply({ ok: true, done: false, thread_id: 'rate-thread', message_count: 2, api_checked: true, api_status: 429, visible_error: 'too_many_requests' });
       reply({ ok: false, error: `unexpected ${msg.action}` });
     },
   });
@@ -1040,6 +1040,11 @@ test('ask_chatgpt classifies a visible ChatGPT too-many-requests error', async (
     assert.equal(event.failure_kind, 'rate_limited');
     assert.equal(event.visible_error, 'too_many_requests');
     assert.equal(event.thread_id, 'rate-thread');
+    assert.match(event.ask_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    const actions = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map(JSON.parse)
+      .filter((entry) => entry.event_type === 'broker_action' && entry.ask_id === event.ask_id);
+    assert.ok(actions.some((entry) => entry.action === 'send_prompt'), 'send action must share the ask id');
+    assert.ok(actions.some((entry) => entry.action === 'get_reply' && entry.rate_limited === true), 'the synthetic 429 action must share the ask id');
   } finally {
     agentTab.ws.close();
   }
@@ -1311,6 +1316,56 @@ test('observation report separates passive API traffic and joins automatic route
     { account: 'account_2', outcome: 'failed', count: 1 },
   ]);
   assert.ok(report.limitations.some((item) => item.includes('not causally assigned to individual asks')));
+});
+
+test('observation report joins throttled broker actions only to unique ask outcomes without exposing ask ids', () => {
+  const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-ask-action-report-'));
+  const observationDir = path.join(archiveDir, 'observations');
+  fs.mkdirSync(observationDir, { recursive: true });
+  fs.writeFileSync(path.join(observationDir, 'request-timing.jsonl'), [
+    { schema_version: 3, event_type: 'api_request', account: 'account-a', endpoint_class: 'conversation', api_status: 429 },
+    { schema_version: 2, event_type: 'broker_action', action: 'send_prompt', ok: true, account: 'account-a', ask_id: 'ask-a', rate_limited: false },
+    { schema_version: 2, event_type: 'broker_action', action: 'get_reply', ok: false, account: 'account-a', ask_id: 'ask-a', rate_limited: true },
+    { schema_version: 2, event_type: 'broker_action', action: 'send_prompt', ok: true, account: 'account-a', ask_id: 'ask-b', rate_limited: false },
+    { schema_version: 2, event_type: 'broker_action', action: 'get_reply', ok: false, account: 'account-a', ask_id: 'ask-orphan', rate_limited: true },
+    { schema_version: 2, event_type: 'broker_action', action: 'send_prompt', ok: false, account: 'account-a', rate_limited: true },
+    { schema_version: 2, event_type: 'broker_action', action: 'send_prompt', ok: false, account: 'account-a', ask_id: 'ask-duplicate', rate_limited: true },
+  ].map(JSON.stringify).join('\n') + '\n');
+  fs.writeFileSync(path.join(observationDir, 'bridge-events.jsonl'), [
+    { schema_version: 1, outcome: 'failed', account: 'account-a', ask_id: 'ask-a', failure_kind: 'rate_limited' },
+    { schema_version: 1, outcome: 'failed', account: 'account-b', ask_id: 'ask-b' },
+    { schema_version: 1, outcome: 'success', account: 'account-c', ask_id: 'ask-no-action' },
+    { schema_version: 1, outcome: 'failed', account: 'account-a', ask_id: 'ask-duplicate' },
+    { schema_version: 1, outcome: 'failed', account: 'account-a', ask_id: 'ask-duplicate' },
+    { schema_version: 1, outcome: 'success', account: 'account-c' },
+  ].map(JSON.stringify).join('\n') + '\n');
+
+  const output = execFileSync(process.execPath, ['scripts/bridge-observation-report.js'], {
+    cwd: path.resolve('.'),
+    env: { ...process.env, ARCHIVE_DIR: archiveDir },
+    encoding: 'utf8',
+  });
+  const report = JSON.parse(output);
+  const join = report.ask_action_join;
+  for (const id of ['ask-a', 'ask-b', 'ask-orphan', 'ask-no-action', 'ask-duplicate']) {
+    assert.ok(!output.includes(id), `raw ask id ${id} must not appear in the report`);
+  }
+  assert.equal(report.request_timing.api_request_rows, 1, 'passive page requests remain separately counted');
+  assert.equal(join.broker_action_rows, 6);
+  assert.equal(join.broker_action_rows_without_ask_id, 1);
+  assert.equal(join.bridge_outcomes_with_ask_id, 5);
+  assert.equal(join.bridge_outcomes_without_ask_id, 1);
+  assert.equal(join.ask_ids_linked_to_one_outcome, 2);
+  assert.equal(join.action_ask_ids_without_outcome, 1);
+  assert.equal(join.outcome_ask_ids_without_action, 1);
+  assert.equal(join.ask_ids_with_multiple_outcomes, 1);
+  assert.equal(join.linked_ask_outcomes_with_action_account_mismatch, 1);
+  assert.equal(join.linked_ask_outcomes_with_rate_limited_action, 1);
+  assert.equal(join.rate_limited_broker_action_rows_for_linked_asks, 1);
+  assert.equal(join.rate_limited_broker_action_rows_unjoined, 3);
+  assert.deepEqual(join.rate_limited_broker_actions_by_account_action, [
+    { account: 'account_1', action: 'get_reply', outcome: 'failed', rate_limited: true, count: 1 },
+  ]);
 });
 
 test('observation report rejects unstable legacy tab timing but retains its status counts', () => {
