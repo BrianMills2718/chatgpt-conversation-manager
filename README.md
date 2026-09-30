@@ -113,9 +113,10 @@ For a local summary of recorded traffic, run
 `node scripts/bridge-observation-report.js`. It reports API status and
 validated request gaps by account and endpoint, counts broker actions
 separately, and joins automatic route choices to ask outcomes by `route_id`.
-Account identities are replaced with consistent labels within each report.
-Passive API observations are not assigned to individual asks, and the report
-does not claim an optimal rate.
+Account, tab, and conversation IDs are replaced with labels consistent within
+each report, and source paths are reduced to filenames. Passive API observations
+are not assigned to individual asks, and the report does not claim an optimal
+rate.
 
 - **Reading.** One connected tab per account is enough to *read* any of that account's chats, including ones started in the ChatGPT desktop app.
 - **Updates.** The extension reloads itself within about a minute when a newer version is on disk. Bump `version` in `extension/manifest.json` with every extension change.

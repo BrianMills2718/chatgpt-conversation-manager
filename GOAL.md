@@ -127,9 +127,10 @@ browser pages.
   retrospective analysis.
 - `node scripts/bridge-observation-report.js` reads both observation logs,
   reports API requests by account and endpoint, keeps broker actions separate,
-  anonymizes account identities within the report, and joins automatic route
-  decisions to ask outcomes only by `route_id`. It does not assign passive
-  page requests to individual asks.
+  pseudonymizes account, tab, and conversation identifiers within the report,
+  reduces source paths to filenames, and joins automatic route decisions to ask
+  outcomes only by `route_id`. It does not assign passive page requests to
+  individual asks.
 - **Boundary:** no new ChatGPT traffic is generated. If timing validity fails,
   stop at counts and status mix and use future schema-version-3 observations
   from ordinary connected-page activity only if/when the broker is running.

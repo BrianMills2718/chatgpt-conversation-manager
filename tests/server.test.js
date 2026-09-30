@@ -1196,7 +1196,7 @@ test('read_chatgpt_chat transcripts say whether the latest reply is finished', a
   assert.equal(/latest reply/.test(formatChatTranscript(base)), false);
 });
 
-test('bridge observation report summarizes local outcomes and preserves raw thread IDs', () => {
+test('bridge observation report summarizes outcomes with anonymous conversation references', () => {
   const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-observation-report-'));
   const observationDir = path.join(archiveDir, 'observations');
   fs.mkdirSync(observationDir, { recursive: true });
@@ -1213,7 +1213,11 @@ test('bridge observation report summarizes local outcomes and preserves raw thre
   assert.equal(report.events, 2);
   assert.deepEqual(report.by_outcome, { failed: 1, success: 1 });
   assert.equal(report.by_failure_kind.rate_limited, 1);
-  assert.equal(report.rate_limited_events[0].thread_id, 'raw-thread-two');
+  assert.equal(report.rate_limited_events[0].thread_ref, 'conversation_2');
+  assert.equal(report.file, 'bridge-events.jsonl');
+  assert.ok(!output.includes('raw-thread-one'));
+  assert.ok(!output.includes('raw-thread-two'));
+  assert.ok(!output.includes(archiveDir));
 });
 
 test('observation report separates passive API traffic and joins automatic routes only by route_id', () => {
@@ -1320,8 +1324,10 @@ test('observation report rejects unstable legacy tab timing but retains its stat
   assert.equal(unstable.status_counts[200], 4);
   assert.equal(unstable.valid_timing_rows, 0);
   assert.equal(unstable.observed_start_gaps_ms.count, 0);
-  const unstableClock = report.request_timing.legacy_tab_clock_validation.find((tab) => tab.tab === 'tab-unstable');
+  const unstableClock = report.request_timing.legacy_tab_clock_validation.find((tab) => tab.tab_ref === 'tab_2');
   assert.equal(unstableClock.timing_valid, false);
+  assert.ok(!output.includes('tab-stable'));
+  assert.ok(!output.includes('tab-unstable'));
   assert.ok(unstableClock.invalid_reasons.includes('median_absolute_deviation_exceeds_1000_ms'));
 });
 
