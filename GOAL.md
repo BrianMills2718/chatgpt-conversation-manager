@@ -58,7 +58,7 @@ governs while working in it.
   governs that, reused as-is); `weekly_chatgpt_supervisor.py`'s task-profile
   model itself (`autonomous`/`review_gated`/`hands_on`/`human_only` stays
   exactly as-is — only its dispatch internals move to the shared client).
-- Writes allowed: `chatgpt-conversation-manager-v0.2/{GOAL.md,server/index.js,README.md,CLAUDE.md,extension/content.js,extension/manifest.json,extension/lib/api-request-observation.js,tests/api-request-observation.test.js,tests/server.test.js}`,
+- Writes allowed: `chatgpt-conversation-manager-v0.2/{GOAL.md,server/index.js,README.md,CLAUDE.md,scripts/bridge-observation-report.js,extension/content.js,extension/manifest.json,extension/lib/api-request-observation.js,tests/api-request-observation.test.js,tests/server.test.js}`,
   `weekly-plans/scripts/{weekly_chatgpt_supervisor.py,chatgpt_dispatch_client.py,
   test_chatgpt_dispatch_client.py,review_sweep.py}`, and each affected repo's
   own `investigations/chatgpt-review-sweep-manifest.{tsv,md}`.
@@ -125,6 +125,11 @@ browser pages.
   Treat missing status and invalid/unstable timing separately. No
   causal, prompt-rate, hidden-quota, or global-maximum claim follows from this
   retrospective analysis.
+- `node scripts/bridge-observation-report.js` reads both observation logs,
+  reports API requests by account and endpoint, keeps broker actions separate,
+  anonymizes account identities within the report, and joins automatic route
+  decisions to ask outcomes only by `route_id`. It does not assign passive
+  page requests to individual asks.
 - **Boundary:** no new ChatGPT traffic is generated. If timing validity fails,
   stop at counts and status mix and use future schema-version-3 observations
   from ordinary connected-page activity only if/when the broker is running.
@@ -287,6 +292,12 @@ non_gating_utility_review:
   update/reinject flow; tabs without a working worker remain visibly stale and
   require a manual reload. `npm test` passes 211 tests and `npm run check`
   passes all 16 syntax checks on this revision.
+- **Offline telemetry readout is available** through
+  `node scripts/bridge-observation-report.js`. It uses schema-v3 request starts
+  directly and validates legacy schema-v2 tab offsets before reporting gaps;
+  route decisions join ask outcomes by `route_id`. The current archive has no
+  schema-v3 request rows, and all 16 legacy tab groups fail timing validation,
+  so there is not yet a per-account request-rate estimate.
 - This lane has sent no ChatGPT requests and the broker remains stopped. New
   real observations and any per-account useful-rate estimate remain pending;
   no claim of an optimal or globally maximal rate is supported.

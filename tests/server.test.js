@@ -1216,6 +1216,132 @@ test('bridge observation report summarizes local outcomes and preserves raw thre
   assert.equal(report.rate_limited_events[0].thread_id, 'raw-thread-two');
 });
 
+test('observation report separates passive API traffic and joins automatic routes only by route_id', () => {
+  const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-account-observation-report-'));
+  const observationDir = path.join(archiveDir, 'observations');
+  fs.mkdirSync(observationDir, { recursive: true });
+  const start = Date.parse('2026-09-20T00:00:00.000Z');
+  const apiRequest = (offsetMs, apiStatus) => ({
+    schema_version: 3,
+    event_type: 'api_request',
+    action: 'chatgpt_api_request',
+    account: 'account-a',
+    tab: 'tab-a',
+    endpoint_class: 'conversation',
+    request_started_at: new Date(start + offsetMs).toISOString(),
+    completed_at: new Date(start + offsetMs + 100).toISOString(),
+    duration_ms: 100,
+    api_status: apiStatus,
+    timing_basis: 'broker_receipt_minus_page_monotonic_age',
+  });
+  fs.writeFileSync(path.join(observationDir, 'request-timing.jsonl'), [
+    apiRequest(0, 200),
+    apiRequest(10000, 429),
+    { schema_version: 2, event_type: 'account_route', route_id: 'route-a', selected_account: 'account-a' },
+    { schema_version: 2, event_type: 'account_route', route_id: 'route-b', selected_account: 'account-a' },
+    { schema_version: 2, event_type: 'account_route', route_id: 'route-missing', selected_account: 'account-a' },
+    { schema_version: 2, event_type: 'broker_action', action: 'send_prompt', ok: false, account: 'account-a', rate_limited: true },
+    { schema_version: 2, event_type: 'telemetry_gap', dropped: 3 },
+  ].map(JSON.stringify).join('\n') + '\n');
+  fs.writeFileSync(path.join(observationDir, 'bridge-events.jsonl'), [
+    { schema_version: 1, outcome: 'success', account: 'account-a', route_id: 'route-a', duration_ms: 500 },
+    { schema_version: 1, outcome: 'failed', account: 'account-b', route_id: 'route-b', failure_kind: 'rate_limited', duration_ms: 250 },
+    { schema_version: 1, outcome: 'failed', account: 'account-b', route_id: 'orphan-route', failure_kind: 'rate_limited', duration_ms: 250 },
+  ].map(JSON.stringify).join('\n') + '\n');
+
+  const output = execFileSync(process.execPath, ['scripts/bridge-observation-report.js'], {
+    cwd: path.resolve('.'),
+    env: { ...process.env, ARCHIVE_DIR: archiveDir },
+    encoding: 'utf8',
+  });
+  const report = JSON.parse(output);
+  assert.ok(!output.includes('account-a'), 'account identities are anonymized in the report');
+  assert.ok(!output.includes('account-b'), 'all accounts use report-local labels');
+  const [apiSummary] = report.request_timing.by_account_endpoint;
+  assert.equal(report.request_timing.api_request_rows, 2);
+  assert.equal(report.request_timing.by_account[0].request_count, 2);
+  assert.equal(report.request_timing.by_account[0].rate_limited_count, 1);
+  assert.deepEqual(apiSummary.status_counts, { 200: 1, 429: 1 });
+  assert.equal(apiSummary.rate_limited_share, 0.5);
+  assert.equal(apiSummary.valid_timing_rows, 2);
+  assert.deepEqual(apiSummary.observed_start_gaps_ms, {
+    count: 1, min_ms: 10000, median_ms: 10000, p95_ms: 10000, max_ms: 10000,
+  });
+  assert.equal(report.request_timing.telemetry_gaps.dropped_observations, 3);
+  assert.equal(report.broker_actions.event_rows, 1, 'broker actions are reported separately from API request rows');
+  assert.equal(report.route_outcome_join.route_decisions, 3);
+  assert.equal(report.route_outcome_join.route_decisions_linked_to_one_outcome, 2);
+  assert.equal(report.route_outcome_join.route_decisions_without_outcome, 1);
+  assert.equal(report.route_outcome_join.bridge_outcomes_without_matching_route_decision, 1);
+  assert.equal(report.route_outcome_join.linked_route_outcomes_with_account_mismatch, 1);
+  assert.deepEqual(report.route_outcome_join.linked_outcomes_by_account, [
+    { account: 'account_1', outcome: 'success', count: 1 },
+    { account: 'account_2', outcome: 'failed', count: 1 },
+  ]);
+  assert.ok(report.limitations.some((item) => item.includes('not causally assigned to individual asks')));
+});
+
+test('observation report rejects unstable legacy tab timing but retains its status counts', () => {
+  const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-legacy-observation-report-'));
+  const observationDir = path.join(archiveDir, 'observations');
+  fs.mkdirSync(observationDir, { recursive: true });
+  const base = Date.parse('2026-09-20T00:00:00.000Z');
+  const legacyRows = (account, tab, offsets) => offsets.map((offset, index) => {
+    const completedAt = base + index * 10000;
+    return {
+      schema_version: 2,
+      event_type: 'api_request',
+      account,
+      tab,
+      endpoint_class: 'conversation',
+      ts: new Date(completedAt + offset).toISOString(),
+      completed_at: new Date(completedAt).toISOString(),
+      duration_ms: 100,
+      api_status: 200,
+    };
+  });
+  fs.writeFileSync(path.join(observationDir, 'request-timing.jsonl'), [
+    ...legacyRows('stable-account', 'tab-stable', [1000, 1000, 1000, 1000]),
+    ...legacyRows('unstable-account', 'tab-unstable', [0, 0, 5000, 5000]),
+  ].map(JSON.stringify).join('\n') + '\n');
+
+  const output = execFileSync(process.execPath, ['scripts/bridge-observation-report.js'], {
+    cwd: path.resolve('.'),
+    env: { ...process.env, ARCHIVE_DIR: archiveDir },
+    encoding: 'utf8',
+  });
+  const report = JSON.parse(output);
+  const stable = report.request_timing.by_account_endpoint.find((group) => group.account === 'account_1');
+  const unstable = report.request_timing.by_account_endpoint.find((group) => group.account === 'account_2');
+  assert.equal(stable.request_count, 4);
+  assert.equal(stable.valid_timing_rows, 4);
+  assert.equal(stable.observed_start_gaps_ms.median_ms, 10000);
+  assert.equal(unstable.request_count, 4);
+  assert.equal(unstable.status_counts[200], 4);
+  assert.equal(unstable.valid_timing_rows, 0);
+  assert.equal(unstable.observed_start_gaps_ms.count, 0);
+  const unstableClock = report.request_timing.legacy_tab_clock_validation.find((tab) => tab.tab === 'tab-unstable');
+  assert.equal(unstableClock.timing_valid, false);
+  assert.ok(unstableClock.invalid_reasons.includes('median_absolute_deviation_exceeds_1000_ms'));
+});
+
+test('observation report reports damaged lines and works when one observation file is missing', () => {
+  const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-damaged-observation-report-'));
+  const observationDir = path.join(archiveDir, 'observations');
+  fs.mkdirSync(observationDir, { recursive: true });
+  fs.writeFileSync(path.join(observationDir, 'request-timing.jsonl'), '{"event_type":"api_request"}\n{"torn":\0\n');
+  const output = execFileSync(process.execPath, ['scripts/bridge-observation-report.js'], {
+    cwd: path.resolve('.'),
+    env: { ...process.env, ARCHIVE_DIR: archiveDir },
+    encoding: 'utf8',
+  });
+  const report = JSON.parse(output);
+  assert.equal(report.events, 0);
+  assert.equal(report.request_timing.api_request_rows, 1);
+  assert.equal(report.request_timing.damaged_lines_skipped, 1);
+  assert.equal(report.message, 'No bridge observations have been captured yet.');
+});
+
 test('untargeted "current chat" commands skip the agent tab when Brian has a tab open', async () => {
   const human = fakeTab('human-tab-0008', { onCommand: async (msg, state, reply) => reply({ ok: true, thread_id: 'brians-chat' }) });
   const agentTab = fakeTab('agent-tab-0009', { agent: true, onCommand: async (msg, state, reply) => reply({ ok: true, thread_id: 'agent-chat' }) });
