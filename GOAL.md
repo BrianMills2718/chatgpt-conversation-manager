@@ -329,6 +329,18 @@ non_gating_utility_review:
   all successful and not rate-limited (`navigate_home`, `send_prompt`, and
   `get_reply`), so there is not enough action-level evidence to estimate a
   useful per-account send rate.
+- **Fresh offline traffic readout, 2026-09-30 23:46 UTC.** The canonical
+  report now has 44,579 `api_request` rows: 40,540 with valid schema-v3 start
+  times and 4,039 schema-v2 rows with invalid legacy timing. `account_1` has
+  7,443 page requests and 8 HTTP 429s (0.11%); `account_2` has 37,136 and
+  2,752 (7.41%), including 2,710 429s among 5,460 `conversation_list` requests.
+  This is connected-page activity, not prompt traffic. The archive still has
+  682 bridge outcomes but only one uniquely tagged ask (`account_2`, success,
+  one active UTC start-hour); 681 outcomes lack `ask_id`. Only 3 of 7
+  broker-action rows are tagged. Passive request rows do not record HTTP
+  method or ask identity, and their 429s do not widen the broker pacer. The
+  readout confirms very different page-request 429 shares by account, but does
+  not establish prompt-level rate, safe capacity, or a maximum.
 - **C7 timing-provenance repair is merged** in PR #68, broker commit
   `8e062c54e64fcdbcb9e4febe9ba4ac7c83cafa4d`.
   New observations keep a page-relative start marker until socket send; the
