@@ -304,8 +304,8 @@ What a teammate gets is the MCP tools above, usable from Claude Code or Codex. E
   - a 73,212-character prompt in a hidden tab, which gave the right reply with exactly one prompt in the chat.
 
   The server-checked re-click has only been exercised in unit tests; that live send was accepted on its first click. None of this has yet run at audit volume.
-- **Two accounts at once.** Checked live on 2026-09-29 (v0.9.17): therakorski in a second Chrome profile, brianmills2718 in the main profile.
-  - One concurrent `dispatch_many` call returned a real reply from each account (conversations `6abbe1ce` and `6abbe1cf`). Each was read back under its own account, and the first gave HTTP 404 under the other, confirming they are separate accounts.
+- **Two accounts at once.** Checked live on 2026-09-29 (v0.9.17), with one account in a second Chrome profile and the primary account in the main profile.
+  - One concurrent `dispatch_many` call returned a real reply from each account. Each conversation was read back under its own account; attempting to read one under the other account returned HTTP 404, confirming the accounts are separate.
   - The persisted pacer state has independent entries for both accounts.
   - The second account's agent tab was opened by the extension inside that profile.
 - **Setup on another operating system.** This walkthrough was followed on a fresh clone on Linux: `npm install`, `npm test`, broker start, MCP `initialize`/`tools/list`, and `list_chatgpt_connections` with no browser attached. The macOS and Windows-native paths have not been tried by a teammate yet.
