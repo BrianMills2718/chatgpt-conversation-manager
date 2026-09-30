@@ -252,9 +252,16 @@ non_gating_utility_review:
 ## Current State
 
 - C1-C5 are complete. The shared client and review-sweep are merged in
-  `weekly-plans`; the real two-account `dispatch_many` run and independent
-  account pacer entries were verified on 2026-09-29 16:05Z. README documents
-  per-person local deployment. The original plan remains at
+  `weekly-plans`; the real sweep run is documented in [PR #163](https://github.com/BrianMills2718/weekly-plans/pull/163)
+  and the resulting DIGIMON manifest update is [PR #380](https://github.com/BrianMills2718/digimon_application_20260215/pull/380).
+  The 21 supervisor tests, 9 shared-client tests, and 7 review-sweep tests
+  pass. At 2026-09-29 16:05Z,
+  bridge observations show successful new-conversation asks on two accounts
+  three milliseconds apart. Both event-linked archives contain the logged
+  55-character first user turn followed by an assistant reply; one snapshot was
+  captured later and also contains a subsequent exchange. The persisted pacer
+  state has a default entry plus two account-specific entries.
+  README documents per-person local deployment. The original plan remains at
   `/home/brian/.claude/plans/async-snuggling-thompson.md`.
 - C6 is merged in broker commit
   `34126e375cb08715c88e3ff04c380f0f1068d634`. For unpinned new asks, the broker
@@ -298,7 +305,12 @@ non_gating_utility_review:
   directly and validates legacy schema-v2 tab offsets before reporting gaps;
   route decisions join ask outcomes by `route_id`. The current archive has no
   schema-v3 request rows, and all 16 legacy tab groups fail timing validation,
-  so there is not yet a per-account request-rate estimate.
-- This lane has sent no ChatGPT requests and the broker remains stopped. New
-  real observations and any per-account useful-rate estimate remain pending;
-  no claim of an optimal or globally maximal rate is supported.
+  so there is not yet a per-account request-rate estimate. [PR #73](https://github.com/BrianMills2718/chatgpt-conversation-manager/pull/73)
+  also replaces account, tab, and conversation identifiers with report-local
+  labels and reduces source paths to filenames. A scan of 9,372 archived rows
+  found zero raw identifier or personal-path matches in report output.
+- The broker remains stopped. The offline report and documentation work sent
+  no ChatGPT requests. The earlier live two-account dispatch and unpinned
+  route smoke did not capture a real 429-triggered account switch. New schema-v3
+  observations and any per-account useful-rate estimate remain pending; no
+  claim of an optimal or globally maximal rate is supported.
