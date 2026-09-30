@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 // Scheduled incremental backup. Each run: make sure a chatgpt.com tab is
 // connected (optionally opening one), ask it to archive only new/changed
 // conversations, wait for completion, and record the outcome in
@@ -77,38 +79,73 @@ export class SyncScheduler {
       completion.catch(() => {});
       await this.dispatch({ action: 'archive_all_chats', known: this.knownThreads() });
       const result = await completion;
-      if (result.fatal_error) throw new Error(`extension reported: ${result.fatal_error}`);
+      if (result.fatal_error) {
+        const error = new Error(`extension reported: ${result.fatal_error}`);
+        if (Number.isInteger(result.fatal_error_status)) error.status = result.fatal_error_status;
+        if (Number.isFinite(result.fatal_error_retry_after_ms)) error.retryAfterMs = result.fatal_error_retry_after_ms;
+        throw error;
+      }
       const summary = { mode: result.mode, listed: result.listed, fetched: result.total, skipped: result.skipped, archived: result.archived, failed: result.failed?.length || 0, pacing: result.pacing || null };
       if (summary.failed > 0) {
         this.log.error(`[sync] completed with ${summary.failed} failed conversations`);
       }
       this.log.log(`[sync] ok: ${JSON.stringify(summary)}`);
-      return this.writeStatus({ in_progress: false, last_success_at: new Date().toISOString(), last_result: summary, last_error: null, failed_threads: result.failed || [] });
+      return this.writeStatus({ in_progress: false, last_success_at: new Date().toISOString(), last_result: summary, last_error: null, last_error_status: null, last_error_retry_after_ms: null, failed_threads: result.failed || [] });
     } catch (err) {
       this.log.error(`[sync] FAILED: ${err.message}`);
-      return this.writeStatus({ in_progress: false, last_error: err.message, last_error_at: new Date().toISOString() });
+      return this.writeStatus({
+        in_progress: false,
+        last_error: err.message,
+        last_error_at: new Date().toISOString(),
+        last_error_status: Number.isInteger(err.status) ? err.status : null,
+        last_error_retry_after_ms: Number.isFinite(err.retryAfterMs) && err.retryAfterMs >= 0 ? err.retryAfterMs : null,
+      });
     }
   }
 
-  // After a failed run, retry sooner than the normal interval (a closed tab or
-  // a stale extension is usually fixed within minutes, not hours).
+  // Retry ordinary failures sooner than the normal interval, but give a
+  // rate-limited account at least its normal interval or the server's
+  // Retry-After, whichever is longer.
   static nextDelayMs(status, intervalMs, retryMs = 30 * 60 * 1000) {
-    return status?.last_error && (!status.last_success_at || status.last_error_at > status.last_success_at) ? Math.min(intervalMs, retryMs) : intervalMs;
+    const failed = status?.last_error && (!status.last_success_at || status.last_error_at > status.last_success_at);
+    if (!failed) return intervalMs;
+    if (status.last_error_status === 429) {
+      const retryAfterMs = Number.isFinite(status.last_error_retry_after_ms) ? Math.max(0, status.last_error_retry_after_ms) : 0;
+      return Math.max(intervalMs, retryAfterMs);
+    }
+    return Math.min(intervalMs, retryMs);
+  }
+
+  static startupDelayMs(status, nowMs = Date.now(), firstRunMs = 60 * 1000) {
+    const nextRunMs = Date.parse(status?.next_run_at || '');
+    if (!Number.isFinite(nextRunMs) || nextRunMs <= nowMs) return firstRunMs;
+    return Math.max(firstRunMs, nextRunMs - nowMs);
   }
 
   start(intervalMs, { firstRunMs = 60 * 1000 } = {}) {
+    const previousStatus = this.readStatus();
+    const initialDelayMs = SyncScheduler.startupDelayMs(previousStatus, Date.now(), firstRunMs);
     // Clear a stale in_progress flag left by a server that died mid-run.
     this.writeStatus({ in_progress: false, interval_minutes: Math.round(intervalMs / 60000) });
-    const schedule = (delay) => {
+    const scheduleAt = (runAtMs) => {
+      const delay = Math.max(0, runAtMs - Date.now());
       this.timer = setTimeout(async () => {
+        // Node clamps longer setTimeout delays to 1 ms. A long server-provided
+        // Retry-After must stay a long wait, including after a broker restart.
+        if (Date.now() < runAtMs) {
+          scheduleAt(runAtMs);
+          return;
+        }
         const status = await this.runOnce();
         const next = SyncScheduler.nextDelayMs(status, intervalMs);
-        this.writeStatus({ next_run_at: new Date(Date.now() + next).toISOString() });
-        schedule(next);
-      }, delay);
+        const nextRunAtMs = Date.now() + next;
+        this.writeStatus({ next_run_at: new Date(nextRunAtMs).toISOString() });
+        scheduleAt(nextRunAtMs);
+      }, Math.min(delay, MAX_TIMER_DELAY_MS));
     };
-    this.writeStatus({ next_run_at: new Date(Date.now() + firstRunMs).toISOString() });
-    schedule(firstRunMs);
+    const firstRunAtMs = Date.now() + initialDelayMs;
+    this.writeStatus({ next_run_at: new Date(firstRunAtMs).toISOString() });
+    scheduleAt(firstRunAtMs);
     return this;
   }
 }

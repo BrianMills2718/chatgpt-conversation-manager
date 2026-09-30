@@ -83,6 +83,7 @@ governs while working in it.
 | C6 | Adaptive account routing responds to account cooldowns | A broker-level test feeds a synthetic 429 to account A, verifies A's learned gap widens, then verifies an unpinned new ask selects idle account B with the earlier projected start; the route decision is joined to its ask outcome by `route_id` |
 | C7 | API timing evidence survives browser clock skew and delayed delivery | The extension sends page-relative request age at socket-send time; the broker reconstructs start/completion from that age and its receipt clocks, and rolling request counts use request-start times. Synthetic tests prove skewed/legacy wall timestamps are not trusted and buffered events retain their original timing window |
 | C8 | Broker-visible throttles and useful ask throughput are attributable to individual asks | Each ask's broker actions and bridge outcome share one random `ask_id`; the offline report joins only to one unique outcome, reports rate-limited action counts plus missing/duplicate/account-mismatch counts, and never prints ask IDs. For unique tagged outcomes with an account and valid start time, it reports successes per distinct active UTC start-hour by account; untagged, duplicate, missing-account, and invalid-time outcomes are reported or excluded. This is descriptive observed workload, not a safe-rate or maximum-capacity estimate. Legacy rows remain unjoined; passive `api_request` rows remain unassigned. Synthetic cases prove the attribution and rate arithmetic without live ChatGPT traffic |
+| C9 | Scheduled archive sync backs off after HTTP 429, including across service restart | A typed 429 and `Retry-After` survive extension completion into sync status; the next attempt waits at least the configured interval or Retry-After, and a future persisted `next_run_at` is honored on restart. Synthetic tests prove propagation and delay arithmetic without live ChatGPT traffic |
 
 C6 proves the scheduler behavior using controlled browser fakes. It does not
 prove ChatGPT's hidden account limits or claim that any fixed routing policy
@@ -382,3 +383,28 @@ non_gating_utility_review:
   capacity or a maximum rate. This increment used saved files only and made no
   live ChatGPT requests. A real throttle-driven account switch and useful
   per-account capacity remain unproven.
+- **C9 structured sync backoff is implemented in this change.** The extension
+  completion preserves HTTP status and `Retry-After`; the scheduler stores
+  them, waits at least the configured interval or the server delay on HTTP
+  429, and honors a future `next_run_at` after restart. The full mocked suite
+  reports 219 passed, 0 failed, 0 skipped; the 16 syntax checks pass. No broker
+  start or live ChatGPT request was used to verify this code.
+- **Scheduled-sync throttle source found, 2026-09-30.** The user service
+  `chatgpt-bridge.service` was already running with a six-hour archive-sync
+  interval. Its incremental conversation-list fetch failed with HTTP 429 at
+  16:36 UTC; the old generic retry policy had scheduled another attempt at
+  17:06 UTC. The last successful `last_result` in the status file was stale
+  from the previous day, not the 16:35 attempt. The service was stopped before
+  that retry; `MainPID=0` and no port-8787 listener were verified. The unit
+  remains enabled for future user-session startup, so do not start or restart
+  it without explicit live-traffic authorization. To prevent another scheduled
+  sync while keeping the unit available, the service now has a persistent
+  systemd drop-in setting `SYNC_INTERVAL_MINUTES=0`. It remains enabled but
+  inactive until its next user-session startup, when the bridge will run
+  without scheduled archive sync. No service start or restart was done.
+  Request telemetry recorded
+  324 passive API rows from 16:30–17:00 UTC, including 94 during the 16:35
+  minute, but these lack ask-level attribution and cannot be assigned to the
+  sync run or distinguished from ordinary page activity. This agent made no
+  direct asks; the scheduled archive sync did hit the conversations-list
+  endpoint and receive HTTP 429.

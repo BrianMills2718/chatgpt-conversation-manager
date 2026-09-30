@@ -25,7 +25,7 @@ function setup({ connected = 1, completion, dispatchError = null, openCommand = 
     connectWaitMs: 50,
     log: { log() {}, error() {} },
   });
-  return { sched, sent, setConn: (n) => { conn = n; } };
+  return { sched, sent, statusPath: path.join(dir, 'metadata', 'sync-status.json'), setConn: (n) => { conn = n; } };
 }
 
 test('a successful run sends known capture times and records the summary', async () => {
@@ -43,6 +43,19 @@ test('an extension fatal error is recorded as a failure, not a success', async (
   const status = await sched.runOnce();
   assert.equal(status.last_success_at, undefined);
   assert.match(status.last_error, /HTTP 401/);
+  assert.equal(status.last_error_status, null);
+  assert.equal(status.last_error_retry_after_ms, null);
+});
+
+test('an extension rate-limit failure persists its status and Retry-After for the scheduler', async () => {
+  const { sched } = setup({ completion: Promise.resolve({
+    fatal_error: 'conversations list fetch failed: HTTP 429',
+    fatal_error_status: 429,
+    fatal_error_retry_after_ms: 12000,
+  }) });
+  const status = await sched.runOnce();
+  assert.equal(status.last_error_status, 429);
+  assert.equal(status.last_error_retry_after_ms, 12000);
 });
 
 test('no connected tab and no open command fails loudly', async () => {
@@ -73,6 +86,55 @@ test('nextDelayMs retries a failed run sooner and keeps the interval after succe
   assert.equal(SyncScheduler.nextDelayMs({ last_success_at: '2026-09-15T01:00:00.000Z', last_error: null }, H6), H6);
   assert.equal(SyncScheduler.nextDelayMs({ last_error: 'x', last_error_at: '2026-09-15T01:00:00.000Z' }, H6), 30 * 60 * 1000);
   assert.equal(SyncScheduler.nextDelayMs({ last_error: 'old', last_error_at: '2026-09-15T00:00:00.000Z', last_success_at: '2026-09-15T01:00:00.000Z' }, H6), H6);
+  assert.equal(SyncScheduler.nextDelayMs({ last_error: '429', last_error_at: '2026-09-15T01:00:00.000Z', last_error_status: 429, last_error_retry_after_ms: 1000 }, H6), H6);
+  assert.equal(SyncScheduler.nextDelayMs({ last_error: '429', last_error_at: '2026-09-15T01:00:00.000Z', last_error_status: 429, last_error_retry_after_ms: 7 * H6 }, H6), 7 * H6);
+});
+
+test('startupDelayMs preserves a future scheduled retry across service restarts', () => {
+  const now = Date.parse('2026-09-30T16:00:00.000Z');
+  const futureRun = new Date(now + 5 * 60 * 1000).toISOString();
+  assert.equal(SyncScheduler.startupDelayMs({ next_run_at: futureRun }, now), 5 * 60 * 1000);
+  assert.equal(SyncScheduler.startupDelayMs({}, now), 60 * 1000);
+  assert.equal(SyncScheduler.startupDelayMs({ next_run_at: new Date(now - 1).toISOString() }, now), 60 * 1000);
+});
+
+test('start schedules from a saved future next_run_at instead of resetting to 60 seconds', () => {
+  const { sched, statusPath } = setup({ completion: Promise.resolve({}) });
+  fs.mkdirSync(path.dirname(statusPath), { recursive: true });
+  fs.writeFileSync(statusPath, JSON.stringify({ next_run_at: new Date(Date.now() + 5 * 60 * 1000).toISOString() }));
+  const originalSetTimeout = globalThis.setTimeout;
+  let scheduledDelayMs = null;
+  globalThis.setTimeout = (_callback, delayMs) => {
+    scheduledDelayMs = delayMs;
+    return 1;
+  };
+  try {
+    sched.start(6 * 60 * 60 * 1000);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+  assert.ok(scheduledDelayMs > 4 * 60 * 1000, `expected saved deadline, got ${scheduledDelayMs}ms`);
+  assert.ok(scheduledDelayMs <= 5 * 60 * 1000, `deadline must not be extended, got ${scheduledDelayMs}ms`);
+});
+
+test('start chunks a long saved retry deadline within Node timer limits', () => {
+  const { sched, statusPath } = setup({ completion: Promise.resolve({}) });
+  fs.mkdirSync(path.dirname(statusPath), { recursive: true });
+  const deadline = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  fs.writeFileSync(statusPath, JSON.stringify({ next_run_at: deadline }));
+  const originalSetTimeout = globalThis.setTimeout;
+  let scheduledDelayMs = null;
+  globalThis.setTimeout = (_callback, delayMs) => {
+    scheduledDelayMs = delayMs;
+    return 1;
+  };
+  try {
+    sched.start(6 * 60 * 60 * 1000);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+  assert.equal(scheduledDelayMs, 2_147_483_647);
+  assert.ok(Date.parse(JSON.parse(fs.readFileSync(statusPath, 'utf8')).next_run_at) > Date.now() + 29 * 24 * 60 * 60 * 1000);
 });
 
 test('a refused dispatch leaves no unhandled rejection behind when the wait times out', async () => {
@@ -92,4 +154,3 @@ test('a refused dispatch leaves no unhandled rejection behind when the wait time
     process.off('unhandledRejection', onUnhandled);
   }
 });
-

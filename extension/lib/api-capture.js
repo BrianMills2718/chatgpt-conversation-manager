@@ -348,7 +348,11 @@ export async function captureWithRecovery(threadId, { tokenRef, pacer, capture =
       if (err.status === 429) {
         const wait = pacer.onRateLimit(err.retryAfterMs ?? null);
         if (++throttled > maxRateLimitRetries) {
-          throw Object.assign(new Error(`rate limited (HTTP 429) ${throttled} times in a row; spacing reached ${pacer.spacingMs}ms`), { status: 429, abortRun: true });
+          throw Object.assign(new Error(`rate limited (HTTP 429) ${throttled} times in a row; spacing reached ${pacer.spacingMs}ms`), {
+            status: 429,
+            retryAfterMs: Number.isFinite(err.retryAfterMs) ? err.retryAfterMs : null,
+            abortRun: true,
+          });
         }
         await sleep(wait);
         continue;
@@ -363,6 +367,15 @@ export async function captureWithRecovery(threadId, { tokenRef, pacer, capture =
 // account has without opening each one in a tab first.
 export function looksLikeConversationList(data) {
   return Boolean(data && typeof data === "object" && Array.isArray(data.items));
+}
+
+export function fatalArchiveErrorDetails(error, message = error?.message) {
+  const details = { fatal_error: String(message || "Unknown archive error") };
+  if (Number.isInteger(error?.status)) details.fatal_error_status = error.status;
+  if (Number.isFinite(error?.retryAfterMs) && error.retryAfterMs >= 0) {
+    details.fatal_error_retry_after_ms = error.retryAfterMs;
+  }
+  return details;
 }
 
 export async function listConversationsPage({ offset = 0, limit = 28, fetchImpl = fetch, accessToken } = {}) {

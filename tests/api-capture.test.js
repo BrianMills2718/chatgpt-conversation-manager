@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations, captureWithRecovery, AdaptivePacer, parseRetryAfter, replyFromTree, resolveFileDownloadUrl, nextReplyCheckGapMs } from '../extension/lib/api-capture.js';
+import { looksLikeConversationTree, fetchConversationTree, linearizeMapping, captureViaApi, listConversationsPage, listAllConversations, getConversationProjectId, parseRemoteTime, selectChangedConversations, captureWithRecovery, AdaptivePacer, parseRetryAfter, replyFromTree, resolveFileDownloadUrl, nextReplyCheckGapMs, fatalArchiveErrorDetails } from '../extension/lib/api-capture.js';
 
 test('parseRemoteTime accepts epoch seconds, epoch ms, numeric strings and ISO strings', () => {
   assert.equal(parseRemoteTime(1757900000.5), 1757900000500);
@@ -166,6 +166,22 @@ test('listConversationsPage rejects a response that does not look like a list', 
   await assert.rejects(() => listConversationsPage({ fetchImpl, accessToken: null }), /schema may have changed/);
 });
 
+test('archive fatal-error metadata preserves the list endpoint status and Retry-After structurally', async () => {
+  const fetchImpl = async () => ({
+    ok: false,
+    status: 429,
+    headers: { get: (name) => name.toLowerCase() === 'retry-after' ? '12' : null },
+  });
+  await assert.rejects(() => listConversationsPage({ fetchImpl, accessToken: null }), (error) => {
+    assert.deepEqual(fatalArchiveErrorDetails(error), {
+      fatal_error: 'conversations list fetch failed: HTTP 429',
+      fatal_error_status: 429,
+      fatal_error_retry_after_ms: 12000,
+    });
+    return true;
+  });
+});
+
 test('listAllConversations pages until it has collected everything, reusing one access token', async () => {
   const tokenFetches = [];
   const conversationFetches = [];
@@ -307,8 +323,8 @@ test('captureWithRecovery waits the pacer delay on 429, then succeeds and speeds
 
 test('captureWithRecovery aborts the run when one conversation stays throttled', async () => {
   await assert.rejects(
-    captureWithRecovery('t1', { tokenRef: { token: 'x' }, pacer: new AdaptivePacer(), capture: async () => { throw httpErr(429); }, sleep: noSleep, maxRateLimitRetries: 3 }),
-    (err) => err.abortRun === true && err.status === 429 && /4 times in a row/.test(err.message),
+    captureWithRecovery('t1', { tokenRef: { token: 'x' }, pacer: new AdaptivePacer(), capture: async () => { throw httpErr(429, { retryAfterMs: 45000 }); }, sleep: noSleep, maxRateLimitRetries: 3 }),
+    (err) => err.abortRun === true && err.status === 429 && err.retryAfterMs === 45000 && /4 times in a row/.test(err.message),
   );
 });
 
