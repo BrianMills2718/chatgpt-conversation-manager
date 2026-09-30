@@ -1,12 +1,12 @@
 {
   "active_slice": {
     "description": "Make extension Resource Timing observations clock-skew-safe and retain broker-attributable timing for throughput analysis.",
-    "next_action": "Finish final producer/broker validation, review the full diff, then integrate the timing repair without starting the broker or sending ChatGPT requests.",
+    "next_action": "Review the complete worktree diff, update the current-state evidence, commit the implementation, then archive the completed timing-repair lane before integration.",
     "requires_external_action": false,
     "requires_spend": false,
     "slice_id": "repair-page-relative-request-timing",
     "status": "verifying",
-    "target_revision": "39d72d47176e3798fca015022ef7240e03c2ce15"
+    "target_revision": "07d08e825b053aa71a8635f65a164c89775b9c7c"
   },
   "authority": {
     "external_action_authorized": false,
@@ -29,7 +29,7 @@
     "verifier_outcome": null
   },
   "cursor_id": "request-timing-provenance-20260930",
-  "cursor_revision": 5,
+  "cursor_revision": 6,
   "failure_state": {
     "boundary": null,
     "last_failure_ref": null,
@@ -79,6 +79,13 @@
       "kind": "authentic_result",
       "observation_id": "historical-traffic-audit",
       "outcome": "inconclusive"
+    },
+    {
+      "boundary": "broker repository validation",
+      "evidence_ref": "npm test: 210 passed, 0 failed, 0 skipped, exit 0; npm run check: 16 syntax checks passed, 0 failed, exit 0.",
+      "kind": "supporting_work",
+      "observation_id": "final-validation-pass",
+      "outcome": "pass"
     }
   ],
   "plan_revision": "GOAL.md@34126e375;PATH-chatgpt-timing-provenance-20260930@1102b012287b984d79e79c6ad3f242e6c26c8049",
