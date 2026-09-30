@@ -1,12 +1,12 @@
 {
   "active_slice": {
     "description": "Make extension Resource Timing observations clock-skew-safe and retain broker-attributable timing for throughput analysis.",
-    "next_action": "Inspect the full diff and available validation scripts, update GOAL.md, then commit the repair and run integration-boundary checks.",
+    "next_action": "Finish final producer/broker validation, review the full diff, then integrate the timing repair without starting the broker or sending ChatGPT requests.",
     "requires_external_action": false,
     "requires_spend": false,
     "slice_id": "repair-page-relative-request-timing",
     "status": "verifying",
-    "target_revision": "f0cd7ea84215dde40a5db4c56bb72bf766a18ae9"
+    "target_revision": "39d72d47176e3798fca015022ef7240e03c2ce15"
   },
   "authority": {
     "external_action_authorized": false,
@@ -29,7 +29,7 @@
     "verifier_outcome": null
   },
   "cursor_id": "request-timing-provenance-20260930",
-  "cursor_revision": 4,
+  "cursor_revision": 5,
   "failure_state": {
     "boundary": null,
     "last_failure_ref": null,
@@ -72,6 +72,13 @@
       "kind": "supporting_work",
       "observation_id": "full-suite-pass",
       "outcome": "pass"
+    },
+    {
+      "boundary": "existing request-timing.jsonl telemetry",
+      "evidence_ref": "Offline scan of the main checkout: 4039 api_request rows, 160 HTTP 429s across two account keys, 146 conversation_list 429s; all 16 tab groups failed the timestamp-alignment gate because broker receipt minus page completion varied by 31-82 minutes MAD and half-window shifts exceeded one hour.",
+      "kind": "authentic_result",
+      "observation_id": "historical-traffic-audit",
+      "outcome": "inconclusive"
     }
   ],
   "plan_revision": "GOAL.md@34126e375;PATH-chatgpt-timing-provenance-20260930@1102b012287b984d79e79c6ad3f242e6c26c8049",
