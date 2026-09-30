@@ -718,6 +718,7 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
       const completedAt = new Date().toISOString();
       appendRequestTiming({
         schema_version: 2, event_type: 'broker_action', action: command.action, ok: true,
+        ...(opts.askId ? { ask_id: opts.askId } : {}),
         request_started_at: requestStartedAt, dispatch_started_at: dispatchStartedAt, completed_at: completedAt,
         duration_ms: Math.round(monoNow() - startedMs), rate_limited: rateLimited, spacing_ms: entry.pacer.spacingMs,
         spacing_ms_applied: actionReservation?.spacingMs ?? apiCheckReservation?.reservation.spacingMs ?? entry.pacer.spacingMs,
@@ -749,6 +750,7 @@ async function dispatchToExtension(command, timeoutMs = COMMAND_TIMEOUT_MS, opts
       const completedAt = new Date().toISOString();
       appendRequestTiming({
         schema_version: 2, event_type: 'broker_action', action: command.action, ok: false,
+        ...(opts.askId ? { ask_id: opts.askId } : {}),
         request_started_at: actionReservation ? dispatchStartedAt : apiCheckReservation?.reservation.startedAt ?? dispatchStartedAt,
         dispatch_started_at: dispatchStartedAt, completed_at: completedAt, backend_request_unknown: apiRequestUnknown || undefined,
         duration_ms: Math.round(monoNow() - startedMs), rate_limited: rateLimited, error: err.message, spacing_ms: entry.pacer.spacingMs,
@@ -812,13 +814,13 @@ async function navigateToThread(threadId) {
 // Live chat list --------------------------------------------------------------
 // One request to ChatGPT's own list of recent chats (newest first), read through a
 // connected tab. It shares the account's request limit, so it is never paged.
-async function listRecentChats(limit = 28, { account = null, includeProjects = false } = {}) {
-  const r = await dispatchToExtension({ action: "list_recent_chats", limit }, COMMAND_TIMEOUT_MS, { single: true, account });
+async function listRecentChats(limit = 28, { account = null, includeProjects = false, askId = null } = {}) {
+  const r = await dispatchToExtension({ action: "list_recent_chats", limit }, COMMAND_TIMEOUT_MS, { single: true, account, askId });
   const chats = (r.chats || []).map((c) => ({ ...c, project_name: null }));
   if (!includeProjects) return chats;
   // The main list leaves out chats filed inside a Project; merge those in
   // (newest first) so a caller is not silently blind to them.
-  const p = await dispatchToExtension({ action: "list_project_chats", per_project: Math.min(limit, 100) }, COMMAND_TIMEOUT_MS, { single: true, account });
+  const p = await dispatchToExtension({ action: "list_project_chats", per_project: Math.min(limit, 100) }, COMMAND_TIMEOUT_MS, { single: true, account, askId });
   const seen = new Set(chats.map((c) => c.id));
   for (const project of p.projects || []) for (const c of project.chats || []) if (!seen.has(c.id)) { seen.add(c.id); chats.push(c); }
   const t = (v) => (typeof v === 'number' ? v * 1000 : Date.parse(v || '') || 0);
@@ -893,8 +895,8 @@ function matchChatsByTitle(chats, query) {
   return exact.length ? exact : chats.filter((c) => (c.title || "").toLowerCase().includes(q));
 }
 
-async function resolveThreadTitle(title, account = null) {
-  const matches = matchChatsByTitle(await listRecentChats(100, { account, includeProjects: true }), title);
+async function resolveThreadTitle(title, account = null, askId = null) {
+  const matches = matchChatsByTitle(await listRecentChats(100, { account, includeProjects: true, askId }), title);
   if (matches.length === 1) return matches[0].id;
   if (!matches.length) throw new Error(`No chat among the 100 most recent has a title matching "${title}". Use list_chatgpt_chats or search_archived_chats to find its id.`);
   throw new Error(`"${title}" matches ${matches.length} chats; pass thread_id instead: ${matches.slice(0, 10).map((c) => `${c.id} "${c.title}"`).join("; ")}`);
@@ -937,22 +939,22 @@ async function runOpenCommand(cmd, { attempts = 3, delayMs = 3000, exec = (c) =>
 // account living in another profile (the 2026-09-29 two-account check failed
 // that way, on top of a flaky WSL interop call); it is only the fallback when
 // no tab of that account is connected.
-async function openAgentTabViaExtension(account) {
+async function openAgentTabViaExtension(account, askId = null) {
   const candidates = [...extensionSockets]
     .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && (!account || accountMatches(ws.account, account)))
     .sort((a, b) => Number(a.agentTab) - Number(b.agentTab)); // prefer a human tab: it is not busy with an ask
   const errors = [];
   for (const ws of candidates) {
     try {
-      const r = await dispatchToExtension({ action: "open_agent_tab", url: AGENT_TAB_URL }, 10000, { tab: ws.tabToken });
+      const r = await dispatchToExtension({ action: "open_agent_tab", url: AGENT_TAB_URL }, 10000, { tab: ws.tabToken, askId });
       if (r.ok !== false) return { via: ws.tabToken.slice(0, 8) };
       errors.push(`${ws.tabToken.slice(0, 8)}: ${r.reason}`);
     } catch (err) { errors.push(`${ws.tabToken.slice(0, 8)}: ${err.message}`); }
   }
   return { via: null, errors, candidates: candidates.length };
 }
-let openAgentTab = async ({ account = null } = {}) => {
-  const viaExtension = await openAgentTabViaExtension(account);
+let openAgentTab = async ({ account = null, askId = null } = {}) => {
+  const viaExtension = await openAgentTabViaExtension(account, askId);
   if (viaExtension.via) return;
   const why = viaExtension.candidates ? `the extension could not open one (${viaExtension.errors.join("; ")})` : `no tab${account ? ` signed into ${account}` : ''} is connected to open it from`;
   if (!AGENT_TAB_OPEN_CMD || !AGENT_TAB_OPEN_CMD.includes("ccm_agent=1")) {
@@ -1117,7 +1119,7 @@ async function findRoutedIdleAgentTab(seen, excludeTokens = new Set()) {
   return null;
 }
 
-async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = null, autoRoute = false } = {}) {
+async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = null, autoRoute = false, askId = null } = {}) {
   const seen = [];
   const existing = new Set([...extensionSockets]
     .filter((ws) => ws.readyState === ws.OPEN && ws.tabToken && ws.agentTab)
@@ -1130,7 +1132,7 @@ async function pickIdleTab({ openWaitMs = 90000, forceNew = false, account = nul
       : await findIdleAgentTab(seen, new Set(), account);
     if (found) return found;
   }
-  try { await openAgentTab({ account }); }
+  try { await openAgentTab({ account, askId }); }
   catch (err) { throw new Error(`${err.message} (agent tabs checked first: ${JSON.stringify(seen)})`); }
   const deadline = monoNow() + openWaitMs;
   while (monoNow() < deadline) {
@@ -1208,14 +1210,14 @@ function tabGone(err) {
   return err?.tab_dead === true && (err.nothing_sent === true || err.not_dispatched === true) && err.sent_unknown !== true;
 }
 const NAV_DEAD_MS = Number(process.env.NAV_DEAD_MS || 20000);
-async function navigateAndWait(tab, { threadId = null, account = null, pacingReservation = null }) {
+async function navigateAndWait(tab, { threadId = null, account = null, pacingReservation = null, askId = null }) {
   const command = threadId ? { action: "navigate_to_thread", thread_id: threadId } : { action: "navigate_home" };
   const predicate = threadId ? (i) => i.thread_id === threadId : (i) => !i.thread_id;
   const what = threadId ? `opened conversation ${threadId}` : "opened a new chat";
   const startedMs = monoNow();
   let reissued = false;
   try {
-    await dispatchToExtension(command, COMMAND_TIMEOUT_MS, { tab, account, pacingReservation });
+    await dispatchToExtension(command, COMMAND_TIMEOUT_MS, { tab, account, pacingReservation, askId });
     const { diag } = await waitForTab(tab, predicate, NAV_WAIT_MS, what, {
       since: startedMs,
       onPoll: async (d, elapsed) => {
@@ -1230,7 +1232,7 @@ async function navigateAndWait(tab, { threadId = null, account = null, pacingRes
         // Back on a page, but not the target: the navigation was lost.
         if (!reissued && elapsed > NAV_WAIT_MS / 2 && d.last_error === null && d.last_thread_id !== undefined) {
           reissued = true;
-          await dispatchToExtension(command, COMMAND_TIMEOUT_MS, { tab, account, pacingReservation }).catch(() => {});
+          await dispatchToExtension(command, COMMAND_TIMEOUT_MS, { tab, account, pacingReservation, askId }).catch(() => {});
         }
       },
     });
@@ -1305,6 +1307,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
     const body = String(text || "").trim();
     if (!body) throw new Error("text is required.");
     if (thread_id && thread_title) throw new Error("pass thread_id or thread_title, not both.");
+    const askId = crypto.randomUUID();
     const startedAt = new Date().toISOString();
     const startedMs = monoNow();
     let last = null;
@@ -1324,7 +1327,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
     const retryClicks = [];
     try {
       if (thread_id) resolvedThreadId = threadIdFromInput(thread_id);
-      if (thread_title) resolvedThreadId = await resolveThreadTitle(thread_title, account);
+      if (thread_title) resolvedThreadId = await resolveThreadTitle(thread_title, account, askId);
       const onTargetPage = (i) => (resolvedThreadId ? i.thread_id === resolvedThreadId : !i.thread_id);
       // Claim a tab and get it onto the target page. A tab that does not come
       // back from the page load is set aside (skipped until it reconnects) and
@@ -1339,7 +1342,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       const sendPrompt = () => dispatchToExtension(
         { action: "send_prompt", text: body, exclude_threads: [...attributedThreads], messages_before_hint: resolvedThreadId ? (threadMessageCounts.get(resolvedThreadId) ?? null) : null },
         sendTimeoutMs ?? promptDispatchTimeoutMs(timeout_seconds),
-        { tab, account, pacingReservation },
+        { tab, account, pacingReservation, askId },
       ).then((r) => { sendDispatched = true; return r; }, (e) => { if (!e.not_dispatched) sendDispatched = true; throw e; });
       let sent;
       try {
@@ -1390,7 +1393,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
             appendRequestTiming({ action: 'reload_for_composer', ok: true, tab: tab.slice(0, 8), account: account || null, page_id: err.page_id });
             // Not awaited: the page may unload before its reply crosses the
             // socket. The new page instance reporting in is the real signal.
-            dispatchToExtension({ action: "reload_tab" }, 5000, { tab, account, pacingReservation }).catch(() => {});
+            dispatchToExtension({ action: "reload_tab" }, 5000, { tab, account, pacingReservation, askId }).catch(() => {});
             await waitForTab(tab, (i) => Boolean(i.page_id) && i.page_id !== err.page_id && onTargetPage(i), 20000, "reloaded the conversation page")
               .catch((reloadErr) => { throw Object.assign(new Error(`${err.message} Reloading the tab to recover failed: ${reloadErr.message} ${nothingSent}`), { nothing_sent: true, tab_dead: reloadErr.navigation_diag?.last_thread_id === undefined }); });
           }
@@ -1419,7 +1422,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         // (2026-09-29: large prompts froze it for 5 minutes). Say so, instead
         // of a bare timeout.
         if (conversationMode !== 'new') throw stalled();
-        const currentTab = await dispatchToExtension({ action: "get_tab" }, 5000, { tab }).catch(() => ({}));
+        const currentTab = await dispatchToExtension({ action: "get_tab" }, 5000, { tab, askId }).catch(() => ({}));
         if (!currentTab.thread_id) throw stalled();
         sent = { thread_id: currentTab.thread_id, dom_before: 0, messages_before: 0, recovered_after_navigation: true };
       }
@@ -1431,7 +1434,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       for (let attempt = 1; ; attempt++) {
         let picked;
         try {
-          picked = await pickIdleTab({ openWaitMs, forceNew: fresh_tab, account: requestedAccount, autoRoute });
+          picked = await pickIdleTab({ openWaitMs, forceNew: fresh_tab, account: requestedAccount, autoRoute, askId });
         } catch (pickErr) {
           // No other tab to move to: report why the previous one was given up.
           if (!lastGoneErr) throw pickErr;
@@ -1456,8 +1459,8 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         // composer. The send below then needs no second wait.
         const pacingReservation = await reserveAccountAction(account);
         try {
-          if (resolvedThreadId && current !== resolvedThreadId) await navigateAndWait(tab, { threadId: resolvedThreadId, account, pacingReservation });
-          else if (!resolvedThreadId && current) await navigateAndWait(tab, { account, pacingReservation });
+          if (resolvedThreadId && current !== resolvedThreadId) await navigateAndWait(tab, { threadId: resolvedThreadId, account, pacingReservation, askId });
+          else if (!resolvedThreadId && current) await navigateAndWait(tab, { account, pacingReservation, askId });
           sent = await sendOnTab(pacingReservation);
           break;
         } catch (err) {
@@ -1505,13 +1508,13 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       let confirmUntil = 0;
       while (monoNow() < deadline || monoNow() < confirmUntil) {
         await sleep(pollMs);
-        try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before, expected: body, thread_hint: sentThreadId, exclude_threads: [...attributedThreads] }, 30000, { tab, account }); }
+        try { last = await dispatchToExtension({ action: "get_reply", dom_before: sent.dom_before, messages_before: sent.messages_before, expected: body, thread_hint: sentThreadId, exclude_threads: [...attributedThreads] }, 30000, { tab, account, askId }); }
         catch (err) { last = { done: false, error: err.message }; continue; }
         if (!sendSeen && !last.discovered_thread_id && retryClickAfterMs.length && monoNow() - sentAtMs >= retryClickAfterMs[0]) {
           retryClickAfterMs.shift();
           try {
             const retry = await dispatchToExtension({ action: "retry_send_click", expected: body, thread_before: conversationMode === 'new' ? null : resolvedThreadId,
-              messages_before: sent.messages_before, exclude_threads: [...attributedThreads] }, 60000, { tab, account });
+              messages_before: sent.messages_before, exclude_threads: [...attributedThreads] }, 60000, { tab, account, askId });
             retryClicks.push({ after_ms: monoNow() - sentAtMs, clicked: Boolean(retry.clicked), confirmed_by: retry.confirmed_by || null, reason: retry.reason || null });
             if (retry.confirmed_by) {
               sendSeen = true;
@@ -1553,7 +1556,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
         const threadId = last.thread_id || sentThreadId || resolvedThreadId || null;
         noteAttributedThread(threadId);
         if (threadId && Number.isInteger(last.message_count) && last.source === 'api') threadMessageCounts.set(threadId, last.message_count);
-        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'success', account: usedAccount || null, route_id: routeId || undefined, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+        appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'success', account: usedAccount || null, ask_id: askId, route_id: routeId || undefined, prompt_escaped: last.prompt_escaped ? true : undefined, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: null, visible_error: null, conversation_mode: conversationMode, thread_id: threadId, prompt_chars: body.length, history_message_count: Number.isInteger(last.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
         // The caller must know when the model did not get the prompt verbatim.
         // Evidence, not the switch's own report: the stored turn is compared with
         // the prompt (replyFromTree's prompt_escaped).
@@ -1570,7 +1573,7 @@ async function askChatgpt({ text, thread_id = null, thread_title = null, timeout
       err.sent = err.sent_unknown ? null : (err.nothing_sent || !sendDispatched) ? false : sendSeen ? true : null;
       err.thread_id = last?.thread_id || sentThreadId || resolvedThreadId || null;
       err.account = usedAccount || null;
-      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'failed', account: usedAccount || null, route_id: routeId || undefined, sent: err.sent, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
+      appendBridgeObservation({ started_at: startedAt, ended_at: new Date().toISOString(), duration_ms: Math.round(monoNow() - startedMs), outcome: 'failed', account: usedAccount || null, ask_id: askId, route_id: routeId || undefined, sent: err.sent, retry_clicks: retryClicks.length ? retryClicks : undefined, failure_kind: bridgeFailureKind(err, last), visible_error: last?.visible_error || null, error_message: String(err?.message || '').replace(/ \(last seen: .*$/s, '').slice(0, 300), conversation_mode: conversationMode, thread_id: last?.thread_id || resolvedThreadId || null, prompt_chars: body.length, history_message_count: Number.isInteger(last?.message_count) ? last.message_count : null, history_chars: null, thinking_level: 'unknown' });
       throw err;
     } finally {
       if (claimedTab) claimedTabs.delete(claimedTab);

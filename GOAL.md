@@ -58,7 +58,7 @@ governs while working in it.
   governs that, reused as-is); `weekly_chatgpt_supervisor.py`'s task-profile
   model itself (`autonomous`/`review_gated`/`hands_on`/`human_only` stays
   exactly as-is — only its dispatch internals move to the shared client).
-- Writes allowed: `chatgpt-conversation-manager-v0.2/{GOAL.md,server/index.js,README.md,CLAUDE.md,scripts/bridge-observation-report.js,extension/content.js,extension/manifest.json,extension/lib/api-request-observation.js,tests/api-request-observation.test.js,tests/server.test.js}`,
+- Writes allowed: `chatgpt-conversation-manager-v0.2/{GOAL.md,server/index.js,README.md,CLAUDE.md,docs/decisions/ADR-0001-request-timing-contract.md,scripts/bridge-observation-report.js,extension/content.js,extension/manifest.json,extension/lib/api-request-observation.js,tests/api-request-observation.test.js,tests/server.test.js}`,
   `weekly-plans/scripts/{weekly_chatgpt_supervisor.py,chatgpt_dispatch_client.py,
   test_chatgpt_dispatch_client.py,review_sweep.py}`, and each affected repo's
   own `investigations/chatgpt-review-sweep-manifest.{tsv,md}`.
@@ -82,6 +82,7 @@ governs while working in it.
 | C5 | Per-person deployment documented | The written README/CLAUDE.md section accurately describes what C1-C4 actually built, not an aspirational future state |
 | C6 | Adaptive account routing responds to account cooldowns | A broker-level test feeds a synthetic 429 to account A, verifies A's learned gap widens, then verifies an unpinned new ask selects idle account B with the earlier projected start; the route decision is joined to its ask outcome by `route_id` |
 | C7 | API timing evidence survives browser clock skew and delayed delivery | The extension sends page-relative request age at socket-send time; the broker reconstructs start/completion from that age and its receipt clocks, and rolling request counts use request-start times. Synthetic tests prove skewed/legacy wall timestamps are not trusted and buffered events retain their original timing window |
+| C8 | Broker-visible throttles are attributable to individual asks | Each ask's broker actions and bridge outcome share one random `ask_id`; the offline report joins only to one unique outcome, reports rate-limited action counts plus missing/duplicate/account-mismatch counts, and never prints ask IDs. Legacy rows remain unjoined; passive `api_request` rows remain unassigned. A synthetic ask-level 429 test proves the join without live ChatGPT traffic |
 
 C6 proves the scheduler behavior using controlled browser fakes. It does not
 prove ChatGPT's hidden account limits or claim that any fixed routing policy
@@ -99,7 +100,8 @@ browser pages.
 - **Decision:** determine whether these historical rows support a descriptive
   per-account request-rate range or only counts/statuses plus a need for future
   observations. They do not directly measure completed prompts or task
-  throughput because API request rows have no `route_id` join.
+  throughput because `api_request` rows remain unassigned to asks; the new
+  `ask_id` join covers broker actions and ask outcomes, not all page requests.
 - **Unit and population:** one `event_type=api_request` row in
   `data/observations/request-timing.jsonl`; include all endpoint classes and
   report each separately. Exclude `broker_action` rows from API-request counts
@@ -129,11 +131,13 @@ browser pages.
 - `node scripts/bridge-observation-report.js` reads both observation logs,
   reports API requests by account, agent-tab state, and endpoint, keeps broker
   actions separate, pseudonymizes account, tab, and conversation identifiers
-  within the report, reduces source paths to filenames, and joins automatic
-  route decisions to ask outcomes only by `route_id`. It does not assign
-  passive page requests to individual asks. Request rows do not include HTTP
-  method, so `conversation` endpoint 429s cannot be classified as prompt sends
-  versus reads.
+  within the report, reduces source paths to filenames, joins automatic route
+  decisions to ask outcomes by `route_id`, and joins broker actions to ask
+  outcomes by `ask_id` when the outcome is unique. It reports missing and
+  mismatched joins without exposing raw ask IDs. It does not assign passive
+  page requests to individual asks. Request rows do not include HTTP method,
+  so `conversation` endpoint 429s cannot be classified as prompt sends versus
+  reads.
 - **Boundary:** observation does not send agent prompts or run scheduled archive
   sync. Connected ChatGPT tabs still make real API requests, which are recorded
   by the observer and count against those accounts. Do not treat passive page
@@ -349,3 +353,15 @@ non_gating_utility_review:
   zero recorded 429s do not establish a safe send rate. A live throttle-driven
   account switch has not been demonstrated. Useful per-account capacity and
   any optimal or globally maximal rate remain unmeasured.
+- **C8 ask/action attribution is implemented as a candidate increment.** Each
+  ask now has one random `ask_id` shared by its broker-action events and final
+  outcome. The offline report aggregates rate-limited broker actions only for
+  IDs with exactly one outcome, and surfaces missing, duplicate, and
+  account-mismatched joins without emitting the raw IDs. The synthetic
+  ask-level 429 and report tests pass; the complete suite reports 215 passed,
+  0 failed, 0 skipped, exit 0, and the syntax check reports 16 passed, 0
+  failed, 0 skipped, exit 0. This does not assign passive page requests to
+  asks or change routing behavior. Historical rows without `ask_id` cannot be
+  joined retroactively, and this increment made no live ChatGPT requests.
+  Useful per-account capacity and a real throttle-driven account switch still
+  require future live observations.

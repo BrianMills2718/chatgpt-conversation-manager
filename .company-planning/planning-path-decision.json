@@ -1,13 +1,13 @@
 {
   "schema_version": "1.0",
   "record_type": "planning_path_decision",
-  "decision_id": "PATH-chatgpt-timing-provenance-20260930",
+  "decision_id": "PATH-ask-throttle-attribution-20260930",
   "project_id": "chatgpt-conversation-manager-v0.2",
-  "scope": "fix/request-timing-provenance",
+  "scope": "instrument-ask-level-broker-throttle-attribution",
   "selected_path": "coordinated",
   "facts": {
     "existing_implementation_obstacle": true,
-    "reproduced_failure": true,
+    "reproduced_failure": false,
     "identified_fix": true,
     "concurrent_writers": false,
     "machine_consumed_planning_handoff": true,
@@ -23,7 +23,7 @@
   },
   "fact_sources": {
     "existing_implementation_obstacle": "derived_current_boundary",
-    "reproduced_failure": "observed_runtime",
+    "reproduced_failure": "derived_current_boundary",
     "identified_fix": "derived_current_boundary",
     "concurrent_writers": "observed_runtime",
     "machine_consumed_planning_handoff": "governing_authority",
@@ -38,20 +38,20 @@
     "boundary_known": "derived_current_boundary"
   },
   "fact_evidence": {
-    "existing_implementation_obstacle": "The extension constructs absolute timestamps from performance.timeOrigin; the broker parses and records those client timestamps.",
-    "reproduced_failure": "An inline synthetic Resource Timing observation with a 2020 browser timeOrigin produced request_started_at=2020-01-01 while the simulated broker receipt was 2026-09-30.",
-    "identified_fix": "Carry elapsed page-monotonic age to the broker and subtract it from broker receipt wall and monotonic clocks.",
-    "concurrent_writers": "ListAgents showed only /root and the canonical claim check showed no existing broker-repo claims before this lane.",
+    "existing_implementation_obstacle": "Broker actions and ask outcomes are logged separately without a shared ask identifier; the report cannot attribute broker-visible 429 actions to one outcome.",
+    "reproduced_failure": "No runtime failure is claimed; this is an observability gap visible in the current persisted contract and report.",
+    "identified_fix": "Generate one UUID per ask, add it to that ask's broker_action rows and bridge outcome, and aggregate only exact unique joins in the local report.",
+    "concurrent_writers": "The canonical coordination claim check found no existing broker-repository claim for this write scope before the lane.",
     "machine_consumed_planning_handoff": "execute-plan-loop requires a typed PlanningPathDecisionV1 and active execution cursor consumed by its supervisor.",
-    "shared_contract_mutation": "The api_request_observed message crosses the extension-to-broker WebSocket boundary, so both producer and consumer must adopt the relative-age field together.",
-    "persistent_migration": "No stored data migration or persistent schema migration is needed; this changes incoming event timing semantics.",
+    "shared_contract_mutation": "The broker_action and bridge outcome JSONL event contract gains a backward-compatible optional ask_id field, consumed by the offline report.",
+    "persistent_migration": "No stored data migration is needed; existing rows without ask_id remain unjoined.",
     "governed_registry": "The worktree and write scope are registered by the canonical coordination claim registry.",
-    "consequential_external_mutation": "The broker is inactive; this lane edits recoverable local code and makes no live ChatGPT request or deployment.",
+    "consequential_external_mutation": "This lane edits recoverable local code and makes no live ChatGPT request or deployment.",
     "answer_only": "The user asked to continue the implementation goal, not only to receive an explanation.",
     "continuity_beyond_session": "GOAL.md defines a multi-phase orchestration outcome that spans sessions and repositories.",
-    "one_writer": "Only /root is active in this session and the new scoped claim is owned by this session.",
+    "one_writer": "This session holds the only active write claim for the broker-repository scope; the canonical check showed no overlapping claim.",
     "reversible": "All implementation changes are on a recoverable feature branch and can be reverted.",
-    "boundary_known": "The affected seam is the existing Resource Timing observation sent over the extension WebSocket and logged by server/index.js."
+    "boundary_known": "The affected seam is askChatgpt dispatch options, broker_action JSONL logging, bridge outcome logging, and the local observation report."
   },
-  "rationale": "Use the coordinated path because a machine-consumed execution handoff is active and this repair changes the timing semantics shared by the extension producer and broker consumer. The implementation remains one bounded, reversible lane."
+  "rationale": "Use the coordinated path because a machine-consumed execution handoff is active and this increment changes the persisted ask/action event contract. It remains one bounded, reversible lane and does not touch passive page-request attribution or live ChatGPT traffic."
 }

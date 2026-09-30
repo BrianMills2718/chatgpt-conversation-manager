@@ -1,0 +1,65 @@
+{
+  "active_slice": {
+    "description": "Correlate broker-visible rate-limit actions to the ask outcome and report aggregate evidence without assigning passive page requests.",
+    "next_action": null,
+    "requires_external_action": false,
+    "requires_spend": false,
+    "slice_id": "instrument-ask-level-broker-throttle-attribution",
+    "status": "accepted",
+    "target_revision": "fa34702"
+  },
+  "authority": {
+    "external_action_authorized": false,
+    "human_decision": null,
+    "human_decision_required": false,
+    "implementation_authorized": true,
+    "spend_cap_usd": 0,
+    "spend_used_usd": 0
+  },
+  "circuit_breakers": {
+    "context_integrity_valid": true,
+    "max_same_boundary_failures": 3,
+    "runtime_integrity_valid": true
+  },
+  "completion": {
+    "evidence_revision": "fa34702",
+    "receipt_ref": "GOAL.md C8 at fa34702 plus prior-turn verification output: npm test, npm run check, focused ask/report tests, and git diff --check.",
+    "remaining_ready_work": 0,
+    "requested": true,
+    "verifier_outcome": "pass"
+  },
+  "cursor_id": "ask-throttle-attribution-20260930",
+  "cursor_revision": 2,
+  "failure_state": {
+    "boundary": null,
+    "last_failure_ref": null,
+    "same_boundary_failures": 0
+  },
+  "goal_ref": "goal:reduce-chatgpt-throttling-while-measuring-useful-per-account-throughput",
+  "lifecycle_state": "complete",
+  "observations": [
+    {
+      "boundary": "broker ask and request-timing JSONL",
+      "evidence_ref": "At base e399b88: server/index.js logs broker_action and bridge outcomes independently; bridge-observation-report.js only joins account_route by route_id.",
+      "kind": "supporting_work",
+      "observation_id": "missing-ask-action-join",
+      "outcome": "pass"
+    },
+    {
+      "boundary": "synthetic ask-level 429 and offline observation report",
+      "evidence_ref": "At fa34702: focused ask/report cases 2 passed, 0 failed, 0 skipped, exit 0; full npm test 215 passed, 0 failed, 0 skipped, exit 0; npm run check 16 passed, 0 failed, 0 skipped, exit 0; git diff --check passed. The first mock only showed a banner; it was corrected to report api_checked=true and api_status=429. All cases used fake tabs/temp data; no live ChatGPT requests.",
+      "kind": "supporting_work",
+      "observation_id": "ask-throttle-attribution-verification",
+      "outcome": "pass"
+    }
+  ],
+  "plan_revision": "GOAL.md@6903f256bb5c4505f367f281830434c0f3733222;PlanningPathDecisionV1@5df3f780b3dad3e6f2ab23da04f5bf1da632fdc7",
+  "ready_alternatives": [],
+  "record_type": "plan_execution_cursor",
+  "schema_version": "1.0",
+  "target": {
+    "branch": "codex/ask-throttle-attribution",
+    "repository": "/home/brian/code/chatgpt-conversation-manager-v0.2",
+    "worktree": "/home/brian/code/chatgpt-conversation-manager-v0.2/worktrees/codex-ask-throttle-attribution"
+  }
+}
