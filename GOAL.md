@@ -383,12 +383,15 @@ non_gating_utility_review:
   capacity or a maximum rate. This increment used saved files only and made no
   live ChatGPT requests. A real throttle-driven account switch and useful
   per-account capacity remain unproven.
-- **C9 structured sync backoff is implemented in this change.** The extension
-  completion preserves HTTP status and `Retry-After`; the scheduler stores
-  them, waits at least the configured interval or the server delay on HTTP
-  429, and honors a future `next_run_at` after restart. The full mocked suite
-  reports 219 passed, 0 failed, 0 skipped; the 16 syntax checks pass. No broker
-  start or live ChatGPT request was used to verify this code.
+- **C9 structured sync backoff is merged in broker PR #82** at
+  `5057cdfe7c67263e504af509cebba9acafa4afc8`. The extension completion
+  preserves HTTP status and `Retry-After`; the scheduler stores them, waits at
+  least the configured interval or server delay on HTTP 429, and honors a
+  future `next_run_at` after restart. A direct Node check showed that a timer
+  above 2^31−1 ms fires after 1 ms; long retry deadlines are now split into
+  safe timer chunks and preserved across those wakes. Final verification:
+  `npm test` passed 220 tests, 0 failed, 0 skipped; 16 syntax checks passed;
+  `git diff --check` passed. No broker start or live ChatGPT request was used.
 - **Scheduled-sync throttle source found, 2026-09-30.** The user service
   `chatgpt-bridge.service` was already running with a six-hour archive-sync
   interval. Its incremental conversation-list fetch failed with HTTP 429 at
