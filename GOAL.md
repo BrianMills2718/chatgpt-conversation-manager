@@ -214,9 +214,9 @@ non_gating_utility_review:
 - One progress authority: this document's "Current State" section, kept
   current at each phase boundary — not an append-only diary.
 - Active owners/claims: the shared workspace claim registry governs linked
-  worktrees in the broker and `weekly-plans`; this goal currently has one
-  active broker lane. The review-sweep targets (DIGIMON, OntoCanon) use their
-  own claim tooling for any code changes there.
+  worktrees in the broker and `weekly-plans`; check it for current owners before
+  resuming or creating a lane. The review-sweep targets (DIGIMON, OntoCanon) use
+  their own claim tooling for code changes there.
 - Authority transfer/reversion: per the machine block above. Given this
   session crashed and lost work repeatedly earlier tonight (WSL/disk
   instability, documented in `~/projects/.claude/DEVICES_AND_ACCOUNTS.md`),
