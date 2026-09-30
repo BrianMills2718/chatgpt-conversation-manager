@@ -10,7 +10,7 @@ const { buildSnapshot, snapshotFingerprint } = await import(chrome.runtime.getUR
 const { sendEvidence, sendEvidenceFromCounts, samePrompt, verbatimMismatch } = await import(chrome.runtime.getURL("lib/send-confirm.js"));
 const { waitFor: waitForLib } = await import(chrome.runtime.getURL("lib/wait-for.js"));
 const { pingBackground } = await import(chrome.runtime.getURL("lib/background-ping.js"));
-const { apiRequestObservationFromResource } = await import(chrome.runtime.getURL("lib/api-request-observation.js"));
+const { apiRequestObservationFromResource, apiRequestObservationForSend } = await import(chrome.runtime.getURL("lib/api-request-observation.js"));
 const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, parseRemoteTime, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats, nextReplyCheckGapMs, REPLY_CHECK_MIN_GAP_MS } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
@@ -42,7 +42,14 @@ let droppedApiRequestObservations = 0;
 function sendApiRequestObservation(message) {
   try {
     if (brokerIdentityReported && socket?.readyState === WebSocket.OPEN && socket.bufferedAmount < API_REQUEST_OBSERVATION_SOCKET_BUFFER_LIMIT) {
-      socket.send(JSON.stringify(message));
+      let outbound = message;
+      if (message?.type === "api_request_observed") {
+        const { type, ...observation } = message;
+        const wireObservation = apiRequestObservationForSend(observation, performance.now());
+        if (!wireObservation) return false;
+        outbound = { type, ...wireObservation };
+      }
+      socket.send(JSON.stringify(outbound));
       return true;
     }
   } catch {}
@@ -83,7 +90,7 @@ try {
   performance.setResourceTimingBufferSize(API_RESOURCE_TIMING_BUFFER_LIMIT);
   apiRequestPerformanceObserver = new PerformanceObserver((list) => {
     for (const entry of list.getEntries()) {
-      const observation = apiRequestObservationFromResource(entry, performance.timeOrigin);
+      const observation = apiRequestObservationFromResource(entry);
       if (observation) reportApiRequestObservation(observation);
     }
   });

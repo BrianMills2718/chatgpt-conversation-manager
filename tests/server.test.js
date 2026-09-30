@@ -530,37 +530,130 @@ test('only one same-account get_reply poll receives the API-check permit at a ti
   }
 });
 
-test('observed ChatGPT API requests are recorded with account, endpoint class, status, and actual timing', async () => {
+test('observed ChatGPT API requests use broker receipt and page-relative age, not browser wall time', async () => {
   const account = 'api-observer@example.com';
   const tab = fakeTab('api-observer-tab', { account, onCommand: (_msg, _state, reply) => reply({ ok: true }) });
   await tab.open();
   try {
     fs.rmSync(requestTimingPath, { force: true });
-    const start = Date.now() - 85;
+    const sendStartedAt = Date.now();
     tab.ws.send(JSON.stringify({
       type: 'api_request_observed',
       source: 'performance_resource_timing',
       endpoint_class: 'conversation',
-      request_started_at: new Date(start).toISOString(),
-      completed_at: new Date(start + 81).toISOString(),
+      request_started_at: '2020-01-01T00:00:00.000Z',
+      completed_at: '2020-01-01T00:00:00.081Z',
       duration_ms: 81,
       api_status: 429,
       initiator_type: 'fetch',
     }));
+    tab.ws.send(JSON.stringify({
+      type: 'api_request_observed',
+      source: 'performance_resource_timing',
+      endpoint_class: 'conversation',
+      duration_ms: 81,
+      request_age_ms: -1,
+      api_status: 429,
+      initiator_type: 'fetch',
+    }));
+    tab.ws.send(JSON.stringify({
+      type: 'api_request_observed',
+      source: 'performance_resource_timing',
+      endpoint_class: 'conversation',
+      duration_ms: 81,
+      request_age_ms: 85,
+      api_status: 429,
+      initiator_type: 'fetch',
+    }));
     await new Promise((resolve) => setTimeout(resolve, 20));
-    const event = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))[0];
-    assert.equal(event.schema_version, 2);
+    const events = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(events.length, 1, 'invalid relative ages and legacy client wall timestamps are dropped');
+    const event = events[0];
+    assert.equal(event.schema_version, 3);
     assert.equal(event.event_type, 'api_request');
     assert.equal(event.action, 'chatgpt_api_request');
     assert.equal(event.account, account);
     assert.equal(event.endpoint_class, 'conversation');
     assert.equal(event.api_status, 429);
     assert.equal(event.rate_limited, true);
-    assert.equal(event.request_started_at, new Date(start).toISOString());
-    assert.equal(event.completed_at, new Date(start + 81).toISOString());
-    assert.equal(event.api_events_received_last_60s, 1);
-    assert.equal(event.account_api_events_received_last_60s, 1);
+    const expectedStart = Date.parse(event.broker_received_at) - 85;
+    assert.equal(event.request_started_at, new Date(expectedStart).toISOString());
+    assert.equal(event.completed_at, new Date(expectedStart + 81).toISOString());
+    assert.notEqual(Date.parse(event.request_started_at), Date.parse('2020-01-01T00:00:00.000Z'));
+    assert.equal(event.request_age_at_send_ms, 85);
+    assert.equal(event.timing_basis, 'broker_receipt_minus_page_monotonic_age');
+    assert.equal(event.request_count_window_reference, 'request_started_at');
+    assert.ok(Date.parse(event.broker_received_at) >= sendStartedAt);
+    assert.equal(event.observed_api_requests_started_last_60s, 1);
+    assert.equal(event.account_observed_api_requests_started_last_60s, 1);
     assert.equal(JSON.stringify(event).includes('conversation-id'), false);
+  } finally {
+    tab.ws.close();
+  }
+});
+
+test('out-of-order buffered API observations retain request-start windows, not receipt-time bursts', async () => {
+  const account = 'buffered-api-observer@example.com';
+  const oldTab = fakeTab('buffered-api-old-tab', { account, onCommand: (_msg, _state, reply) => reply({ ok: true }) });
+  const currentTab = fakeTab('buffered-api-current-tab', { account, onCommand: (_msg, _state, reply) => reply({ ok: true }) });
+  const delayedTab = fakeTab('buffered-api-delayed-tab', { account, onCommand: (_msg, _state, reply) => reply({ ok: true }) });
+  await Promise.all([oldTab.open(), currentTab.open(), delayedTab.open()]);
+  try {
+    fs.rmSync(requestTimingPath, { force: true });
+    const observation = (requestAgeMs) => JSON.stringify({
+      type: 'api_request_observed', source: 'performance_resource_timing', endpoint_class: 'conversation',
+      duration_ms: 81, request_age_ms: requestAgeMs, api_status: 200, initiator_type: 'fetch',
+    });
+    const waitForApiEvents = async (expectedCount) => {
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        const events = fs.existsSync(requestTimingPath)
+          ? fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((event) => event.event_type === 'api_request')
+          : [];
+        if (events.length >= expectedCount) return events;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.fail(`broker did not record ${expectedCount} API observations before timeout`);
+    };
+    // Simulate a 560-second-old event from one tab, a new event from another,
+    // then a 280-second-old event whose request start is 280 seconds after the first.
+    oldTab.ws.send(observation(560000));
+    await waitForApiEvents(1);
+    currentTab.ws.send(observation(0));
+    await waitForApiEvents(2);
+    delayedTab.ws.send(observation(280000));
+    const events = await waitForApiEvents(3);
+    assert.equal(events.length, 3);
+    assert.equal(events[0].request_count_window_status, 'age_exceeds_retention');
+    assert.equal(events[2].request_count_window_status, 'age_within_retention');
+    assert.equal(events[0].account_observed_api_requests_started_last_300s, null);
+    assert.equal(events[1].account_observed_api_requests_started_last_300s, 1);
+    assert.equal(events[2].account_observed_api_requests_started_last_60s, 1);
+    assert.equal(events[2].account_observed_api_requests_started_last_300s, 2);
+  } finally {
+    oldTab.ws.close();
+    currentTab.ws.close();
+    delayedTab.ws.close();
+  }
+});
+
+test('API observations older than the count retention window keep raw timing but do not claim rolling counts', async () => {
+  const account = 'stale-api-observer@example.com';
+  const tab = fakeTab('stale-api-observer-tab', { account, onCommand: (_msg, _state, reply) => reply({ ok: true }) });
+  await tab.open();
+  try {
+    fs.rmSync(requestTimingPath, { force: true });
+    tab.ws.send(JSON.stringify({
+      type: 'api_request_observed', source: 'performance_resource_timing', endpoint_class: 'conversation',
+      duration_ms: 81, request_age_ms: 25 * 60 * 60 * 1000, api_status: 429, initiator_type: 'fetch',
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const event = fs.readFileSync(requestTimingPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))[0];
+    assert.equal(event.api_status, 429);
+    assert.equal(event.request_count_window_status, 'age_exceeds_retention');
+    assert.equal(event.account_observed_api_requests_started_last_60s, null);
+    assert.equal(event.account_observed_api_requests_started_last_300s, null);
+    assert.ok(event.request_started_at);
   } finally {
     tab.ws.close();
   }
