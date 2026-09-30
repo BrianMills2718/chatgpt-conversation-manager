@@ -1,12 +1,12 @@
 {
   "active_slice": {
     "description": "Make extension Resource Timing observations clock-skew-safe and retain broker-attributable timing for throughput analysis.",
-    "next_action": "Run the full repository test suite, inspect the complete diff, update GOAL.md, then commit and perform the integration-boundary checks.",
+    "next_action": "Inspect the full diff and available validation scripts, update GOAL.md, then commit the repair and run integration-boundary checks.",
     "requires_external_action": false,
     "requires_spend": false,
     "slice_id": "repair-page-relative-request-timing",
     "status": "verifying",
-    "target_revision": "1120f7c92e224e919d3d5fb3083489d5d20477ec"
+    "target_revision": "f0cd7ea84215dde40a5db4c56bb72bf766a18ae9"
   },
   "authority": {
     "external_action_authorized": false,
@@ -29,7 +29,7 @@
     "verifier_outcome": null
   },
   "cursor_id": "request-timing-provenance-20260930",
-  "cursor_revision": 3,
+  "cursor_revision": 4,
   "failure_state": {
     "boundary": null,
     "last_failure_ref": null,
@@ -64,6 +64,13 @@
       "evidence_ref": "node --test tests/api-request-observation.test.js: 3 passed, 0 failed, exit 0; node --test --test-name-pattern=\"observed ChatGPT API requests|buffered API observations\" tests/server.test.js: 2 passed, 0 failed, exit 0.",
       "kind": "supporting_work",
       "observation_id": "focused-tests-pass",
+      "outcome": "pass"
+    },
+    {
+      "boundary": "broker repository test suite",
+      "evidence_ref": "npm test: 210 passed, 0 failed, 0 skipped, exit 0.",
+      "kind": "supporting_work",
+      "observation_id": "full-suite-pass",
       "outcome": "pass"
     }
   ],
