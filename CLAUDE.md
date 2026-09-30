@@ -30,11 +30,13 @@ Brian-only details that used to be in the README:
 
 ## Working in this repo
 
-- `.`, `server/`, and `tests/` in the **main checkout** are deliberately `chmod 555` (read-only) — a
-  mechanical guardrail against editing main directly. Work in a linked worktree
-  (`git worktree add -b <branch> worktrees/<name> main`), test, push, open a PR, merge, then sync main
-  by temporarily `chmod u+w`-ing those three paths, `git merge --ff-only origin/main`, and restoring
-  `chmod 555` on all three immediately after. Never leave the lock off.
+- `.`, `server/`, `tests/`, `extension/`, and `extension/lib/` in the **main checkout** are deliberately
+  `chmod 555` (read-only) — a mechanical guardrail against editing main directly. Work in a linked
+  worktree (`git worktree add -b <branch> worktrees/<name> main`), test, push, open a PR, merge, then
+  sync main by temporarily `chmod u+w`-ing those five paths, `git merge --ff-only origin/main`, and
+  restoring `chmod 555` on all five immediately after. Git needs write permission on each changed
+  file's parent directory to replace it, so include any additional read-only parent directories
+  touched by a future diff in both chmod commands. Never leave the lock off.
 - The live broker's cwd is the main checkout, so a merged fix only takes effect once you restart the
   process there — restarting doesn't need any client action. As of 2026-09-26 the live broker runs
   under the systemd user unit `chatgpt-bridge.service` (`~/.config/systemd/user/`, `Restart=always`):
