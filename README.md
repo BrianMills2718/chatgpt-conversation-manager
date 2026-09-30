@@ -109,12 +109,21 @@ Timing observations from connected pages are measurement-only today: a 429
 seen in ordinary page activity is logged but does not itself change the pacer
 or trigger account selection.
 
+Each ask has a random `ask_id` on its broker actions and final outcome. The
+offline report joins those records and counts which broker actions saw a
+rate-limit signal, while hiding raw IDs. It also surfaces missing or
+inconsistent joins. Older records without `ask_id` remain unjoined. Passive
+page-request observations still are not assigned to asks, so the report can
+show broker-visible throttles per ask but cannot infer a global optimal rate
+from page traffic alone.
+
 For a local summary of recorded traffic, run
 `node scripts/bridge-observation-report.js`. It reports API status and
 validated request gaps by account and endpoint, with an additional breakdown
 by whether each event came from an agent-managed tab, an ordinary tab, or an
-unknown tab. It counts broker actions separately and joins automatic route
-choices to ask outcomes by `route_id`. Account, tab, and conversation IDs are
+unknown tab. It counts broker actions separately, joins automatic route
+choices to ask outcomes by `route_id`, and joins broker actions to ask outcomes
+by `ask_id`. Account, tab, and conversation IDs are
 replaced with labels consistent within each report, and source paths are
 reduced to filenames. Passive API observations are not assigned to individual
 asks. They do not include HTTP method, so a `conversation` endpoint 429 cannot
