@@ -1,0 +1,65 @@
+{
+  "active_slice": {
+    "description": "Make extension Resource Timing observations clock-skew-safe and retain broker-attributable timing for throughput analysis.",
+    "next_action": "Implement page-relative age at socket send, reconstruct at broker receipt, and verify producer, consumer, and existing routing behavior with synthetic tests.",
+    "requires_external_action": false,
+    "requires_spend": false,
+    "slice_id": "repair-page-relative-request-timing",
+    "status": "ready",
+    "target_revision": "1102b012287b984d79e79c6ad3f242e6c26c8049"
+  },
+  "authority": {
+    "external_action_authorized": false,
+    "human_decision": null,
+    "human_decision_required": false,
+    "implementation_authorized": true,
+    "spend_cap_usd": 0,
+    "spend_used_usd": 0
+  },
+  "circuit_breakers": {
+    "context_integrity_valid": true,
+    "max_same_boundary_failures": 3,
+    "runtime_integrity_valid": true
+  },
+  "completion": {
+    "evidence_revision": null,
+    "receipt_ref": null,
+    "remaining_ready_work": 1,
+    "requested": false,
+    "verifier_outcome": null
+  },
+  "cursor_id": "request-timing-provenance-20260930",
+  "cursor_revision": 1,
+  "failure_state": {
+    "boundary": null,
+    "last_failure_ref": null,
+    "same_boundary_failures": 0
+  },
+  "goal_ref": "goal:reduce-chatgpt-throttling-while-measuring-useful-per-account-throughput",
+  "lifecycle_state": "active",
+  "observations": [
+    {
+      "boundary": "extension Resource Timing conversion",
+      "evidence_ref": "Inline Node replay at base 34126e375: synthetic page timeOrigin 2020-01-01 yielded request_started_at 2020-01-01 while simulated broker receipt was 2026-09-30.",
+      "kind": "verification_failure",
+      "observation_id": "clock-skew-repro",
+      "outcome": "fail"
+    },
+    {
+      "boundary": "extension-to-broker api_request_observed message",
+      "evidence_ref": "Source inspection: extension/content.js derives absolute timestamps and server/index.js:352-368 trusts and logs them.",
+      "kind": "supporting_work",
+      "observation_id": "event-contract-inspection",
+      "outcome": "pass"
+    }
+  ],
+  "plan_revision": "GOAL.md@34126e375;PATH-chatgpt-timing-provenance-20260930@1102b012287b984d79e79c6ad3f242e6c26c8049",
+  "ready_alternatives": [],
+  "record_type": "plan_execution_cursor",
+  "schema_version": "1.0",
+  "target": {
+    "branch": "fix/request-timing-provenance",
+    "repository": "/home/brian/code/chatgpt-conversation-manager-v0.2",
+    "worktree": "/home/brian/code/chatgpt-conversation-manager-v0.2/worktrees/fix/request-timing-provenance"
+  }
+}
