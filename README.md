@@ -1,6 +1,19 @@
 # ChatGPT Conversation Manager
 
-Lets Claude Code or Codex talk to ChatGPT in your own logged-in browser (`ask_chatgpt`, `read_chatgpt_chat`, …), and archives your ChatGPT conversations locally. Version: see `package.json` / `CHANGELOG.md`. To set it up, go to **Install**.
+Lets Claude Code or Codex send prompts to ChatGPT in your own logged-in browser, read the replies, and save your conversations locally. Each person uses their own account and local installation.
+
+**Start here:** [Set up on your computer](docs/setup.md). Prefer your coding agent to do it? [Give it this setup handoff](docs/agent-setup.md).
+
+```sh
+git clone https://github.com/BrianMills2718/chatgpt-conversation-manager.git
+cd chatgpt-conversation-manager
+npm ci
+npm run setup
+```
+
+Then follow the linked guide to connect your browser and agent. `npm run doctor` checks setup without sending prompts. Requires Node.js 22+, Chrome/Edge, and your ChatGPT account. Browser installation and sign-in are manual; Linux setup is verified, native Windows/macOS onboarding remains unverified. Real two-account dispatch is verified; real 429-driven switching and an optimal throughput rate are not claimed.
+
+The sections below cover advanced usage and technical background. Version: see `package.json` / `CHANGELOG.md`.
 
 A narrow browser-extension + MCP bridge for managing and preserving ChatGPT conversations without stealing browser session cookies or calling undocumented private APIs from a *server*.
 
@@ -213,6 +226,8 @@ Not yet checked: whether conversations you archived inside ChatGPT appear in
 the list endpoint this uses; if they do not, they are not backed up.
 
 ## Install
+
+For the shortest current path, use [the setup guide](docs/setup.md) or [coding-agent handoff](docs/agent-setup.md). The manual instructions below remain available for custom setups.
 
 You need Node.js 22 or newer (the test suite does not exit on Node 20), Google Chrome (or Microsoft Edge), and a ChatGPT account. About ten minutes.
 
