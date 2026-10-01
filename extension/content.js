@@ -1398,9 +1398,11 @@ async function handleCommand(msg) {
   if (msg.action === "inventory_chats") {
     // Read-only account inventory: the two routes stay separate because the
     // ordinary list omits chats filed inside Projects.
-    const perProject = Math.min(Math.max(Number(msg.per_project) || 100, 1), 100);
-    const ordinary = await listAllConversations();
+    // The sidebar rejects conversations_per_gizmo=100 (HTTP 422); 20 is accepted.
+    // Fetch it first so a rejection fails before the long paged list starts.
+    const perProject = Math.min(Math.max(Number(msg.per_project) || 20, 1), 20);
     const projects = await listProjectChats({ perProject });
+    const ordinary = await listAllConversations();
     return {
       ordinary_list: ordinary.map((c) => ({ id: c.id, title: c.title || "", create_time: c.create_time ?? null, update_time: c.update_time ?? null })),
       projects: projects.map((p) => ({ ...p, may_be_truncated: p.chats.length >= perProject })),
