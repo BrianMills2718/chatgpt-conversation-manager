@@ -525,6 +525,28 @@ export async function listProjectChats({ perProject = 20, fetchImpl = fetch, acc
   return parseProjectSidebar(await res.json());
 }
 
+// Every chat in one Project, paged by cursor. The sidebar only returns the
+// newest 20 per project, so a project at that cap needs this to be complete.
+export async function listProjectConversations(projectId, { fetchImpl = fetch, accessToken, pageDelayMs = 300, sleepImpl = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  if (accessToken === undefined) accessToken = await getAccessToken({ fetchImpl });
+  const headers = { Accept: "application/json" };
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  const seen = new Map();
+  let cursor = "0";
+  for (let guard = 0; guard < 200; guard++) {
+    const res = await fetchImpl(`/backend-api/gizmos/${encodeURIComponent(projectId)}/conversations?cursor=${encodeURIComponent(cursor)}`, { method: "GET", credentials: "same-origin", headers });
+    if (!res.ok) throw Object.assign(new Error(`project conversations fetch failed: HTTP ${res.status}`), { status: res.status });
+    const data = await res.json();
+    if (!Array.isArray(data?.items)) throw new Error("project conversations response has no items array (schema may have changed)");
+    let fresh = 0;
+    for (const c of data.items) if (c?.id && !seen.has(c.id)) { seen.set(c.id, { id: c.id, title: c.title || "", update_time: c.update_time ?? null }); fresh++; }
+    if (!data.cursor || fresh === 0) return [...seen.values()];
+    cursor = String(data.cursor);
+    await sleepImpl(pageDelayMs);
+  }
+  throw new Error(`project ${projectId} conversations did not end after 200 pages`);
+}
+
 // How long ask_chatgpt's reply check waits before its next conversation-tree
 // read. Normally 10s. A throttled read (HTTP 429) doubles the gap up to 60s,
 // or waits as long as the server's own Retry-After says, instead of reading

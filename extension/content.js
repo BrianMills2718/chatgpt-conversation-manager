@@ -11,7 +11,7 @@ const { sendEvidence, sendEvidenceFromCounts, samePrompt, verbatimMismatch } = a
 const { waitFor: waitForLib } = await import(chrome.runtime.getURL("lib/wait-for.js"));
 const { pingBackground } = await import(chrome.runtime.getURL("lib/background-ping.js"));
 const { apiRequestObservationFromResource, apiRequestObservationForSend } = await import(chrome.runtime.getURL("lib/api-request-observation.js"));
-const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, parseRemoteTime, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats, nextReplyCheckGapMs, REPLY_CHECK_MIN_GAP_MS, fatalArchiveErrorDetails } = await import(chrome.runtime.getURL("lib/api-capture.js"));
+const { captureViaApi, captureWithRecovery, AdaptivePacer, listAllConversations, listConversationsPage, selectChangedConversations, parseRemoteTime, getAccessToken, getConversationProjectId, fetchConversationTree, linearizeMapping, replyFromTree, resolveFileDownloadUrl, getSessionIdentity, imagesInMessages, listProjectChats, listProjectConversations, nextReplyCheckGapMs, REPLY_CHECK_MIN_GAP_MS, fatalArchiveErrorDetails } = await import(chrome.runtime.getURL("lib/api-capture.js"));
 
 const DEFAULTS = {
   brokerUrl: "ws://localhost:8787/extension",
@@ -1402,10 +1402,14 @@ async function handleCommand(msg) {
     // Fetch it first so a rejection fails before the long paged list starts.
     const perProject = Math.min(Math.max(Number(msg.per_project) || 20, 1), 20);
     const projects = await listProjectChats({ perProject });
+    // A project at the sidebar cap is paged in full so its list is complete.
+    for (const p of projects) if (p.chats.length >= perProject) {
+      p.chats = (await listProjectConversations(p.project_id)).map((c) => ({ ...c, project_id: p.project_id, project_name: p.project_name }));
+    }
     const ordinary = await listAllConversations();
     return {
       ordinary_list: ordinary.map((c) => ({ id: c.id, title: c.title || "", create_time: c.create_time ?? null, update_time: c.update_time ?? null })),
-      projects: projects.map((p) => ({ ...p, may_be_truncated: p.chats.length >= perProject })),
+      projects: projects.map((p) => ({ ...p, may_be_truncated: false })),
       per_project_limit: perProject,
     };
   }
