@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased, extension 0.9.18
+
+### Read-only account inventory
+
+- `GET /api/inventory-chats[?account=email]` (bearer token) lists every chat id the account shows: the ordinary paged list and the Project sidebar, kept as separate lists because the ordinary list omits chats filed inside Projects. It writes no archive files and sends no prompts. Project chats are capped at 100 per project by the sidebar request; a project at the cap is flagged `may_be_truncated`.
+
 ## v0.9.19 (2026-09-29), extension 0.9.15
 
 ### Same-account requests share a reserved pacing lane
