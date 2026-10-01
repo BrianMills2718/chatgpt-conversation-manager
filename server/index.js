@@ -112,7 +112,10 @@ function migrateLegacyPacerState(raw) {
 }
 function saveAgentPacerState() {
   fs.mkdirSync(path.dirname(AGENT_PACER_STATE_PATH), { recursive: true });
-  const out = {};
+  // Pacer entries are initialized lazily after restart. Keep saved state for
+  // accounts that have not made a request in this process; otherwise the first
+  // save from another account erases their learned cooldown.
+  const out = { ..._savedPacerStateByKey };
   for (const [key, entry] of accountPacers) {
     out[key] = { spacingMs: entry.pacer.spacingMs, rateLimited: entry.pacer.rateLimited, successes: entry.pacer.successes };
   }
