@@ -514,3 +514,14 @@ test('a refused conversation read reports its rate-limit headers and body', asyn
   assert.equal(d.headers['content-type'], undefined);
   assert.match(d.body, /Too many requests/);
 });
+
+test('listProjectConversations follows the cursor to the end and dedupes', async () => {
+  const { listProjectConversations } = await import('../extension/lib/api-capture.js');
+  const pages = { '0': { items: [{ id: 'a' }, { id: 'b' }], cursor: '2' }, '2': { items: [{ id: 'b' }, { id: 'c' }], cursor: null } };
+  const urls = [];
+  const fetchImpl = async (url) => { urls.push(url); const c = new URL(url, 'https://x').searchParams.get('cursor'); return { ok: true, json: async () => pages[c] }; };
+  const out = await listProjectConversations('g-1', { fetchImpl, accessToken: 't', sleepImpl: async () => {} });
+  assert.deepEqual(out.map((c) => c.id), ['a', 'b', 'c']);
+  assert.equal(urls.length, 2);
+  await assert.rejects(listProjectConversations('g-1', { fetchImpl: async () => ({ ok: false, status: 429 }), accessToken: 't', sleepImpl: async () => {} }), /HTTP 429/);
+});
