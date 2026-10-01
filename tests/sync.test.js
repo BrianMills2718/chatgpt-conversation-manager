@@ -5,15 +5,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { SyncScheduler } from '../server/sync.js';
 
-function setup({ connected = 1, completion, dispatchError = null, openCommand = null, oldExtension = false } = {}) {
+function setup({ connected = 1, completion, dispatchError = null, openCommand = null, oldExtension = false, syncAccount = null } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sync-test-'));
   const archive = { readCatalog: () => ({ threads: { a: { last_captured_at: '2026-09-14T20:00:00.000Z' }, b: {} } }) };
   const sent = [];
+  const sentAccounts = [];
   let conn = connected;
   const sched = new SyncScheduler({
     archive,
-    dispatch: async (cmd) => {
+    dispatch: async (cmd, account) => {
       sent.push(cmd);
+      sentAccounts.push(account || null);
       if (cmd.action === 'get_capabilities') { if (oldExtension) throw new Error('Unknown action: get_capabilities'); return { ok: true, incremental_archive: true }; }
       if (dispatchError) throw dispatchError;
       return { ok: true, started: true };
@@ -22,10 +24,11 @@ function setup({ connected = 1, completion, dispatchError = null, openCommand = 
     waitForBulkComplete: () => completion,
     statusPath: path.join(dir, 'metadata', 'sync-status.json'),
     openCommand,
+    syncAccount,
     connectWaitMs: 50,
     log: { log() {}, error() {} },
   });
-  return { sched, sent, statusPath: path.join(dir, 'metadata', 'sync-status.json'), setConn: (n) => { conn = n; } };
+  return { sched, sent, sentAccounts, statusPath: path.join(dir, 'metadata', 'sync-status.json'), setConn: (n) => { conn = n; } };
 }
 
 test('a successful run sends known capture times and records the summary', async () => {
@@ -34,8 +37,21 @@ test('a successful run sends known capture times and records the summary', async
   assert.deepEqual(sent, [{ action: 'get_capabilities' }, { action: 'archive_all_chats', known: { a: '2026-09-14T20:00:00.000Z' } }]);
   assert.equal(status.in_progress, false);
   assert.equal(status.last_error, null);
-  assert.deepEqual(status.last_result, { mode: 'incremental', listed: 800, fetched: 3, skipped: 797, archived: 3, failed: 0, pacing: null });
+  assert.deepEqual(status.last_result, { account: null, mode: 'incremental', listed: 800, fetched: 3, skipped: 797, archived: 3, failed: 0, pacing: null });
   assert.ok(status.last_success_at);
+});
+
+test('a configured sync account is used for capability checks and bulk archive, and appears in status', async () => {
+  const account = 'brian@example.com';
+  const { sched, sent, sentAccounts } = setup({
+    syncAccount: account,
+    completion: Promise.resolve({ mode: 'incremental', listed: 2, total: 1, skipped: 1, archived: 1, failed: [], fatal_error: null }),
+  });
+  const status = await sched.runOnce();
+  assert.deepEqual(sent.map((command) => command.action), ['get_capabilities', 'archive_all_chats']);
+  assert.deepEqual(sentAccounts, [account, account]);
+  assert.equal(status.account, account);
+  assert.equal(status.last_result.account, account);
 });
 
 test('an extension fatal error is recorded as a failure, not a success', async () => {

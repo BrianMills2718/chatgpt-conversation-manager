@@ -39,6 +39,9 @@ const logErr = (msg) => logLine(console.error, msg);
 // command that was still legitimately in progress.
 const COMMAND_TIMEOUT_MS = Number(process.env.COMMAND_TIMEOUT_MS || 40000);
 const ARCHIVE_DIR = process.env.ARCHIVE_DIR || path.resolve('data');
+// A bulk archive has one durable destination, so it must stay bound to the
+// intended ChatGPT identity when multiple accounts are connected.
+const SYNC_ACCOUNT = process.env.SYNC_ACCOUNT?.trim() || null;
 const archive = new ArchiveStore(ARCHIVE_DIR);
 const BRIDGE_OBSERVATIONS_PATH = path.join(ARCHIVE_DIR, 'observations', 'bridge-events.jsonl');
 
@@ -511,6 +514,13 @@ function dispatchToExtensionRaw(command, timeoutMs = COMMAND_TIMEOUT_MS, { singl
   // tab did nothing (not_dispatched): askChatgpt uses that to report sent=no.
   const refuse = (message) => Object.assign(new Error(message), { not_dispatched: true });
   if (!sockets.length) throw refuse("No browser extension is connected to the broker.");
+  if (command.action === 'archive_all_chats' && !account) {
+    const identities = sockets.map((ws) => accountKey(ws.account));
+    const knownAccounts = new Set(identities.filter(Boolean).map((value) => value.toLowerCase()));
+    if (identities.some((value) => !value) || knownAccounts.size > 1) {
+      throw refuse('Bulk archive requires an explicit account when connected tabs have ambiguous identities. Set SYNC_ACCOUNT to the intended account and restart the broker.');
+    }
+  }
   if (account) {
     sockets = sockets.filter((ws) => accountMatches(ws.account, account));
     if (!sockets.length) throw refuse(noAccountTabMessage(account));
@@ -1733,7 +1743,7 @@ app.post('/api/status', async (req, res) => {
 app.post('/api/archive-all', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   const incremental = req.body?.mode === 'incremental';
-  try { const result = await dispatchToExtension({ action: 'archive_all_chats', known: incremental ? sync.knownThreads() : null }, COMMAND_TIMEOUT_MS, { single: true }); res.json(result); }
+  try { const result = await dispatchToExtension({ action: 'archive_all_chats', known: incremental ? sync.knownThreads() : null }, COMMAND_TIMEOUT_MS, { single: true, account: SYNC_ACCOUNT }); res.json(result); }
   catch (err) { res.status(503).json({ error: err.message }); }
 });
 app.get('/api/archive-all/status', (req, res) => {
@@ -1972,8 +1982,9 @@ function waitForBulkComplete(timeoutMs) {
 
 const sync = new SyncScheduler({
   archive,
-  dispatch: (command) => dispatchToExtension(command, COMMAND_TIMEOUT_MS, { single: true }),
-  connectionCount: () => [...extensionSockets].filter((ws) => ws.readyState === ws.OPEN).length,
+  syncAccount: SYNC_ACCOUNT,
+  dispatch: (command, account) => dispatchToExtension(command, COMMAND_TIMEOUT_MS, { single: true, account }),
+  connectionCount: (account) => [...extensionSockets].filter((ws) => ws.readyState === ws.OPEN && (!account || accountMatches(ws.account, account))).length,
   waitForBulkComplete,
   statusPath: path.join(ARCHIVE_DIR, 'metadata', 'sync-status.json'),
   openCommand: process.env.SYNC_OPEN_CHATGPT_CMD || null,

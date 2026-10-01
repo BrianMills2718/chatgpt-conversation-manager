@@ -193,6 +193,10 @@ tab is connected it runs `SYNC_OPEN_CHATGPT_CMD` first and waits up to 90s.
   shorter retry behavior for issues such as a disconnected or outdated tab.
 - Set `SYNC_INTERVAL_MINUTES=0` to keep the broker available without scheduled
   archive sync; manual sync remains available when explicitly requested.
+- Bulk archive is account-scoped. Set `SYNC_ACCOUNT` in `.env` to the intended
+  ChatGPT email or user id when multiple accounts or unidentified tabs are
+  connected. Without an unambiguous account, the broker refuses to dispatch the
+  archive command. The selected account is recorded in sync status.
 - Run one now: `POST /api/sync`. Incremental manual run: `POST /api/archive-all`
   with body `{"mode":"incremental"}`.
 - Start at Windows logon (WSL): `scripts/install-windows-startup.sh` (only if nothing else starts the broker; see "Keeping the broker running") writes a
