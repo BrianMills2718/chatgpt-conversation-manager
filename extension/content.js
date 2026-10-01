@@ -1395,6 +1395,18 @@ async function handleCommand(msg) {
     const page = await listConversationsPage({ offset: 0, limit });
     return { chats: page.items.map((c) => ({ id: c.id, title: c.title || "", update_time: c.update_time ?? null })), total: page.total ?? null };
   }
+  if (msg.action === "inventory_chats") {
+    // Read-only account inventory: the two routes stay separate because the
+    // ordinary list omits chats filed inside Projects.
+    const perProject = Math.min(Math.max(Number(msg.per_project) || 100, 1), 100);
+    const ordinary = await listAllConversations();
+    const projects = await listProjectChats({ perProject });
+    return {
+      ordinary_list: ordinary.map((c) => ({ id: c.id, title: c.title || "", create_time: c.create_time ?? null, update_time: c.update_time ?? null })),
+      projects: projects.map((p) => ({ ...p, may_be_truncated: p.chats.length >= perProject })),
+      per_project_limit: perProject,
+    };
+  }
   if (msg.action === "get_tab") return { tab: TAB_TOKEN, page_id: PAGE_ID, agent: AGENT_TAB, busy: bulkArchiving, thread_id: currentThreadId(), account: tabIdentity, lifecycle, page_age_s: Math.round((Date.now() - PAGE_STARTED_AT) / 1000), visibility: document.visibilityState };
   if (msg.action === "list_project_chats") {
     const perProject = Math.min(Math.max(Number(msg.per_project) || 20, 1), 100);

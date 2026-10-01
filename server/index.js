@@ -1746,6 +1746,14 @@ app.post('/api/archive-all', async (req, res) => {
   try { const result = await dispatchToExtension({ action: 'archive_all_chats', known: incremental ? sync.knownThreads() : null }, COMMAND_TIMEOUT_MS, { single: true, account: SYNC_ACCOUNT }); res.json(result); }
   catch (err) { res.status(503).json({ error: err.message }); }
 });
+// Read-only inventory of the account's chat ids (no archive writes, no prompts).
+app.get('/api/inventory-chats', async (req, res) => {
+  if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
+  try {
+    const r = await dispatchToExtension({ action: 'inventory_chats' }, 10 * 60 * 1000, { single: true, account: req.query.account || SYNC_ACCOUNT || null });
+    res.json({ ordinary_count: r.ordinary_list.length, project_chat_count: r.projects.reduce((n, p) => n + p.chats.length, 0), ...r });
+  } catch (err) { res.status(503).json({ error: err.message }); }
+});
 app.get('/api/archive-all/status', (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   res.json(bulkArchiveState);

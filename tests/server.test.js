@@ -2016,3 +2016,22 @@ test('a tab whose extension background worker did not answer is visible in /heal
     alive.close();
   }
 });
+
+test('inventory-chats returns the ordinary list and project chats separately without archiving', async () => {
+  const tab = fakeTab('inventory-tab-0001', { onCommand: async (msg, state, reply) => {
+    if (msg.action === 'inventory_chats') return reply({ ok: true, per_project_limit: 100,
+      ordinary_list: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }],
+      projects: [{ project_id: 'g1', project_name: 'P', may_be_truncated: false, chats: [{ id: 'c', title: 'C', project_id: 'g1' }] }] });
+    reply({ ok: false, error: `unexpected ${msg.action}` });
+  } });
+  await tab.open();
+  try {
+    assert.equal((await fetch(`${baseUrl}/api/inventory-chats`)).status, 401);
+    const body = await (await authed('/api/inventory-chats')).json();
+    assert.equal(body.ordinary_count, 2);
+    assert.equal(body.project_chat_count, 1);
+    assert.deepEqual(body.ordinary_list.map((c) => c.id), ['a', 'b']);
+    assert.deepEqual(body.projects[0].chats.map((c) => c.id), ['c']);
+    assert.deepEqual(tab.received, ['inventory_chats']);
+  } finally { tab.ws.close(); }
+});
