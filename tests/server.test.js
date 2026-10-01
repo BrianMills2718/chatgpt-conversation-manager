@@ -1387,6 +1387,55 @@ test('observation report joins throttled broker actions only to unique ask outco
   ]);
 });
 
+test('observation report separates historical outcome workload from strict ask attribution', () => {
+  const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-observed-outcome-throughput-'));
+  const observationDir = path.join(archiveDir, 'observations');
+  fs.mkdirSync(observationDir, { recursive: true });
+  const outcomes = [
+    { event_id: 'event-legacy-success', outcome: 'success', account: 'account-a', started_at: '2026-09-30T10:10:00.000Z' },
+    { event_id: 'event-legacy-failure', outcome: 'failed', account: 'account-a', started_at: '2026-09-30T10:30:00.000Z' },
+    { event_id: 'event-tagged-success', outcome: 'success', account: 'account-a', ask_id: 'ask-tagged', started_at: '2026-09-30T11:00:00.000Z' },
+    { event_id: 'event-duplicate-ask-1', outcome: 'failed', account: 'account-a', ask_id: 'ask-duplicate', started_at: '2026-09-30T11:10:00.000Z' },
+    { event_id: 'event-duplicate-ask-2', outcome: 'failed', account: 'account-a', ask_id: 'ask-duplicate', started_at: '2026-09-30T11:11:00.000Z' },
+    { event_id: 'event-no-account', outcome: 'success', account: null, started_at: '2026-09-30T11:30:00.000Z' },
+    { event_id: 'event-invalid-time', outcome: 'success', account: 'account-a', started_at: 'not-a-time' },
+    { event_id: 'event-duplicate-id', outcome: 'success', account: 'account-b', started_at: '2026-09-30T12:00:00.000Z' },
+    { event_id: 'event-duplicate-id', outcome: 'failed', account: 'account-b', started_at: '2026-09-30T12:01:00.000Z' },
+    { outcome: 'success', account: 'account-b', started_at: '2026-09-30T12:05:00.000Z' },
+  ];
+  fs.writeFileSync(path.join(observationDir, 'bridge-events.jsonl'), `${outcomes.map(JSON.stringify).join('\n')}\n`);
+
+  const output = execFileSync(process.execPath, ['scripts/bridge-observation-report.js'], {
+    cwd: path.resolve('.'),
+    env: { ...process.env, ARCHIVE_DIR: archiveDir },
+    encoding: 'utf8',
+  });
+  const report = JSON.parse(output);
+  const observed = report.observed_outcome_throughput;
+  for (const id of ['event-legacy-success', 'event-duplicate-id', 'ask-tagged', 'ask-duplicate']) {
+    assert.ok(!output.includes(id), `raw event or ask id ${id} must not appear in the report`);
+  }
+  assert.equal(observed.bridge_outcome_rows, 10);
+  assert.equal(observed.outcomes_without_event_id_excluded, 1);
+  assert.equal(observed.duplicate_event_id_groups, 1);
+  assert.equal(observed.duplicate_event_id_rows_excluded, 2);
+  assert.equal(observed.unique_event_id_outcomes, 7);
+  assert.equal(observed.duplicate_ask_ids_excluded, 1);
+  assert.equal(observed.duplicate_ask_id_outcome_rows_excluded, 2);
+  assert.equal(observed.outcome_rows_after_duplicate_exclusion, 5);
+  assert.equal(observed.outcome_rows_without_account_excluded, 1);
+  assert.equal(observed.outcome_rows_without_valid_start_time_excluded, 1);
+  assert.equal(observed.outcome_rows_in_account_rate_summaries, 3);
+  assert.deepEqual(observed.by_account, [
+    { account: 'account_1', outcome_rows: 3, successes: 2, failures: 1, other_outcomes: 0, rate_limited_outcomes: 0, active_utc_start_hours: 2, successful_outcomes_per_active_utc_start_hour: 1 },
+  ]);
+  assert.deepEqual(observed.by_account_linkage, [
+    { account: 'account_1', linkage: 'tagged', outcome_rows: 1, successes: 1, failures: 0, other_outcomes: 0, rate_limited_outcomes: 0, active_utc_start_hours: 1, successful_outcomes_per_active_utc_start_hour: 1 },
+    { account: 'account_1', linkage: 'untagged', outcome_rows: 2, successes: 1, failures: 1, other_outcomes: 0, rate_limited_outcomes: 0, active_utc_start_hours: 1, successful_outcomes_per_active_utc_start_hour: 1 },
+  ]);
+  assert.ok(report.limitations.some((item) => item.includes('untagged legacy rows') && item.includes('descriptive')));
+});
+
 test('observation report rejects unstable legacy tab timing but retains its status counts', () => {
   const archiveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccm-legacy-observation-report-'));
   const observationDir = path.join(archiveDir, 'observations');
