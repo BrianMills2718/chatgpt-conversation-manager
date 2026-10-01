@@ -248,6 +248,25 @@ test('connections report the account each tab is signed into', async () => {
   assert.equal(byTab['bbbbbbbb'].agent, false);
 });
 
+test('bulk archive refuses ambiguous accounts before dispatch and targets only an explicit account', async () => {
+  const accountA = 'archive-a@example.com';
+  const accountB = 'archive-b@example.com';
+  const a = await tab('archive-a-tab', accountA, { handlers: { archive_all_chats: () => ({ started: true }) } });
+  const b = await tab('archive-b-tab', accountB, { handlers: { archive_all_chats: () => ({ started: true }) } });
+
+  await assert.rejects(
+    () => mod.dispatchToExtension({ action: 'archive_all_chats', known: {} }, 1000, { single: true }),
+    /Bulk archive requires an explicit account/,
+  );
+  assert.equal(a.received.length, 0);
+  assert.equal(b.received.length, 0);
+
+  await mod.dispatchToExtension({ action: 'archive_all_chats', known: {} }, 1000, { single: true, account: accountA });
+  assert.equal(a.received.length, 1);
+  assert.equal(a.received[0].action, 'archive_all_chats');
+  assert.equal(b.received.length, 0);
+});
+
 test('read_chatgpt_chat finds the conversation on whichever account owns it and saves its images', async () => {
   const owned = { thread_id: 'conv-owned-by-c', title: 'Tomodachi mockups',
     messages: [{ message_id: 'm1', role: 'user', text: 'draw every tab' }, { message_id: 'm2', role: 'tool', text: '' }],

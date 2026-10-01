@@ -9,9 +9,10 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 // conversations, wait for completion, and record the outcome in
 // sync-status.json. Failures are recorded and logged, never swallowed.
 export class SyncScheduler {
-  constructor({ archive, dispatch, connectionCount, waitForBulkComplete, statusPath, openCommand = null, connectWaitMs = 90000, runTimeoutMs = 12 * 60 * 60 * 1000, log = console }) {
-    Object.assign(this, { archive, dispatch, connectionCount, waitForBulkComplete, statusPath, openCommand, connectWaitMs, runTimeoutMs, log });
+  constructor({ archive, dispatch, connectionCount, waitForBulkComplete, statusPath, openCommand = null, syncAccount = null, connectWaitMs = 90000, runTimeoutMs = 12 * 60 * 60 * 1000, log = console }) {
+    Object.assign(this, { archive, dispatch, connectionCount, waitForBulkComplete, statusPath, openCommand, syncAccount, connectWaitMs, runTimeoutMs, log });
     this.running = null;
+    this.runningAccount = null;
     this.timer = null;
   }
 
@@ -37,9 +38,12 @@ export class SyncScheduler {
     return known;
   }
 
-  async ensureConnected() {
-    if (this.connectionCount() > 0) return;
-    if (!this.openCommand) throw new Error('No chatgpt.com tab is connected and SYNC_OPEN_CHATGPT_CMD is not set.');
+  async ensureConnected(account = this.syncAccount) {
+    if (this.connectionCount(account) > 0) return;
+    if (!this.openCommand) {
+      const target = account ? ` for ${account}` : '';
+      throw new Error(`No chatgpt.com tab is connected${target} and SYNC_OPEN_CHATGPT_CMD is not set.`);
+    }
     this.log.log(`[sync] no tab connected; running SYNC_OPEN_CHATGPT_CMD`);
     await new Promise((resolve) => execFile('/bin/sh', ['-c', this.openCommand], (err) => {
       if (err) this.log.error(`[sync] open command failed: ${err.message}`);
@@ -47,27 +51,34 @@ export class SyncScheduler {
     }));
     const deadline = Date.now() + this.connectWaitMs;
     while (Date.now() < deadline) {
-      if (this.connectionCount() > 0) return;
+      if (this.connectionCount(account) > 0) return;
       await new Promise((r) => setTimeout(r, 2000));
     }
     throw new Error(`No chatgpt.com tab connected within ${Math.round(this.connectWaitMs / 1000)}s of opening ChatGPT (is Chrome signed in and the extension enabled?).`);
   }
 
-  runOnce() {
-    if (this.running) return this.running;
-    this.running = this.#run().finally(() => { this.running = null; });
+  runOnce({ account = this.syncAccount } = {}) {
+    const normalizedAccount = account ? String(account).trim().toLowerCase() : null;
+    if (this.running) {
+      if (this.runningAccount !== normalizedAccount) {
+        return Promise.reject(new Error('A bulk archive is already running for a different account.'));
+      }
+      return this.running;
+    }
+    this.runningAccount = normalizedAccount;
+    this.running = this.#run(account).finally(() => { this.running = null; this.runningAccount = null; });
     return this.running;
   }
 
-  async #run() {
+  async #run(account = this.syncAccount) {
     const startedAt = new Date().toISOString();
-    this.writeStatus({ last_attempt_at: startedAt, in_progress: true });
+    this.writeStatus({ last_attempt_at: startedAt, in_progress: true, account: account || null });
     try {
-      await this.ensureConnected();
+      await this.ensureConnected(account);
       // An extension still running pre-0.4 code ignores `known` and would
       // re-fetch every conversation at full speed, so refuse to start with it.
       let caps = null;
-      try { caps = await this.dispatch({ action: 'get_capabilities' }); } catch (err) { caps = { error: err.message }; }
+      try { caps = await this.dispatch({ action: 'get_capabilities' }, account); } catch (err) { caps = { error: err.message }; }
       if (!caps?.incremental_archive) {
         throw new Error(`Chrome extension is running old code (${caps?.error || 'no incremental support'}); reload it at chrome://extensions and refresh the ChatGPT tab.`);
       }
@@ -77,7 +88,7 @@ export class SyncScheduler {
       // unhandled rejection, which exits Node. That killed the broker on
       // 2026-09-14, two hours after a refused run, stopping the backlog.
       completion.catch(() => {});
-      await this.dispatch({ action: 'archive_all_chats', known: this.knownThreads() });
+      await this.dispatch({ action: 'archive_all_chats', known: this.knownThreads() }, account);
       const result = await completion;
       if (result.fatal_error) {
         const error = new Error(`extension reported: ${result.fatal_error}`);
@@ -85,7 +96,7 @@ export class SyncScheduler {
         if (Number.isFinite(result.fatal_error_retry_after_ms)) error.retryAfterMs = result.fatal_error_retry_after_ms;
         throw error;
       }
-      const summary = { mode: result.mode, listed: result.listed, fetched: result.total, skipped: result.skipped, archived: result.archived, failed: result.failed?.length || 0, pacing: result.pacing || null };
+      const summary = { account: account || null, mode: result.mode, listed: result.listed, fetched: result.total, skipped: result.skipped, archived: result.archived, failed: result.failed?.length || 0, pacing: result.pacing || null };
       if (summary.failed > 0) {
         this.log.error(`[sync] completed with ${summary.failed} failed conversations`);
       }
