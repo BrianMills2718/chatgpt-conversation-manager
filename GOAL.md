@@ -431,6 +431,16 @@ non_gating_utility_review:
   attributable to asks, and have no HTTP method or ask identity. No live prompt
   was sent for this readout. Real 429-triggered
   multi-account failover and useful per-account capacity remain unproven.
+- **Pacer-state retention correction, 2026-10-01.** A saved cooldown for an
+  account that had not yet been initialized after broker restart could be
+  erased when another account's broker action saved its state. The offline
+  restart reproduction failed before the fix because the saved account entry
+  disappeared; after the fix, that entry remains intact while the active
+  account records its own synthetic 429. No live ChatGPT call was used. The
+  on-disk state file observed during this audit contained the default entry
+  and one account-specific entry; no tracked or neighboring backup copy was
+  found. The fix prevents future saves from erasing untouched entries but does
+  not reconstruct any prior value absent from the current file.
 - **C9 structured sync backoff is merged in broker PR #82** at
   `5057cdfe7c67263e504af509cebba9acafa4afc8`. The extension completion
   preserves HTTP status and `Retry-After`; the scheduler stores them, waits at
