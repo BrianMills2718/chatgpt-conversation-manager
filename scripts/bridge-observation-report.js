@@ -390,6 +390,114 @@ function summarizeAskOutcomeThroughput(bridgeEvents) {
   };
 }
 
+function summarizeObservedOutcomeThroughput(bridgeEvents) {
+  const outcomesByAskId = new Map();
+  for (const outcome of bridgeEvents) {
+    if (typeof outcome.ask_id !== 'string' || !outcome.ask_id) continue;
+    if (!outcomesByAskId.has(outcome.ask_id)) outcomesByAskId.set(outcome.ask_id, []);
+    outcomesByAskId.get(outcome.ask_id).push(outcome);
+  }
+  const duplicateAskIds = new Set([...outcomesByAskId]
+    .filter(([, outcomes]) => outcomes.length !== 1)
+    .map(([askId]) => askId));
+  const duplicateAskOutcomeRowsExcluded = [...outcomesByAskId.values()]
+    .filter((outcomes) => outcomes.length !== 1)
+    .reduce((sum, outcomes) => sum + outcomes.length, 0);
+
+  const outcomesByEventId = new Map();
+  let outcomesWithoutEventId = 0;
+  for (const outcome of bridgeEvents) {
+    if (typeof outcome.event_id !== 'string' || !outcome.event_id) {
+      outcomesWithoutEventId++;
+      continue;
+    }
+    if (!outcomesByEventId.has(outcome.event_id)) outcomesByEventId.set(outcome.event_id, []);
+    outcomesByEventId.get(outcome.event_id).push(outcome);
+  }
+  const duplicateEventIdGroups = [...outcomesByEventId.values()].filter((outcomes) => outcomes.length !== 1);
+  const duplicateEventIdRowsExcluded = duplicateEventIdGroups
+    .reduce((sum, outcomes) => sum + outcomes.length, 0);
+  const uniqueEventOutcomes = [...outcomesByEventId.values()]
+    .filter((outcomes) => outcomes.length === 1)
+    .map(([outcome]) => outcome);
+  const eligibleOutcomes = uniqueEventOutcomes.filter((outcome) =>
+    !outcome.ask_id || !duplicateAskIds.has(outcome.ask_id));
+  const eligibleOutcomesWithoutAccount = eligibleOutcomes
+    .filter((outcome) => typeof outcome.account !== 'string' || !outcome.account).length;
+  const accountGroups = new Map();
+  const linkageGroups = new Map();
+  let eligibleOutcomesWithoutValidStartTime = 0;
+
+  for (const outcome of eligibleOutcomes) {
+    if (typeof outcome.account !== 'string' || !outcome.account) continue;
+    const startedAtMs = timestampMs(outcome.started_at);
+    if (startedAtMs === null) {
+      eligibleOutcomesWithoutValidStartTime++;
+      continue;
+    }
+    const linkage = outcome.ask_id ? 'tagged' : 'untagged';
+    const hour = new Date(startedAtMs).toISOString().slice(0, 13);
+    const addToGroup = (groups, key, fields) => {
+      const group = groups.get(key) || {
+        account: outcome.account,
+        outcome_rows: 0,
+        successes: 0,
+        failures: 0,
+        other_outcomes: 0,
+        rate_limited_outcomes: 0,
+        activeUtcStartHours: new Set(),
+        ...fields,
+      };
+      group.outcome_rows++;
+      if (outcome.outcome === 'success') group.successes++;
+      else if (outcome.outcome === 'failed') group.failures++;
+      else group.other_outcomes++;
+      if (outcome.outcome === 'failed' && outcome.failure_kind === 'rate_limited') group.rate_limited_outcomes++;
+      group.activeUtcStartHours.add(hour);
+      groups.set(key, group);
+    };
+    addToGroup(accountGroups, outcome.account, {});
+    addToGroup(linkageGroups, JSON.stringify([outcome.account, linkage]), { linkage });
+  }
+
+  const summarize = (group) => {
+    const activeUtcStartHours = group.activeUtcStartHours.size;
+    return {
+      account: group.account,
+      ...(group.linkage ? { linkage: group.linkage } : {}),
+      outcome_rows: group.outcome_rows,
+      successes: group.successes,
+      failures: group.failures,
+      other_outcomes: group.other_outcomes,
+      rate_limited_outcomes: group.rate_limited_outcomes,
+      active_utc_start_hours: activeUtcStartHours,
+      successful_outcomes_per_active_utc_start_hour: activeUtcStartHours
+        ? Math.round((group.successes / activeUtcStartHours) * 100) / 100
+        : null,
+    };
+  };
+
+  return {
+    bridge_outcome_rows: bridgeEvents.length,
+    outcomes_without_event_id_excluded: outcomesWithoutEventId,
+    duplicate_event_id_groups: duplicateEventIdGroups.length,
+    duplicate_event_id_rows_excluded: duplicateEventIdRowsExcluded,
+    unique_event_id_outcomes: uniqueEventOutcomes.length,
+    duplicate_ask_ids_excluded: duplicateAskIds.size,
+    duplicate_ask_id_outcome_rows_excluded: duplicateAskOutcomeRowsExcluded,
+    outcome_rows_after_duplicate_exclusion: eligibleOutcomes.length,
+    outcome_rows_without_account_excluded: eligibleOutcomesWithoutAccount,
+    outcome_rows_without_valid_start_time_excluded: eligibleOutcomesWithoutValidStartTime,
+    outcome_rows_in_account_rate_summaries: [...accountGroups.values()]
+      .reduce((sum, group) => sum + group.outcome_rows, 0),
+    by_account: [...accountGroups.values()].map(summarize)
+      .sort((a, b) => a.account.localeCompare(b.account)),
+    by_account_linkage: [...linkageGroups.values()].map(summarize)
+      .sort((a, b) => a.account.localeCompare(b.account) || a.linkage.localeCompare(b.linkage)),
+    interpretation: 'One unique event_id is one recorded bridge outcome. Untagged outcomes can describe realized workload but are not joined to broker actions. These rates do not estimate task quality, safe capacity, or a global maximum.',
+  };
+}
+
 function summarizeBrokerActions(events) {
   const groups = new Map();
   for (const event of events) {
@@ -564,6 +672,7 @@ const report = {
   by_thinking_level: countBy(events, 'thinking_level'),
   bridge_outcomes_by_account: groupOutcomeCounts(events),
   ask_outcome_throughput: summarizeAskOutcomeThroughput(events),
+  observed_outcome_throughput: summarizeObservedOutcomeThroughput(events),
   duration_ms: { median: oldPercentile(0.5), p95: oldPercentile(0.95) },
   rate_limited_events: events.filter((event) => event.failure_kind === 'rate_limited').map((event) => ({ started_at: event.started_at, ended_at: event.ended_at, thread_id: event.thread_id, conversation_mode: event.conversation_mode, history_message_count: event.history_message_count })),
   request_timing: {
@@ -582,6 +691,7 @@ const report = {
     'route_id joins an automatic account_route decision to its broker ask outcome; ask_id joins broker_action rows to ask outcomes. Neither assigns passive API requests to individual asks.',
     'ask_action_join includes only broker_action events with a unique ask_id outcome; legacy or ambiguous rows remain unjoined.',
     'ask_outcome_throughput reports successful tagged asks per distinct UTC start-hour containing an eligible ask outcome. It describes observed workload, not safe capacity or a global maximum.',
+    'observed_outcome_throughput includes unique event_id outcomes with valid account and start time, including untagged legacy rows; it remains descriptive and does not supply broker-action or route attribution.',
     'Request observations do not record HTTP method, so conversation endpoint 429s cannot be classified as prompt sends versus reads.',
     'Account, tab, and conversation identifiers are replaced with labels consistent only within this report; source file paths are reduced to basenames.',
     'These observations cover connected browser pages only and do not expose ChatGPT quota counters or activity outside those pages.',

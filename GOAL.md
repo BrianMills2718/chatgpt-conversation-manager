@@ -413,6 +413,24 @@ non_gating_utility_review:
   under a real 429, and this single observation does not estimate safe or
   optimal throughput. The bridge was already active; scheduled sync remained
   disabled with `SYNC_INTERVAL_MINUTES=0`.
+- **Descriptive historical outcome readout, 2026-10-01 00:41 UTC.** The offline
+  report now separately counts unique `event_id` outcomes, including old rows
+  without `ask_id`, while preserving strict `ask_id` joins for broker actions
+  and tagged ask throughput. Of 682 bridge outcomes, 254 have an attributed
+  account and valid start time: `account_1` has 15 successes and 2 failures in
+  3 active UTC start-hours (5.0 successes/hour); `account_2` has 209 successes
+  and 28 failures in 15 hours (13.93/hour). The account_2 untagged subset has
+  208 successes and 28 failures in 14 hours (14.86/hour); the sole tagged
+  outcome is one success in one hour. The other 428 outcomes lack account
+  attribution. These accounts handled different workloads, so these descriptive
+  rates are not a controlled capacity comparison or a measure of task quality,
+  safe capacity, or a global maximum. No bridge ask outcome is classified as
+  rate-limited. The same report contains 44,691 passive API observations,
+  including 2,752 HTTP 429s among 37,241 requests for account_2 and 8 among
+  7,450 requests for account_1; these are connected-page requests, not
+  attributable to asks, and have no HTTP method or ask identity. No live prompt
+  was sent for this readout. Real 429-triggered
+  multi-account failover and useful per-account capacity remain unproven.
 - **C9 structured sync backoff is merged in broker PR #82** at
   `5057cdfe7c67263e504af509cebba9acafa4afc8`. The extension completion
   preserves HTTP status and `Retry-After`; the scheduler stores them, waits at

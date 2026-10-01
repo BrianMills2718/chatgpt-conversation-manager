@@ -132,7 +132,11 @@ replaced with labels consistent within each report, and source paths are
 reduced to filenames. Passive API observations are not assigned to individual
 asks. They do not include HTTP method, so a `conversation` endpoint 429 cannot
 be classified as a prompt send or a read. The report does not claim an optimal
-rate.
+rate. It also reports the broader `observed_outcome_throughput` summary over
+unique bridge outcome IDs, split by account and whether an outcome has an
+`ask_id`. Untagged historical outcomes describe observed workload only; they
+cannot be joined to broker actions or automatic route decisions and do not
+measure task quality or safe capacity.
 
 - **Reading.** One connected tab per account is enough to *read* any of that account's chats, including ones started in the ChatGPT desktop app.
 - **Updates.** The extension reloads itself within about a minute when a newer version is on disk. Bump `version` in `extension/manifest.json` with every extension change.
