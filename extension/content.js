@@ -1406,8 +1406,12 @@ async function handleCommand(msg) {
     for (const p of projects) if (p.chats.length >= perProject) {
       p.chats = (await listProjectConversations(p.project_id)).map((c) => ({ ...c, project_id: p.project_id, project_name: p.project_name }));
     }
-    const ordinary = await listAllConversations();
+    // ChatGPT's own `total` from the list pages, so the caller can check the
+    // walked list against it instead of assuming the walk reached the end.
+    let reportedTotal = null;
+    const ordinary = await listAllConversations({ onPage: (_loaded, total) => { if (Number.isFinite(total)) reportedTotal = total; } });
     return {
+      ordinary_reported_total: reportedTotal,
       ordinary_list: ordinary.map((c) => ({ id: c.id, title: c.title || "", create_time: c.create_time ?? null, update_time: c.update_time ?? null })),
       projects: projects.map((p) => ({ ...p, may_be_truncated: false })),
       per_project_limit: perProject,

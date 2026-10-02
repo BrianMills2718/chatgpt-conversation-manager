@@ -1751,7 +1751,15 @@ app.get('/api/inventory-chats', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   try {
     const r = await dispatchToExtension({ action: 'inventory_chats' }, 10 * 60 * 1000, { single: true, account: req.query.account || SYNC_ACCOUNT || null });
-    res.json({ ordinary_count: r.ordinary_list.length, project_chat_count: r.projects.reduce((n, p) => n + p.chats.length, 0), ...r });
+    // null = ChatGPT reported no total (older extension or changed schema): unknown, not "complete".
+    const reported = Number.isFinite(r.ordinary_reported_total) ? r.ordinary_reported_total : null;
+    res.json({
+      ordinary_count: r.ordinary_list.length,
+      project_chat_count: r.projects.reduce((n, p) => n + p.chats.length, 0),
+      ...r,
+      ordinary_reported_total: reported,
+      ordinary_matches_reported_total: reported === null ? null : reported === r.ordinary_list.length,
+    });
   } catch (err) { res.status(503).json({ error: err.message }); }
 });
 app.get('/api/archive-all/status', (req, res) => {
