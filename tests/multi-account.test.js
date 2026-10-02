@@ -371,3 +371,18 @@ test('a tab reconnecting with the same token closes its superseded socket (4001)
   assert.equal(newCode.received.length, 1);
   assert.equal(mod.listConnections().filter((c) => c.tab === '99999999').length, 1);
 });
+
+test('a thread_snapshot is stamped with the account of the tab that pushed it', async () => {
+  const email = 'stamp-a@example.com';
+  const { ws } = await tab('stamp-tab', email);
+  const threadId = 'stamp-thread-1';
+  const acked = new Promise((resolve) => ws.on('message', (buf) => { const m = JSON.parse(buf.toString()); if (m.type === 'snapshot_ack') resolve(m); }));
+  ws.send(JSON.stringify({ type: 'thread_snapshot', snapshot: { thread_id: threadId, title: 'Stamped', capture_source: 'api',
+    messages: [{ message_id: 'm1', role: 'user', text: 'hi' }] } }));
+  await acked;
+  const dir = process.env.ARCHIVE_DIR;
+  const catalog = JSON.parse(fs.readFileSync(path.join(dir, 'metadata', 'catalog.json'), 'utf8'));
+  assert.equal(catalog.threads[threadId].account, email);
+  const rawJson = JSON.parse(fs.readFileSync(path.join(dir, 'raw', 'chats', `${threadId}.json`), 'utf8'));
+  assert.equal(rawJson.capture_account, email);
+});
