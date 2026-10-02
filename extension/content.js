@@ -23,6 +23,8 @@ const DEFAULTS = {
 
 let socket;
 let reconnectTimer;
+let connectWatchdog;
+const LOCAL_ACCESS_HINT = "Not connected to the bridge. If Chrome is asking to allow chatgpt.com to connect to devices on your local network, choose Allow. Otherwise check the broker is running.";
 let archiveTimer;
 let lastSnapshotFingerprint = null;
 let lastAutoDomKey = null;
@@ -776,11 +778,17 @@ const INCOGNITO = Boolean(chrome.extension && chrome.extension.inIncognitoContex
 const PAGE_ID = crypto.randomUUID();
 const PAGE_STARTED_AT = Date.now();
 
-function showAgentTabBadge() {
-  if (!AGENT_TAB || document.getElementById("ccm-agent-badge")) return;
+function showAgentTabBadge(text, warn) {
+  if (!AGENT_TAB) return;
+  const existing = document.getElementById("ccm-agent-badge");
+  if (existing) {
+    existing.textContent = text || "Agent tab — Claude Code / Codex type here";
+    existing.style.background = warn ? "#b91c1c" : "#b45309";
+    return;
+  }
   const badge = document.createElement("div");
   badge.id = "ccm-agent-badge";
-  badge.textContent = "Agent tab — Claude Code / Codex type here";
+  badge.textContent = text || "Agent tab — Claude Code / Codex type here";
   badge.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:2147483647;padding:4px 8px;border-radius:6px;background:#b45309;color:#fff;font:12px system-ui;pointer-events:none;opacity:.9";
   (document.body || document.documentElement).appendChild(badge);
 }
@@ -1639,7 +1647,19 @@ async function connect() {
   try { url.searchParams.set("v", chrome.runtime.getManifest().version); } catch {}
   brokerIdentityReported = false;
   socket = new WebSocket(url.toString());
+  // Chrome holds a website's first request to a program on this computer until
+  // the person allows it ("Local Network Access" prompt on chatgpt.com). Until
+  // then the socket neither opens nor errors, so say so instead of staying silent.
+  clearTimeout(connectWatchdog);
+  const pending = socket;
+  connectWatchdog = setTimeout(() => {
+    if (pending !== socket || pending.readyState !== WebSocket.CONNECTING) return;
+    setStatus({ connected: false, lastArchiveError: LOCAL_ACCESS_HINT });
+    showAgentTabBadge(LOCAL_ACCESS_HINT, true);
+  }, 8000);
   socket.onopen = () => {
+    clearTimeout(connectWatchdog);
+    showAgentTabBadge();
     setStatus({ connected: true });
     log("info", "broker connected");
     scheduleArchive();

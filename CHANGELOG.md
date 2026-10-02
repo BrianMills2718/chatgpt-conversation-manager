@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased, extension 0.9.21
+## Unreleased, extension 0.9.22
+
+### First-install connection hang made visible
+
+- Chrome 155 holds a website's first connection to a program on the same computer until the person allows it, with no error. The extension now turns the agent-tab label red ("Not connected ... choose Allow") after 8 seconds of waiting, doctor's failing check names the prompt, and `docs/setup.md` has an explicit Allow step. Cause found with a throwaway Chromium profile: connecting took ~2 s on 4 of 4 runs with the check disabled and never completed (13+ runs) with it on.
 
 ### Read-only account inventory
 
