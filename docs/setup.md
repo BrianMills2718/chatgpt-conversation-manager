@@ -29,6 +29,7 @@ npm start
 2. On **ChatGPT Conversation Manager Bridge**, choose **Details → Extension options**.
 3. Copy **Broker WebSocket URL** and **Authentication token** from your private `.setup/connection.txt` into the matching fields. Click **Save**.
 4. Sign in to ChatGPT in this browser profile and open <https://chatgpt.com/?ccm_agent=1>. Leave that tab open. Your agent types here; your ordinary ChatGPT tabs remain yours to use.
+5. **Allow local network access.** Recent Chrome asks, on chatgpt.com, whether the site may connect to devices on your local network (the bridge runs on your own computer). Choose **Allow**. Until you do, the extension cannot connect and doctor fails the first browser check. Verified 2026-10-01 on Chrome 155: with that check switched off the extension connected in about 2 seconds; with it on and nobody clicking, the connection hung with no error. If the prompt is gone, open the lock icon in the address bar → Site settings → *Local network access* → Allow.
 
 The extension automatically saves conversations you open by default. Untick **Automatically archive open conversations** in options if you don't want local copies. Scheduled downloads of your full account history are off by default.
 
@@ -78,6 +79,7 @@ Ask your agent: **“List the connected ChatGPT accounts without sending a promp
 - **Broker unavailable:** run `npm start` and leave it running. Restart it after reboot.
 - **Port already used:** identify what is using it first. If it is another bridge, use that installation or stop it deliberately. Otherwise change `PORT` in `.env`, rerun setup, update the extension URL and coding-agent URL.
 - **Authentication rejected:** rerun setup to refresh the private connection file, then copy its token into extension options. Make sure the broker and agent use this same installation.
+- **Extension never connects, no error:** Chrome may be waiting for you to allow local network access (step 5 above). Allow it and reload the tab.
 - **No extension or agent tab:** open ChatGPT in the profile where you loaded the extension. Save options, refresh ChatGPT, and rerun doctor.
 - **Tools absent from your agent:** restart that agent after registration. For Codex, launch with `npm run agent -- codex` so the token is available.
 - **Throttled:** pause requests and let the account recover. Backup and your own browser activity also consume account capacity.

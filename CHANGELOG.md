@@ -2,6 +2,10 @@
 
 ## Unreleased, extension 0.9.21
 
+### First-install connection hang documented
+
+- Chrome 155 holds a website's first connection to a program on the same computer until the person allows it, with no error. Doctor's failing check now names the prompt and `docs/setup.md` has an explicit Allow step. Cause found with a throwaway Chromium profile: connecting took ~2 s on 4 of 4 runs with the check disabled and never completed (13+ runs) with it on.
+
 ### Read-only account inventory
 
 - `GET /api/inventory-chats[?account=email]` (bearer token) lists every chat id the account shows: the ordinary paged list and the Project sidebar, kept as separate lists because the ordinary list omits chats filed inside Projects. It writes no archive files and sends no prompts. Project chats are capped at 20 per project (the sidebar rejects 100 with HTTP 422) by the sidebar request; a project at the cap is then paged in full by cursor.
