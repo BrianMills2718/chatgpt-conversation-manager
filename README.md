@@ -449,6 +449,11 @@ curl -X POST http://localhost:8787/api/undo -H "Authorization: Bearer $RENAMER_T
 curl -G http://localhost:8787/api/search -H "Authorization: Bearer $RENAMER_TOKEN" \
   --data-urlencode 'q=measurement validity'
 
+# Read-only list of every chat the account shows (ordinary list and Project sidebar kept separate).
+# Makes many real ChatGPT requests: run it once, not in a loop.
+curl -G http://localhost:8787/api/inventory-chats -H "Authorization: Bearer $RENAMER_TOKEN" \
+  --data-urlencode 'account=you@example.com'
+
 curl http://localhost:8787/api/current -H "Authorization: Bearer $RENAMER_TOKEN"
 curl http://localhost:8787/api/thread/<thread-id> -H "Authorization: Bearer $RENAMER_TOKEN"
 ```

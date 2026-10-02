@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-conversation-manager",
-  "version": "0.9.19",
+  "version": "0.9.21",
   "private": true,
   "engines": {
     "node": ">=22"
