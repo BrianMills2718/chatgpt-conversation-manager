@@ -436,7 +436,7 @@ wss.on("connection", (ws, req) => {
         account: autoCapturePacerKey === DEFAULT_PACER_KEY ? null : autoCapturePacerKey,
         tab: ws.tabToken?.slice(0, 8) ?? null, agent_tab: ws.agentTab ?? null, spacing_ms: getPacerEntry(autoCapturePacerKey).pacer.spacingMs,
       });
-      try { const saved = archive.archiveSnapshot(msg.snapshot); ws.send(JSON.stringify({ type: 'snapshot_ack', thread_id: saved.thread_id, content_hash: saved.content_hash })); }
+      try { const saved = archive.archiveSnapshot(msg.snapshot, { account: accountKey(ws.account) }); ws.send(JSON.stringify({ type: 'snapshot_ack', thread_id: saved.thread_id, content_hash: saved.content_hash })); }
       catch (err) { logErr(`[broker] snapshot_error for ${msg.snapshot?.thread_id}: ${err.message}`); ws.send(JSON.stringify({ type: 'snapshot_error', error: err.message })); }
       return;
     }

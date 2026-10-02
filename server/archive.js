@@ -60,7 +60,9 @@ export class ArchiveStore {
     };
   }
 
-  archiveSnapshot(snapshot) {
+  // `account` is the signed-in ChatGPT identity of the tab that produced the snapshot.
+  // It is provenance, not content, so it is kept out of the content hash.
+  archiveSnapshot(snapshot, { account = null } = {}) {
     if (!snapshot?.thread_id) throw new Error('snapshot.thread_id is required');
     const now = new Date().toISOString();
     const canonical = {
@@ -70,15 +72,18 @@ export class ArchiveStore {
     };
     const semantic = { ...canonical };
     delete semantic.captured_at;
+    delete semantic.capture_account;
     const bytes = JSON.stringify(semantic);
     canonical.content_hash = crypto.createHash('sha256').update(bytes).digest('hex');
 
     const p = this.threadPaths(snapshot.thread_id);
     let priorHash = null;
+    let priorAccount = null;
     if (fs.existsSync(p.json)) {
-      try { priorHash = JSON.parse(fs.readFileSync(p.json, 'utf8')).content_hash || null; } catch {}
+      try { const prior = JSON.parse(fs.readFileSync(p.json, 'utf8')); priorHash = prior.content_hash || null; priorAccount = prior.capture_account || null; } catch {}
     }
-    if (priorHash !== canonical.content_hash) {
+    canonical.capture_account = account || priorAccount || null;
+    if (priorHash !== canonical.content_hash || (account && account !== priorAccount)) {
       fs.appendFileSync(p.history, JSON.stringify(canonical) + '\n');
       fs.writeFileSync(p.json, JSON.stringify(canonical, null, 2));
       fs.writeFileSync(p.md, this.toMarkdown(canonical));
@@ -100,7 +105,14 @@ export class ArchiveStore {
       message_count: Array.isArray(snapshot.messages) ? snapshot.messages.length : 0,
       capture_source: snapshot.capture_source || existing.capture_source || null,
       completeness_warning: snapshot.completeness_warning ?? existing.completeness_warning ?? null,
+      // null means captured before accounts were recorded; it is never guessed.
+      account: existing.account || account || null,
+      accounts_seen: [...new Set([...(existing.accounts_seen || (existing.account ? [existing.account] : [])), ...(account ? [account] : [])])],
     };
+    if (account && existing.account && existing.account !== account) {
+      catalog.threads[snapshot.thread_id].account_conflict = true;
+      console.error(`[archive] thread ${snapshot.thread_id} was captured from ${existing.account} and now from ${account}`);
+    }
     this.writeCatalog(catalog);
     return catalog.threads[snapshot.thread_id];
   }
