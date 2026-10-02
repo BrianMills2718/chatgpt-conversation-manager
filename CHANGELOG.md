@@ -2,6 +2,10 @@
 
 ## Unreleased, extension 0.9.21
 
+### Public repository cleanup
+
+- Added an MIT `LICENSE`. Removed internal planning files (`GOAL.md`, `.company-planning/`) and the stale `dist/` v0.3 zip; they remain in git history. `package.json` and the MCP server now report 0.9.21, matching the extension. README lists `/api/inventory-chats`.
+
 ### First-install connection hang documented
 
 - Chrome 155 holds a website's first connection to a program on the same computer until the person allows it, with no error. Doctor's failing check now names the prompt and `docs/setup.md` has an explicit Allow step. Cause found with a throwaway Chromium profile: connecting took ~2 s on 4 of 4 runs with the check disabled and never completed (13+ runs) with it on.
