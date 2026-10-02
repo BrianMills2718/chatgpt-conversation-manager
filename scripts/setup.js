@@ -45,7 +45,7 @@ async function main() {
       const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(5000) });
       const health = await response.json();
       check(response.ok && health.ok === true, `Broker answers at ${url}.`);
-      check(Number(health.extension_connections) > 0, 'Extension connected; open ChatGPT after saving extension options.');
+      check(Number(health.extension_connections) > 0, 'Extension connected; open ChatGPT after saving extension options. If Chrome asks to allow chatgpt.com to connect to devices on your local network, choose Allow, then rerun doctor.');
       const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
       const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
       const client = new Client({ name: 'setup-doctor', version: '1.0.0' });
