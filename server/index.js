@@ -41,7 +41,8 @@ const COMMAND_TIMEOUT_MS = Number(process.env.COMMAND_TIMEOUT_MS || 40000);
 const ARCHIVE_DIR = process.env.ARCHIVE_DIR || path.resolve('data');
 // A bulk archive has one durable destination, so it must stay bound to the
 // intended ChatGPT identity when multiple accounts are connected.
-const SYNC_ACCOUNT = process.env.SYNC_ACCOUNT?.trim() || null;
+const SYNC_ACCOUNT = process.env.SYNC_ACCOUNT?.trim() || null; // one address or a comma-separated list
+const SYNC_ACCOUNT_FIRST = SYNC_ACCOUNT ? SYNC_ACCOUNT.split(',')[0].trim() : null;
 const archive = new ArchiveStore(ARCHIVE_DIR);
 const BRIDGE_OBSERVATIONS_PATH = path.join(ARCHIVE_DIR, 'observations', 'bridge-events.jsonl');
 
@@ -1743,14 +1744,14 @@ app.post('/api/status', async (req, res) => {
 app.post('/api/archive-all', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   const incremental = req.body?.mode === 'incremental';
-  try { const result = await dispatchToExtension({ action: 'archive_all_chats', known: incremental ? sync.knownThreads() : null }, COMMAND_TIMEOUT_MS, { single: true, account: SYNC_ACCOUNT }); res.json(result); }
+  try { const result = await dispatchToExtension({ action: 'archive_all_chats', known: incremental ? sync.knownThreads() : null }, COMMAND_TIMEOUT_MS, { single: true, account: req.body?.account || req.query.account || SYNC_ACCOUNT_FIRST }); res.json(result); }
   catch (err) { res.status(503).json({ error: err.message }); }
 });
 // Read-only inventory of the account's chat ids (no archive writes, no prompts).
 app.get('/api/inventory-chats', async (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
   try {
-    const r = await dispatchToExtension({ action: 'inventory_chats' }, 10 * 60 * 1000, { single: true, account: req.query.account || SYNC_ACCOUNT || null });
+    const r = await dispatchToExtension({ action: 'inventory_chats' }, 10 * 60 * 1000, { single: true, account: req.query.account || SYNC_ACCOUNT_FIRST || null });
     // null = ChatGPT reported no total (older extension or changed schema): unknown, not "complete".
     const reported = Number.isFinite(r.ordinary_reported_total) ? r.ordinary_reported_total : null;
     res.json({
@@ -1768,7 +1769,8 @@ app.get('/api/archive-all/status', (req, res) => {
 });
 app.post('/api/sync', (req, res) => {
   if (!authOk(req)) return res.status(401).json({ error: 'unauthorized' });
-  sync.runOnce();
+  const account = req.body?.account || req.query.account;
+  (account ? sync.runOnce({ account }) : sync.runAll()).catch((err) => logErr(`[sync] manual run failed: ${err.message}`));
   res.status(202).json({ started: true });
 });
 app.get('/api/sync-status', (req, res) => {

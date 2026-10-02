@@ -10,7 +10,9 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 // sync-status.json. Failures are recorded and logged, never swallowed.
 export class SyncScheduler {
   constructor({ archive, dispatch, connectionCount, waitForBulkComplete, statusPath, openCommand = null, syncAccount = null, connectWaitMs = 90000, runTimeoutMs = 12 * 60 * 60 * 1000, log = console }) {
-    Object.assign(this, { archive, dispatch, connectionCount, waitForBulkComplete, statusPath, openCommand, syncAccount, connectWaitMs, runTimeoutMs, log });
+    // syncAccount may be one address or a comma-separated list; every account in the list is archived on each scheduled run.
+    const syncAccounts = String(syncAccount || '').split(',').map((a) => a.trim()).filter(Boolean);
+    Object.assign(this, { archive, dispatch, connectionCount, waitForBulkComplete, statusPath, openCommand, syncAccount: syncAccounts[0] || null, syncAccounts, connectWaitMs, runTimeoutMs, log });
     this.running = null;
     this.runningAccount = null;
     this.timer = null;
@@ -115,6 +117,15 @@ export class SyncScheduler {
   }
 
   // Retry ordinary failures sooner than the normal interval, but give a
+  // One scheduled tick: archive each configured account in turn (or the default tab when none is configured).
+  // A failure on one account is recorded by runOnce and does not stop the others; the last status is returned.
+  async runAll() {
+    const accounts = this.syncAccounts.length ? this.syncAccounts : [null];
+    let status;
+    for (const account of accounts) status = await this.runOnce({ account });
+    return status;
+  }
+
   // rate-limited account at least its normal interval or the server's
   // Retry-After, whichever is longer.
   static nextDelayMs(status, intervalMs, retryMs = 30 * 60 * 1000) {
@@ -147,7 +158,7 @@ export class SyncScheduler {
           scheduleAt(runAtMs);
           return;
         }
-        const status = await this.runOnce();
+        const status = await this.runAll();
         const next = SyncScheduler.nextDelayMs(status, intervalMs);
         const nextRunAtMs = Date.now() + next;
         this.writeStatus({ next_run_at: new Date(nextRunAtMs).toISOString() });

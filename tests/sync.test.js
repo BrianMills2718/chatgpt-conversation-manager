@@ -170,3 +170,21 @@ test('a refused dispatch leaves no unhandled rejection behind when the wait time
     process.off('unhandledRejection', onUnhandled);
   }
 });
+
+test('a comma-separated sync account list archives every account in turn, in order', async () => {
+  const { sched, sentAccounts } = setup({
+    syncAccount: 'a@example.com, b@example.com',
+    completion: Promise.resolve({ mode: 'incremental', listed: 2, total: 1, skipped: 1, archived: 1, failed: [], fatal_error: null }),
+  });
+  assert.deepEqual(sched.syncAccounts, ['a@example.com', 'b@example.com']);
+  const status = await sched.runAll();
+  const archived = sentAccounts.filter((_, i) => i % 2 === 1); // each run sends get_capabilities then archive_all_chats
+  assert.deepEqual(archived, ['a@example.com', 'b@example.com']);
+  assert.equal(status.account, 'b@example.com');
+});
+
+test('with no account configured runAll still runs once against the default tab', async () => {
+  const { sched, sent } = setup({ completion: Promise.resolve({ mode: 'incremental', listed: 1, total: 0, skipped: 1, archived: 0, failed: [], fatal_error: null }) });
+  await sched.runAll();
+  assert.equal(sent.filter((c) => c.action === 'archive_all_chats').length, 1);
+});
