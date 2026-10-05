@@ -46,6 +46,16 @@ export class SyncScheduler {
       const target = account ? ` for ${account}` : '';
       throw new Error(`No chatgpt.com tab is connected${target} and SYNC_OPEN_CHATGPT_CMD is not set.`);
     }
+    // A failed connect used to re-run the open command on every retry and every account, opening a new ChatGPT tab each time
+    // and never closing it (hundreds of tabs piled up). Run it at most once per account per cooldown window.
+    const key = String(account || '');
+    this.lastOpenAt = this.lastOpenAt || {};
+    const cooldownMs = this.openCooldownMs ?? 30 * 60 * 1000;
+    const since = Date.now() - (this.lastOpenAt[key] || 0);
+    if (this.lastOpenAt[key] && since < cooldownMs) {
+      throw new Error(`No chatgpt.com tab connected${account ? ` for ${account}` : ''}; the open command already ran ${Math.round(since / 60000)} min ago, not opening another tab for ${Math.round((cooldownMs - since) / 60000)} more min.`);
+    }
+    this.lastOpenAt[key] = Date.now();
     this.log.log(`[sync] no tab connected; running SYNC_OPEN_CHATGPT_CMD`);
     await new Promise((resolve) => execFile('/bin/sh', ['-c', this.openCommand], (err) => {
       if (err) this.log.error(`[sync] open command failed: ${err.message}`);
