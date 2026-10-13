@@ -1,0 +1,16 @@
+{
+  "schema_version": "method-adoption-decision.v1",
+  "record_type": "method_adoption_decision",
+  "decision": "adopted",
+  "plan_ref": "docs/plans/project-sidebar-cap.md",
+  "plan_sha256": "5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+  "receipt_ref": "docs/plans/project-sidebar-cap.receipt.json",
+  "receipt_sha256": "cb650b29b2594de828117f2d185365b5e1b07fe4f65f5eafabe0360efb9aa23b",
+  "receipt_result": "pass",
+  "reason_codes": [],
+  "summary": [
+    "pass: 11 items evidenced, 1 confirmed not applicable, 0 advisory deviation(s)",
+    "warn CORE-SYSTEM-MODEL: MODEL-NO-ELEMENT-IDS, MODEL-NO-UNKNOWNS -> MODEL-NO-ELEMENT-IDS: README.md has no element lines; write each as `- ID (decided|guessed): what it is`; MODEL-NO-UNKNOWNS: README.md has no unknowns table (header `| Unknown | What would decide it |`)"
+  ],
+  "decided_at": "2026-10-13T18:11:41Z"
+}

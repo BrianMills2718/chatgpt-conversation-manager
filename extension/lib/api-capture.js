@@ -516,7 +516,12 @@ export function parseProjectSidebar(data) {
   });
 }
 
+// The sidebar rejects conversations_per_gizmo above 20 with HTTP 422, so every
+// caller is clamped here; a project at the cap is paged by listProjectConversations.
+export const PROJECT_SIDEBAR_MAX_PER_PROJECT = 20;
+
 export async function listProjectChats({ perProject = 20, fetchImpl = fetch, accessToken } = {}) {
+  perProject = Math.min(Math.max(Number(perProject) || 20, 1), PROJECT_SIDEBAR_MAX_PER_PROJECT);
   if (accessToken === undefined) accessToken = await getAccessToken({ fetchImpl });
   const headers = { Accept: "application/json" };
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;

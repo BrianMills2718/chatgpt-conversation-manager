@@ -1,0 +1,598 @@
+{
+  "schema_version": "checklist-evidence-bundle.v1",
+  "record_type": "checklist_evidence_bundle",
+  "bundle_id": "BUNDLE-project-sidebar-cap",
+  "coverage": "complete",
+  "definition": {
+    "schema_version": "checklist-definition.v1",
+    "record_type": "checklist_definition",
+    "checklist_id": "method-conformance.bounded-design",
+    "revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+    "title": "bounded-design method conformance for project-sidebar-cap",
+    "purpose": "Route-bound evidence that the selected Company Planning method was applied before adoption.",
+    "subject_ref": {
+      "kind": "planning_review",
+      "id": "project-sidebar-cap",
+      "revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16"
+    },
+    "items": [
+      {
+        "item_id": "CORE-ACTOR-RESULT-EXAMPLE",
+        "statement": "The plan names the actor it serves, the desired result, and one stable, concrete, user-visible example of that result.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "plan_section"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/docs/designs/enforcement/PLANNING_METHOD_CONFORMANCE_RECEIPT.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#core-and-conditional-requirements"
+        }
+      },
+      {
+        "item_id": "CORE-ROUTE",
+        "statement": "The selected Company Planning route equals the deterministic path classification of the recorded structural facts.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "path_decision_record"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/skills/bounded-design/SKILL.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#choose-the-route-before-adding-structure"
+        }
+      },
+      {
+        "item_id": "CORE-REQUIREMENTS-TRACED",
+        "statement": "The plan lists its requirements: what was asked for, and what the delivered work's own claims imply. A claim here is what the work is presented as being or doing to its users, for example work presented as following a standard, schema or contract (which implies conformance to it) or an output labelled as showing something (which implies it shows it correctly); the plan's own format and front matter are not such claims, and the details a check examines (what a trace must show) belong to that check rather than being separate requirements. Each requirement names the check that verifies it (a test, script, gate step, or named review of a run) and its status: passing, failing, planned and not yet run, or deferred with a stated reason; deferred requirements are carried onto every release or completion record the plan names. A plan fails this item if it has no requirements list, if any requirement has neither a check nor an explicit deferral with its reason, or if the plan presents the work as following a named standard, schema or contract, or as having another property its users rely on, that its requirements list omits.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "plan_document"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/skills/bounded-design/SKILL.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#requirements-traced-default"
+        }
+      },
+      {
+        "item_id": "CORE-SUCCESS-DISPROOF",
+        "statement": "The plan defines the evidence that would show success and a concrete condition that would disprove the approach. Each success measure is the property the plan claims, or a check that directly tests that property, not a stand-in for it: a count, a picture, a readability judgment, or the pipeline agreeing with itself (hashes, labels, byte equality) does not show correctness or conformance it does not test. A plan fails this item if it has no disproof condition, or if a success measure is such a stand-in for the claimed property and the plan names no direct check of that property.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "plan_section"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/skills/bounded-design/SKILL.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#4-derive-the-design"
+        }
+      },
+      {
+        "item_id": "CORE-TRACE-REVIEW",
+        "statement": "Every success or acceptance criterion in the plan is judged from the full trace of a run, not only its final outcome: it names the run whose full trace is examined (for example the session, its tool and LLM calls, commits, check output, or messages), where that trace lives, and what must be seen in that trace beyond the final outcome. A criterion that names only an outcome, such as tests passing, a PR merged, a test fixture reproducing the journey, or a status reading succeeded, fails this item. A criterion for which no run exists, such as a pure document edit, passes only when the plan states that exemption and its reason explicitly.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "plan_section"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/skills/bounded-design/SKILL.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#4-derive-the-design"
+        }
+      },
+      {
+        "item_id": "CORE-TRACE-DEBUGGING",
+        "statement": "The plan includes a separate When a run fails or surprises us procedure, distinct from anticipated failure modes. It requires preserving the failed run and its trace id; reading full inputs, prompts, each tool call arguments/results, intermediate stages and final output before selecting a fix; citing the observed divergence; classifying evidence absent, evidence returned but unused or contradicted, invalid expectation, or unresolved; and linking a targeted repair to a new traced verification run while retaining the original failure. Unresolved diagnoses permit investigation but cannot authorize a causal repair. Review completeness is separate from the run verdict.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "plan_section"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/skills/bounded-design/SKILL.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#when-a-run-fails-or-surprises-us"
+        }
+      },
+      {
+        "item_id": "CORE-SYSTEM-MODEL",
+        "statement": "The plan links the project's system model (a path such as docs/model/ODD.md) or carries the one-line exemption `System model: exempt -- <reason>`, which fits only a project with no stored state and no user-facing view. Unless exempt, the plan names each system-model element (entity, process, record or event, or view) that the work adds, changes, or relies on, and its trace review names, for each such element, what the examined run must show of it (for example an event of that record type with its id, or the view displaying that entity). A plan with neither a model link nor the exemption line fails this item, as does one that lists model elements without saying what the examined run must show of each, or one that names no element without stating that the work touches none and why. For a maintained repository, the plan also cites the documentation entry point from which the model is reachable; a shared model explicitly identifies this repository's scope. It names applicable source-linked views, explains material omissions without imposing a fixed diagram quota, names concrete model freshness or drift checks, and states how the model, view coverage and verification evidence will be reconciled in the same change (or gives a concrete reason each needs no update). A bare model path without these discovery, view, freshness and reconciliation obligations fails this item. Representation Router may render selected views but does not supply planning authority or prove executed behavior.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "plan_document"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/skills/bounded-design/SKILL.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#system-model-default"
+        }
+      },
+      {
+        "item_id": "CORE-CAPABILITY-REUSE",
+        "statement": "The plan answers capability reuse against the capability catalogue in agentic-capability-architecture-canonical, which has two files: `reuse_candidates.yml`, whose entries under `candidates:` are cross-project capabilities with their selected off-the-shelf implementations, each named by its `id` (for example `documents_to_text`) and marked candidate or promoted; and `capability_registry.yml`, whose entries under `capabilities:` are the packages that repository holds, each named by its key (for example `approvals`) with the capability ids it `provides` (for example `approval.resolve`). An entry from either file counts. The plan names each catalogue capability the work reuses, by its id, key or provided id; names each new capability the work adds together with its first consumer (the project, command or workflow in this plan that uses it); and, where no entry covers what the work needs, states `No catalogue entry fits, because <reason>`, the reason saying what the work needs that no entry provides. A plan may give more than one of these answers. A plan fails this item if it gives none of them, if it claims reuse without naming the catalogue entry or id reused (reusing code or a contract that is not a catalogue entry does not count), if it adds a capability without naming its first consumer, or if it says no entry fits without a reason.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "plan_document"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/skills/bounded-design/SKILL.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#capability-reuse-default"
+        }
+      },
+      {
+        "item_id": "CORE-AUTHORITY-NONGOALS",
+        "statement": "The plan states who holds authority over the work and what it explicitly will not do (non-goals).",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "plan_section"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/docs/designs/enforcement/PLANNING_METHOD_CONFORMANCE_RECEIPT.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#core-and-conditional-requirements"
+        }
+      },
+      {
+        "item_id": "CORE-IRREVERSIBLE-SPEND",
+        "statement": "For each irreversible action or spend the plan proposes, it names the boundary, who must authorize it, and how it is contained.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "conditional",
+          "condition": "fact:irreversible_or_spend_action"
+        },
+        "evidence_required": [
+          "plan_section"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/docs/designs/enforcement/PLANNING_METHOD_CONFORMANCE_RECEIPT.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#core-and-conditional-requirements"
+        }
+      },
+      {
+        "item_id": "CORE-UNCERTAINTIES",
+        "statement": "The plan lists its material uncertainties, and each one has an owner or the evidence that would resolve it.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "plan_section"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/docs/designs/enforcement/PLANNING_METHOD_CONFORMANCE_RECEIPT.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#core-and-conditional-requirements"
+        }
+      },
+      {
+        "item_id": "CORE-ACTIVATION-FACTS",
+        "statement": "No activation fact that the plan triggers is declared false. Declaring a fact true when the plan does not strictly need it is acceptable, because it only adds checks; judge only facts declared false. empirical_comparison_proposed is triggered when the plan proposes an A/B test, benchmark, bake-off, or other experiment comparing alternative designs, models, or candidates to choose among them; checking the built result against an expected outcome (an acceptance test, fixture replay, or regression check) is verification and does not trigger it. shared_mechanism is triggered by a new shared mechanism, contract, or algorithm; llm_central by behavior that centrally depends on LLM calls; irreversible_or_spend_action by a proposed irreversible action or spend. claims_external_standard is triggered when the plan claims, or presents its work as, following, implementing or conforming to a standard, schema or contract owned outside the repository being changed (for example a model presented as DM2, or output said to match a published schema); conforming to the repository's own contracts does not trigger it; aes_governed_target when the target repository is governed by an AES target (`.aes/target.yaml`), or the plan creates one (for example by running `aes init`). These two facts are optional: an undeclared one is shown as false and is judged like a declared false.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "plan_document",
+          "activation_facts_record"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/docs/designs/enforcement/PLANNING_METHOD_CONFORMANCE_RECEIPT.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#core-and-conditional-requirements"
+        }
+      },
+      {
+        "item_id": "OV-PROTO-VERTICAL-RESET",
+        "statement": "The plan names the minimal vertical result, the reset boundary, and the non-goals, without adding coordinated-work ceremony.",
+        "effect": "blocking",
+        "applicability": {
+          "mode": "required",
+          "condition": null
+        },
+        "evidence_required": [
+          "plan_section"
+        ],
+        "source_ref": {
+          "repository": "BrianMills2718/company-planning",
+          "path": "plugins/company-planning/skills/bounded-design/SKILL.md",
+          "revision": "6953b5acddad920f2c2ace4831319ea055e8080c",
+          "pointer": "#4-derive-the-design"
+        }
+      }
+    ]
+  },
+  "observations": [
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-ACTOR-RESULT-EXAMPLE",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-ACTOR-RESULT-EXAMPLE",
+      "evidence_types": [
+        "plan_section"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-ACTOR-RESULT-EXAMPLE",
+        "criterion_id": "CORE-ACTOR-RESULT-EXAMPLE",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md#actor-and-result",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-ROUTE",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-ROUTE",
+      "evidence_types": [
+        "path_decision_record"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-ROUTE",
+        "criterion_id": "CORE-ROUTE",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.path-decision.json",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-REQUIREMENTS-TRACED",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-REQUIREMENTS-TRACED",
+      "evidence_types": [
+        "plan_document"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-REQUIREMENTS-TRACED",
+        "criterion_id": "CORE-REQUIREMENTS-TRACED",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-SUCCESS-DISPROOF",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-SUCCESS-DISPROOF",
+      "evidence_types": [
+        "plan_section"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-SUCCESS-DISPROOF",
+        "criterion_id": "CORE-SUCCESS-DISPROOF",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md#success-and-disproof",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-TRACE-REVIEW",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-TRACE-REVIEW",
+      "evidence_types": [
+        "plan_section"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-TRACE-REVIEW",
+        "criterion_id": "CORE-TRACE-REVIEW",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md#success-and-disproof",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-TRACE-DEBUGGING",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-TRACE-DEBUGGING",
+      "evidence_types": [
+        "plan_section"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-TRACE-DEBUGGING",
+        "criterion_id": "CORE-TRACE-DEBUGGING",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md#when-a-run-fails-or-surprises-us",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-SYSTEM-MODEL",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-SYSTEM-MODEL",
+      "evidence_types": [
+        "plan_document"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-SYSTEM-MODEL",
+        "criterion_id": "CORE-SYSTEM-MODEL",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-CAPABILITY-REUSE",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-CAPABILITY-REUSE",
+      "evidence_types": [
+        "plan_document"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-CAPABILITY-REUSE",
+        "criterion_id": "CORE-CAPABILITY-REUSE",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md#capability-reuse",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-AUTHORITY-NONGOALS",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-AUTHORITY-NONGOALS",
+      "evidence_types": [
+        "plan_section"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-AUTHORITY-NONGOALS",
+        "criterion_id": "CORE-AUTHORITY-NONGOALS",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md#authority-and-non-goals",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-IRREVERSIBLE-SPEND",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-IRREVERSIBLE-SPEND",
+      "evidence_types": [
+        "plan_section"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-IRREVERSIBLE-SPEND",
+        "criterion_id": "CORE-IRREVERSIBLE-SPEND",
+        "status": "not_applicable",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md#authority-and-non-goals",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": [],
+        "not_applicable_reason": "irreversible_or_spend_action=false"
+      },
+      "annotation": "none proposed"
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-UNCERTAINTIES",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-UNCERTAINTIES",
+      "evidence_types": [
+        "plan_section"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-UNCERTAINTIES",
+        "criterion_id": "CORE-UNCERTAINTIES",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md#uncertainties",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-CORE-ACTIVATION-FACTS",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "CORE-ACTIVATION-FACTS",
+      "evidence_types": [
+        "plan_document",
+        "activation_facts_record"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-CORE-ACTIVATION-FACTS",
+        "criterion_id": "CORE-ACTIVATION-FACTS",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md#activation-facts",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    },
+    {
+      "schema_version": "checklist-item-observation.v1",
+      "record_type": "checklist_item_observation",
+      "observation_id": "OBS-OV-PROTO-VERTICAL-RESET",
+      "checklist_id": "method-conformance.bounded-design",
+      "checklist_revision": "sha256:18f633234d3aa6e993b5eb34277301fdd881e568fd75045c9257ee235f3ad417",
+      "definition_sha256": "9c936da25e2123a8c69aea6eb132adca0da64a9b29204ec1859aec20a3818898",
+      "item_id": "OV-PROTO-VERTICAL-RESET",
+      "evidence_types": [
+        "plan_section"
+      ],
+      "evidence": {
+        "schema_version": "1.0",
+        "record_type": "evidence_record",
+        "evidence_id": "EVIDENCE-OV-PROTO-VERTICAL-RESET",
+        "criterion_id": "OV-PROTO-VERTICAL-RESET",
+        "status": "pass",
+        "evidence_ref": "docs/plans/project-sidebar-cap.md#vertical-and-reset",
+        "scope": "plan:docs/plans/project-sidebar-cap.md",
+        "observed_at": "2026-10-13T18:11:31Z",
+        "producer": "quick-adopt",
+        "source_revision": "sha256:5dcc88627bbea7584f89644a6bc22bee122abd7248e847de1504c5cd4df1bc16",
+        "limitations": []
+      },
+      "annotation": null
+    }
+  ]
+}

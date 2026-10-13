@@ -1,0 +1,101 @@
+{
+  "17b38f3fde0462d15a5cf4fa94274830d508009b6668544daf71ff5b29f90f4f": {
+    "item_id": "CORE-SYSTEM-MODEL",
+    "materiality": "non_material",
+    "missing": null,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "rationale": "The plan identifies `README.md` as the system model, states that it is repository-specific and reachable from the documentation entry point, and names the architecture path it relies on. It specifies what the live run and tests must show, identifies the applicable source-linked verification view, gives a concrete drift test, and requires model, view coverage, and saved evidence to be reconciled in the same commit.",
+    "trace_id": "company-planning/method-conformance/project-sidebar-cap/cc2f23a8906a/CORE-SYSTEM-MODEL",
+    "verdict": "pass"
+  },
+  "2579773ebec36139021b987b3e2ccf3e75716e84af6cacf0612caede2ce88824": {
+    "item_id": "OV-PROTO-VERTICAL-RESET",
+    "materiality": "non_material",
+    "missing": null,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "rationale": "The evidence explicitly names the vertical files and its result\u2014preventing HTTP 422 for queried chats, with concrete tests and live-call checks\u2014along with the reset boundary (`git revert` of the commit). It states the non-goal (\u201canything outside these files\u201d) and explicitly excludes coordinated-work ceremony such as work-unit graphs and review or release contracts.",
+    "trace_id": "company-planning/method-conformance/project-sidebar-cap/cc2f23a8906a/OV-PROTO-VERTICAL-RESET",
+    "verdict": "pass"
+  },
+  "370cdac3d478bd371a44b78a5e5a6e320ab328478acb2d8ef7db50124d051fc5": {
+    "item_id": "CORE-TRACE-REVIEW",
+    "materiality": "non_material",
+    "missing": null,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "rationale": "The evidence names both the disproof run at the parent commit and the success run at the change commit, identifies their full output location (`docs/plans/project-sidebar-cap.check.txt`), and specifies required trace details beyond the final result, including commands, commit-reset files, named checks, skip status, exit status, and System model output.",
+    "trace_id": "company-planning/method-conformance/project-sidebar-cap/cc2f23a8906a/CORE-TRACE-REVIEW",
+    "verdict": "pass"
+  },
+  "3c62c16585480b72e5dfb51854f05a3cc15bea5233c4bea660e4269d966564f6": {
+    "item_id": "CORE-ACTIVATION-FACTS",
+    "materiality": "non_material",
+    "missing": null,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "rationale": "The plan explicitly declares each relevant activation fact false and provides supporting reasons: no new shared mechanism or empirical comparison, no central LLM behavior, no irreversible action or spend, no external standard claim, and no AES-governed target. The quoted plan describes only a request-parameter cap and verification of that change.",
+    "trace_id": "company-planning/method-conformance/project-sidebar-cap/cc2f23a8906a/CORE-ACTIVATION-FACTS",
+    "verdict": "pass"
+  },
+  "6a7d2d5ee2e2e9b0c8831b5a7361af3c8ef6287221bc2a3829992877b57335f6": {
+    "item_id": "CORE-TRACE-DEBUGGING",
+    "materiality": "non_material",
+    "missing": null,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "rationale": "The evidence explicitly defines a separate procedure for any failed or surprising run, distinct from anticipated failure, and requires preserving the failed run and trace ID. It requires reviewing complete inputs, prompts, tool calls and results, intermediate stages, and final output; citing and classifying divergences; prohibiting causal repairs for unresolved diagnoses; linking targeted repairs to new traced verification runs while retaining the original; and distinguishing review completeness from the run verdict.",
+    "trace_id": "company-planning/method-conformance/project-sidebar-cap/cc2f23a8906a/CORE-TRACE-DEBUGGING",
+    "verdict": "pass"
+  },
+  "840570ccea37b25a05af86acde87e7608464188c9e7dbeaca46de6e8cb6d2368": {
+    "item_id": "CORE-AUTHORITY-NONGOALS",
+    "materiality": "non_material",
+    "missing": null,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "rationale": "The evidence explicitly identifies Brian as the authority for the change and states the non-goals: work outside the listed files, irreversible actions, and spending.",
+    "trace_id": "company-planning/method-conformance/project-sidebar-cap/cc2f23a8906a/CORE-AUTHORITY-NONGOALS",
+    "verdict": "pass"
+  },
+  "8564120e6a16c5e3a6a816c3346128d14a71ebe3b037a390c7a8bb8b9ba1125f": {
+    "item_id": "CORE-ACTOR-RESULT-EXAMPLE",
+    "materiality": "non_material",
+    "missing": null,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "rationale": "The evidence explicitly names the actor as Brian, states the desired result as eliminating the HTTP 422 failure for title queries, and gives a concrete user-visible example comparing the prior failure with the post-restart matching-chat result.",
+    "trace_id": "company-planning/method-conformance/project-sidebar-cap/cc2f23a8906a/CORE-ACTOR-RESULT-EXAMPLE",
+    "verdict": "pass"
+  },
+  "8d1db2461b4036ac7b75d9d1acaec5abe9cf34fbf6c8f031d4402f3bf6e7cef6": {
+    "item_id": "CORE-CAPABILITY-REUSE",
+    "materiality": "non_material",
+    "missing": null,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "rationale": "The evidence explicitly checks both catalogue files and states, \u201cNo catalogue entry fits, because this fixes a request parameter inside the existing chatgpt-bridge tool.\u201d It also explains what is needed that no entry provides: edits to the repository\u2019s own files, satisfying the required reason.",
+    "trace_id": "company-planning/method-conformance/project-sidebar-cap/cc2f23a8906a/CORE-CAPABILITY-REUSE",
+    "verdict": "pass"
+  },
+  "b7c36d0a455b822d94625305409763d1fe953a1e83362f9962e9ea6fbe175215": {
+    "item_id": "CORE-SUCCESS-DISPROOF",
+    "materiality": "non_material",
+    "missing": null,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "rationale": "The plan directly tests the parameter-conformance property by asserting the exact `conversations_per_gizmo` values, and directly tests the end-to-end behavior by requiring a live query to return chats rather than HTTP 422. It also defines concrete disproof conditions: the new test fails or the live query still returns HTTP 422.",
+    "trace_id": "company-planning/method-conformance/project-sidebar-cap/cc2f23a8906a/CORE-SUCCESS-DISPROOF",
+    "verdict": "pass"
+  },
+  "c987fd917c89fd841c0e185b604b5bf675be1df8d9c4da36663a0ff5b92e2154": {
+    "item_id": "CORE-UNCERTAINTIES",
+    "materiality": "non_material",
+    "missing": null,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "rationale": "The evidence explicitly identifies one material uncertainty and provides resolving evidence: `git diff --stat` showing 5 files, 23 insertions, and 2 deletions. It also states that this is the complete set of material uncertainties.",
+    "trace_id": "company-planning/method-conformance/project-sidebar-cap/cc2f23a8906a/CORE-UNCERTAINTIES",
+    "verdict": "pass"
+  },
+  "ccf29f88c1c511d3aa4721d6dbe9646485fa5e42a9df4645ac25a7467fddd99c": {
+    "item_id": "CORE-REQUIREMENTS-TRACED",
+    "materiality": "non_material",
+    "missing": null,
+    "model": "openrouter/openai/gpt-5.6-luna",
+    "rationale": "The Requirements table explicitly lists R1 and R2, identifies each requirement\u2019s source, names its check, and gives the status \u201cplanned, not yet run.\u201d The plan also explicitly states the implied no-model-call claim as R2 and provides its corresponding git-diff check; no requirement is deferred.",
+    "trace_id": "company-planning/method-conformance/project-sidebar-cap/cc2f23a8906a/CORE-REQUIREMENTS-TRACED",
+    "verdict": "pass"
+  }
+}
