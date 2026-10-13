@@ -834,7 +834,7 @@ async function listRecentChats(limit = 28, { account = null, includeProjects = f
   if (!includeProjects) return chats;
   // The main list leaves out chats filed inside a Project; merge those in
   // (newest first) so a caller is not silently blind to them.
-  const p = await dispatchToExtension({ action: "list_project_chats", per_project: Math.min(limit, 100) }, COMMAND_TIMEOUT_MS, { single: true, account, askId });
+  const p = await dispatchToExtension({ action: "list_project_chats", per_project: Math.min(limit, 20) }, COMMAND_TIMEOUT_MS, { single: true, account, askId });
   const seen = new Set(chats.map((c) => c.id));
   for (const project of p.projects || []) for (const c of project.chats || []) if (!seen.has(c.id)) { seen.add(c.id); chats.push(c); }
   const t = (v) => (typeof v === 'number' ? v * 1000 : Date.parse(v || '') || 0);

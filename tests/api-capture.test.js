@@ -525,3 +525,13 @@ test('listProjectConversations follows the cursor to the end and dedupes', async
   assert.equal(urls.length, 2);
   await assert.rejects(listProjectConversations('g-1', { fetchImpl: async () => ({ ok: false, status: 429 }), accessToken: 't', sleepImpl: async () => {} }), /HTTP 429/);
 });
+
+test('listProjectChats never asks the sidebar for more than 20 chats per project (it returns HTTP 422 above that)', async () => {
+  const { listProjectChats } = await import('../extension/lib/api-capture.js');
+  const urls = [];
+  const fetchImpl = async (url) => { urls.push(url); return { ok: true, json: async () => ({ items: [] }) }; };
+  await listProjectChats({ perProject: 100, fetchImpl, accessToken: 't' });
+  await listProjectChats({ perProject: 5, fetchImpl, accessToken: 't' });
+  assert.match(urls[0], /conversations_per_gizmo=20$/);
+  assert.match(urls[1], /conversations_per_gizmo=5$/);
+});

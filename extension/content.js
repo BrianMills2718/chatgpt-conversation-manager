@@ -1419,7 +1419,7 @@ async function handleCommand(msg) {
   }
   if (msg.action === "get_tab") return { tab: TAB_TOKEN, page_id: PAGE_ID, agent: AGENT_TAB, busy: bulkArchiving, thread_id: currentThreadId(), account: tabIdentity, lifecycle, page_age_s: Math.round((Date.now() - PAGE_STARTED_AT) / 1000), visibility: document.visibilityState };
   if (msg.action === "list_project_chats") {
-    const perProject = Math.min(Math.max(Number(msg.per_project) || 20, 1), 100);
+    const perProject = Math.min(Math.max(Number(msg.per_project) || 20, 1), 20);
     return { projects: await listProjectChats({ perProject }) };
   }
   if (msg.action === "read_conversation") {

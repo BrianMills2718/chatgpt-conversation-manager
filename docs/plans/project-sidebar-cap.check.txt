@@ -1,0 +1,9 @@
+== npm test on working tree (base 1694809379882d5daa944428f711f21ca3d827fe)
+✔ listProjectChats never asks the sidebar for more than 20 chats per project (it returns HTTP 422 above that) (0.65997ms)
+ℹ tests 236
+ℹ pass 236
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+exit=0
+== live check: after merge, broker restart and one list_chatgpt_chats(limit=20, query='model') call; result recorded in the PR

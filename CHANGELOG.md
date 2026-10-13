@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Chat list no longer fails when it includes Project chats
+
+- `list_chatgpt_chats` with a title `query`, and `ask_chatgpt` by `thread_title`, asked ChatGPT's Projects sidebar for 100 chats per project. ChatGPT answers that with HTTP 422, so both failed with "projects sidebar fetch failed: HTTP 422". `listProjectChats` now caps the request at 20 per project for every caller (`PROJECT_SIDEBAR_MAX_PER_PROJECT`), and the broker and extension handlers cap it too. The broker cap takes effect on broker restart; the extension's copy loads at its next reload.
+
 ## Unreleased, extension 0.9.21
 
 ### Public repository cleanup
