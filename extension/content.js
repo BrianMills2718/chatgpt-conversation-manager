@@ -1305,7 +1305,14 @@ async function archiveAllChats({ known = null } = {}) {
   const pacer = new AdaptivePacer({ initialMs: await loadLearnedSpacing() });
   try {
     const accessToken = await getAccessToken();
-    const listed = await listAllConversations({ accessToken, onPage: (loaded, total) => (summary.total = total) });
+    const ordinary = await listAllConversations({ accessToken, onPage: (loaded, total) => (summary.total = total) });
+    // Archived chats are a separate list; a failure there must not stop the ordinary archive.
+    let archivedChats = [];
+    try { archivedChats = await listAllConversations({ accessToken, archived: true }); }
+    catch (e) { summary.archived_list_error = String(e?.message || e); await log("warn", `archived-chats list failed: ${summary.archived_list_error}`); }
+    const ordinaryIds = new Set(ordinary.map((c) => c.id));
+    const listed = [...ordinary, ...archivedChats.filter((c) => !ordinaryIds.has(c.id))];
+    summary.archived_listed = archivedChats.length;
     const conversations = known ? selectChangedConversations(listed, known) : listed;
     summary.listed = listed.length;
     summary.skipped = listed.length - conversations.length;
@@ -1410,9 +1417,12 @@ async function handleCommand(msg) {
     // walked list against it instead of assuming the walk reached the end.
     let reportedTotal = null;
     const ordinary = await listAllConversations({ onPage: (_loaded, total) => { if (Number.isFinite(total)) reportedTotal = total; } });
+    const archivedChats = await listAllConversations({ archived: true });
+    const brief = (c) => ({ id: c.id, title: c.title || "", create_time: c.create_time ?? null, update_time: c.update_time ?? null });
     return {
       ordinary_reported_total: reportedTotal,
-      ordinary_list: ordinary.map((c) => ({ id: c.id, title: c.title || "", create_time: c.create_time ?? null, update_time: c.update_time ?? null })),
+      ordinary_list: ordinary.map(brief),
+      archived_list: archivedChats.map(brief),
       projects: projects.map((p) => ({ ...p, may_be_truncated: false })),
       per_project_limit: perProject,
     };

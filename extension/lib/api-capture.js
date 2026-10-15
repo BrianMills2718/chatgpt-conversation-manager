@@ -378,11 +378,13 @@ export function fatalArchiveErrorDetails(error, message = error?.message) {
   return details;
 }
 
-export async function listConversationsPage({ offset = 0, limit = 28, fetchImpl = fetch, accessToken } = {}) {
+// `archived` lists the chats Brian archived in ChatGPT, which the ordinary list
+// leaves out (they appear only under Settings > Archived chats).
+export async function listConversationsPage({ offset = 0, limit = 28, fetchImpl = fetch, accessToken, archived = false } = {}) {
   if (accessToken === undefined) accessToken = await getAccessToken({ fetchImpl });
   const headers = { Accept: "application/json" };
   if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-  const res = await fetchImpl(`/backend-api/conversations?offset=${offset}&limit=${limit}&order=updated`, {
+  const res = await fetchImpl(`/backend-api/conversations?offset=${offset}&limit=${limit}&order=updated${archived ? "&is_archived=true" : ""}`, {
     method: "GET",
     credentials: "same-origin",
     headers,
@@ -422,8 +424,8 @@ export function selectChangedConversations(items, known = {}) {
 // Pages through the full conversation list once, sharing one access token
 // across all page requests. onPage(loadedSoFar, total) is called after each
 // page for progress reporting.
-export async function listAllConversations({ fetchImpl = fetch, pageSize = 50, onPage } = {}) {
-  const accessToken = await getAccessToken({ fetchImpl });
+export async function listAllConversations({ fetchImpl = fetch, pageSize = 50, onPage, archived = false, accessToken } = {}) {
+  if (accessToken === undefined) accessToken = await getAccessToken({ fetchImpl });
   const seen = new Set();
   const all = [];
   let offset = 0;
@@ -431,7 +433,7 @@ export async function listAllConversations({ fetchImpl = fetch, pageSize = 50, o
   // more than this many conversations, and if the server never signals a
   // clean end we must not loop forever.
   for (let guard = 0; guard < 500; guard++) {
-    const page = await listConversationsPage({ offset, limit: pageSize, fetchImpl, accessToken });
+    const page = await listConversationsPage({ offset, limit: pageSize, fetchImpl, accessToken, archived });
     let newCount = 0;
     for (const c of page.items) {
       if (seen.has(c.id)) continue;

@@ -1757,6 +1757,7 @@ app.get('/api/inventory-chats', async (req, res) => {
     res.json({
       ordinary_count: r.ordinary_list.length,
       project_chat_count: r.projects.reduce((n, p) => n + p.chats.length, 0),
+      archived_count: Array.isArray(r.archived_list) ? r.archived_list.length : null,   // null = extension older than 0.9.22
       ...r,
       ordinary_reported_total: reported,
       ordinary_matches_reported_total: reported === null ? null : reported === r.ordinary_list.length,

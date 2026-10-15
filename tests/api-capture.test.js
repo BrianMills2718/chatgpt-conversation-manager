@@ -535,3 +535,16 @@ test('listProjectChats never asks the sidebar for more than 20 chats per project
   assert.match(urls[0], /conversations_per_gizmo=20$/);
   assert.match(urls[1], /conversations_per_gizmo=5$/);
 });
+
+test('listAllConversations with archived: true asks for the archived-chats list', async () => {
+  const urls = [];
+  const fetchImpl = async (url) => {
+    urls.push(String(url));
+    return { ok: true, json: async () => ({ items: [{ id: 'old-archived' }], total: 1, offset: 0, limit: 50 }) };
+  };
+  const results = await listAllConversations({ fetchImpl, accessToken: null, archived: true });
+  assert.deepEqual(results.map((c) => c.id), ['old-archived']);
+  assert.ok(urls.every((u) => u.includes('is_archived=true')));
+  await listAllConversations({ fetchImpl, accessToken: null });
+  assert.ok(!urls.at(-1).includes('is_archived'));
+});
